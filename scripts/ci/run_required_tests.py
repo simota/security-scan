@@ -24,6 +24,9 @@ REQUIRED_TESTS = frozenset({
     "test_evidence_reports.EvidenceReportTests.test_browser_integrity_provenance_both_languages_mobile",
     "test_evidence_reports.EvidencePDFTests.test_english_integrity_pdf",
     "test_evidence_reports.EvidencePDFTests.test_japanese_integrity_pdf",
+    "test_three_pass_reports.ThreePassReportTests.test_browser_three_pass_summary_both_languages_mobile",
+    "test_three_pass_reports.ThreePassPDFTests.test_english_three_pass_pdf",
+    "test_three_pass_reports.ThreePassPDFTests.test_japanese_three_pass_pdf",
 })
 
 
