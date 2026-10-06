@@ -1,0 +1,108 @@
+{
+  "meta": {
+    "project": "注文管理アプリ（架空のサンプル）",
+    "date": "2026-10-06",
+    "assessor": "security-scan / デモ用データ",
+    "scope": "src/api/ の注文・レポート API と依存関係の記録",
+    "method": "静的なソースレビュー。実環境への通信・攻撃は実施していません。",
+    "commit": "demo-revision (架空)"
+  },
+  "findings": [
+    {
+      "id": "F-001",
+      "title": "注文詳細 API に所有者の確認がない",
+      "severity": "High",
+      "confidence": "Confirmed",
+      "category": "利用者・テナント境界",
+      "location": "src/api/orders.py:42",
+      "actor": "ログイン済みの顧客",
+      "request": "GET /orders/{id}",
+      "impact": "別の顧客の注文内容を閲覧できる可能性があります。",
+      "fix": "注文の取得条件にログイン中のアカウント ID を含めます。自分の注文は取得でき、他人の注文は取得できないことを回帰テストで確認します。",
+      "validation": {
+        "verdict": "Valid",
+        "evidence": "この架空例では、ルートは顧客ロールに公開されています。ハンドラーは主キーだけで注文を取得し、所有者による絞り込みがありません。応答には注文詳細が含まれます。",
+        "method": "review"
+      }
+    },
+    {
+      "id": "D-001",
+      "title": "HTTP クライアントの報告された脆弱性が適用されるか未確認",
+      "severity": "High",
+      "confidence": "Environment-dependent",
+      "category": "依存関係",
+      "location": "package-lock.json:18",
+      "actor": "適用条件の確認が必要",
+      "impact": "影響を受ける機能が外部入力で呼び出される場合にリスクが生じます。実際の利用経路は未確認です。",
+      "fix": "まず対象機能の呼び出し経路とデプロイ済みバージョンを確認します。該当する場合は修正版への更新と互換性テストを計画します。",
+      "validation": { "verdict": "Unverified", "evidence": "デモ用の架空アドバイザリです。依存一覧の記載だけでは適用の有無を判断できません。", "method": "auto" },
+      "previous_validation": { "verdict": "NotApplicable", "evidence": "過去の構成では対象機能を使用していませんでした。今回のコードでは再確認が必要です。", "method": "review" }
+    },
+    {
+      "id": "F-002",
+      "title": "一覧 API の取得件数に上限がない",
+      "severity": "Medium",
+      "confidence": "Confirmed",
+      "category": "可用性",
+      "location": "src/api/pagination.py:7",
+      "actor": "ログイン済みの利用者",
+      "request": "GET /orders の per_page パラメーター",
+      "impact": "大きな取得件数によって応答サイズやデータベース負荷が増えるおそれがあります。上流の制限は未確認です。",
+      "fix": "上流の制限を確認し、API 層でも取得件数の上限と既定値を設定します。上限を超える入力と不正な値のテストを追加します。",
+      "validation": { "verdict": "Likely", "evidence": "アプリ内では上限が見当たりません。ゲートウェイによる制限の有無を確認してください。", "method": "review" }
+    },
+    {
+      "id": "F-003",
+      "title": "デプロイ設定のデバッグ出力",
+      "severity": "Low",
+      "confidence": "Environment-dependent",
+      "category": "設定・デプロイ",
+      "location": "deploy/php.ini:9",
+      "status": "Fixed",
+      "fix": "設定上のデバッグ出力は無効化済みです。デプロイ先で有効になったことは別途確認してください。",
+      "validation": { "verdict": "Unverified", "evidence": "修正済みという対応状況のみ記録されています。実環境への反映は未検証です。", "method": "review" }
+    },
+    {
+      "id": "F-004",
+      "title": "レポート検索の SQL 断片（誤検知）",
+      "severity": "High",
+      "confidence": "Suspected",
+      "category": "入力処理",
+      "location": "src/api/reports.py:88",
+      "validation": { "verdict": "FalsePositive", "evidence": "SQL 断片は固定の列名リストだけから構築されます。リクエスト値が断片に入る経路はありません。", "method": "review" }
+    },
+    {
+      "id": "F-005",
+      "title": "内部用の診断ヘッダーが応答に含まれる",
+      "severity": "Low",
+      "confidence": "Confirmed",
+      "category": "情報公開",
+      "location": "src/api/middleware.py:23",
+      "status": "Accepted",
+      "impact": "内部のビルド識別子が表示されます。",
+      "validation": { "verdict": "Valid", "evidence": "架空の開発環境内に限定して残す判断が記録されています。本番利用時は再判断が必要です。", "method": "review" }
+    },
+    {
+      "id": "F-006",
+      "title": "監査ログの保存期間が記録されていない",
+      "severity": "Info",
+      "confidence": "Suspected",
+      "category": "プライバシー",
+      "location": "docs/logging.md:12",
+      "fix": "保存先・保存期間・削除手順の担当者を確認し、運用文書に記録してください。",
+      "validation": { "verdict": "Unverified", "evidence": "対象文書には保存期間がありません。実際のログ基盤の設定は未確認です。", "method": "review" }
+    }
+  ],
+  "perspectives": [
+    { "name": "利用者・テナント境界", "result": "High 1 件", "note": "注文詳細の所有者確認をレビュー" },
+    { "name": "入力処理", "result": "疑い 1 件を誤検知として除外", "note": "固定の許可リストと値の流れを確認" },
+    { "name": "依存関係", "result": "適用条件の検証が必要", "note": "ライブラリの実際の呼び出し経路は未確認" },
+    { "name": "可用性", "result": "Medium 1 件", "note": "上流の流量・件数制限は未確認" },
+    { "name": "ファイル処理", "result": "対象外", "note": "レビュー対象にはファイルアップロード機能がありません" },
+    { "name": "プライバシー", "result": "未確認の範囲あり", "note": "ログ基盤の設定は今回の診断対象外" }
+  ],
+  "checked_ok": ["レビューした検索クエリはパラメーターをバインドしています。"],
+  "decisions": ["スタッフが他の担当者のアーカイブ済み注文を閲覧できるべきか、仕様を確定してください。"],
+  "limitations": ["このファイルのアプリ・指摘・根拠はすべて架空です。実際のリポジトリを診断した結果ではありません。", "デプロイ済みの設定、実行環境、ゲートウェイ、監査ログ基盤は確認していません。", "外部の脆弱性データベースへの問い合わせは実施していません。依存関係の網羅性は保証しません。"],
+  "next_steps": ["F-001 の所有者確認を修正し、アクセス境界の回帰テストを追加します。", "D-001 と F-002 の適用条件を確認し、現在の判定と根拠を更新します。", "F-003 の修正が対象環境に反映されたかを確認します。"]
+}
