@@ -178,3 +178,28 @@ fetch a repository, execute recorded commands or run a deployed-system scan.
 Even a matching runtime artifact cannot authenticate its logged events, original
 conditions or claimed application revision. Existing generated-bundle code and
 input-hash checks continue independently of these evidence-file checks.
+
+## Three-pass assurance regressions
+
+`make benchmark` runs a deterministic, standard-library-only matrix from
+`tests/fixtures/three_pass_cases.json`. To save exact expected/actual outcomes:
+
+```sh
+python3 scripts/ci/benchmark_three_pass.py --json > /tmp/three-pass-benchmark.json
+```
+
+The cases exercise the real workflow controller with invented observations:
+supported findings, evidence-backed exclusions, benign scope cells, dropped
+candidates, unreviewed scope, incomplete challenges, dissent and stale evidence.
+A mismatch returns `1`; malformed benchmark input returns `2`. The unit suite
+also runs this matrix, so regressions fail `make check` and the existing CI jobs.
+TP/FP/TN/FN labels describe fixture intentions; these are assurance-gate tests,
+not a detector benchmark, measured real-world accuracy, or reviewer evaluation.
+No AI provider, recorded command or target application is executed.
+
+The zero-skip report runner additionally requires the three-pass mobile browser
+check and English/Japanese PDF checks. They verify aggregate state, all three
+pass counts, gaps, claim labels, scope-countercheck reasons and evidence, and
+redaction of hostile/secret-like fixture text. Missing workflows cannot reuse an
+older finding's readiness, and negative-scope gaps remain visible even if an
+individual finding is ready for a fix.
