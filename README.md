@@ -34,17 +34,22 @@ RECON ─► CHECKLIST ─► REVIEW ─► VERIFY ─► REPORT
   `composer audit` and `npm audit`, and lists every audit it could not run
 - **Validation** — every finding gets a verdict (`Valid`, `Likely`,
   `Unverified`, `Unlikely`, `FalsePositive`, `NotApplicable`) with evidence.
-  Dependency advisories are auto-triaged (runtime vs dev-only, direct vs
-  transitive, referenced in source or not) and then confirmed per package.
-  False positives stay in the record but drop out of the counts
-- **Fix verification** *(on request)* — turn a confirmed finding into a local
-  regression test that fails on the vulnerable code and passes once the fix
-  lands, kept in the repo's own suite so the hole cannot reopen. Local, owned
-  code only; asserts the secure outcome, never a working exploit
+  New structured records link four claims (reachability, preconditions, defenses
+  and impact) to revision-pinned evidence, falsification checks and independent
+  reviewer records. Static support, isolated runtime reproduction and unknown
+  environment conditions remain distinct. Legacy verdicts are preserved but
+  without structured evidence cannot become fix-ready. Dependency advisories
+  remain auto-triaged and then reviewed per package; exclusions stay visible
+- **Fix verification** *(on explicit request)* — record the same local case
+  failing a secure assertion for the right reason before the fix, passing after,
+  and passing positive-control and regression cases. Recorded `Fixed` remains
+  separate from evidenced retest completion. Owned local or throwaway code only;
+  synthetic fixtures and inert inputs, never a working exploit
   (`reference/fix-verification.md`)
 - **Verify** — every High and Medium finding is re-read end to end before it is
   reported; each carries severity and confidence separately
-- **Report** — one `findings.json` renders every output, so they never disagree
+- **Report** — one `findings.json` supplies the dashboard and assessment, with
+  a shared verification model and explicit evidence limitations
 
 Ask for "what should we check" and it stops after the checklist. Ask it to
 check or audit and it runs all phases.
@@ -72,14 +77,16 @@ python3 skills/security-scan/scripts/render.py findings.json --out ./report --la
 | `assessment.html` | The assessment document, print-styled for A4 |
 | `assessment.pdf` | Decision-ready first page, fix/validate queue, scope and limits, linked finding register, full evidence, excluded records and page numbers |
 
-Both outputs distinguish potential severity, confidence and validation. An open
-finding is ready to plan a fix only when its verdict is `Valid` and its confidence
-is `Confirmed`; all other open findings call for validation first. The queue
-sorts by severity, then readiness to fix, then ID. No risk score or deadline is
-invented. `Fixed` and `Accepted` describe recorded status, not an independent
-verification of remediation.
+Both outputs distinguish potential severity, confidence, recorded validation
+and evidence-derived verification. An open finding is ready to plan a fix only
+when it is `Valid`, `Confirmed` and has sufficient structured verification;
+legacy records or incomplete evidence call for validation first. The queue sorts
+by severity, then readiness to fix, then ID. No risk score or deadline is invented.
+`Fixed` and `Accepted` describe recorded status; the separately derived retest
+state shows whether the required before/after and control records exist.
 
-Unverified and excluded counts are explicit. Headline totals include `Open`,
+Unverified, insufficient-verification and excluded counts are explicit. Headline
+totals include `Open`,
 `Fixed` and `Accepted`, excluding `FalsePositive` and `NotApplicable`; the
 validation distribution includes all records for traceability. Filters affect
 only the finding register, with a visible result count and a reset button.
@@ -114,8 +121,49 @@ nonblank strings; malformed types are rejected before output, rather than
 coerced into text or allowed to cause a traceback. Optional text can be omitted
 or empty. See the schema for object/list fields and the absent source-URL case.
 
-The format is documented in
-`skills/security-scan/reference/findings-schema.md`.
+### Structured verification records
+
+New evidence-backed assessments use `schema_version: 2`, a pinned `assessment`,
+a shared `evidence` registry, optional `test_runs`, and per-finding `verification`
+and `remediation` records. Only explicit version `2` opts into the new rules.
+Versionless and version-1 files keep their recorded verdicts, exclusions and
+arbitrary old extension fields, including fields named `verification`, `evidence`
+or `remediation`; these are not interpreted as structured proof. Their findings
+remain legacy/insufficient. Findings without structured verification also remain
+legacy inside version-2 files. No old field silently grants fix-ready or
+runtime-confirmed status.
+
+The verifier rejects broken evidence/run references, inconsistent revision pins
+and unsupported definitive claims. It derives the verification basis and retest
+state; a supplied label cannot certify itself. Missing independent High review,
+unknown environment conditions and unresolved evidence remain visible. A skipped,
+blocked, unsupported or errored run never counts as a pass. An incomplete listed
+current-version run can leave static support intact, but prevents a runtime or
+verified-retest label even if another run reproduced the issue. A listed
+real-boundary security test already passing its secure assertion contradicts
+`Valid`; a legitimate failing security assertion contradicts `FalsePositive` or
+`NotApplicable`. Either keeps verification incomplete. `Unverified`, `Likely`
+and `Unlikely` also stay incomplete even with complete evidence fields; recorded
+verdicts are never automatically upgraded. A verified retest requires
+runtime-supported original reproduction.
+
+This is a record-and-report MVP. It does not add scanners, execute stored
+commands, retrieve evidence files, verify their hashes, use credentials or extend
+runtime authorization. Hashes identify declared artifacts; structural validation
+is not proof that the evidence is true or that all paths were examined. Runtime
+work still requires explicit permission for owned local or throwaway code. Broader
+asset/coverage inventories and automated application-test execution are outside
+this format's implemented scope.
+
+The format and exact rules are documented in
+`skills/security-scan/reference/findings-schema.md`. The explicitly synthetic
+`examples/findings.verification.sample.json` demonstrates the version-2 records;
+its invented commits, evidence and run outcomes are not real assessment results.
+Render it with:
+
+```sh
+python3 skills/security-scan/scripts/render.py examples/findings.verification.sample.json --out /tmp/security-scan-verification-demo --no-pdf
+```
 
 Dependency and supply-chain scan:
 
@@ -199,7 +247,9 @@ skills/security-scan/
   reference/findings-schema.md findings.json and the render command
   scripts/deps_scan.py         dependency inventory, supply-chain checks, audits (stdlib only)
   scripts/render.py            findings.json -> dashboard / assessment PDF (stdlib only)
-examples/findings.sample.json  fictional sample for make demo / make check
+  scripts/verification.py      evidence consistency and derived verification/retest states
+examples/findings.sample.json  fictional legacy sample for make demo / make check
+examples/findings.verification.sample.json  synthetic structured-verification example
 ```
 
 ## Development

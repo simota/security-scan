@@ -22,6 +22,7 @@ from collections import Counter
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote, urlsplit
 from url_redaction import redact_urls
+from verification import CLAIMS, derive_verification, validate_verification
 
 SEVERITIES = ["High", "Medium", "Low", "Info"]
 CONFIDENCES = ["Confirmed", "Environment-dependent", "Suspected"]
@@ -110,7 +111,7 @@ LABELS['en'].update({'eyebrow': 'SECURITY REVIEW',
                   'before changing code.',
  'fix_now': 'Plan the fix',
  'verify_first': 'Validate first',
- 'fix_now_note': 'Valid finding with confirmed confidence. Use the recorded fix direction and verify '
+ 'fix_now_note': 'Valid, Confirmed finding with sufficient structured verification. Use the recorded fix direction and verify '
                  'the secure outcome.',
  'verify_first_note': 'Confirm reachability, preconditions and impact; record evidence before deciding '
                       'on a fix.',
@@ -122,7 +123,7 @@ LABELS['en'].update({'eyebrow': 'SECURITY REVIEW',
  'excluded_short': 'Excluded',
  'open_count': 'Open findings',
  'needs_validation': 'Open, needs validation',
- 'closed_count': 'Fixed / accepted',
+ 'closed_count': 'Fix recorded / accepted',
  'unverified_line': '{n} included findings are Unverified, including {high} High.',
  'counts_note': 'Report-wide totals include Open, Fixed and Accepted. Excluded findings do not '
                 'contribute to these totals.',
@@ -162,7 +163,7 @@ LABELS['en'].update({'eyebrow': 'SECURITY REVIEW',
  'source_note': 'Source excerpts are best-effort redacted. Inspect this report before sharing.',
  'no_script': 'Enable JavaScript to use the interactive dashboard, or open the assessment for the '
               'complete report.',
- 'status_summary': '{open} open · {fixed} fixed · {accepted} accepted · {excluded} excluded',
+ 'status_summary': '{open} open · {fixed} fixes recorded · {accepted} accepted · {excluded} excluded',
  'risk_summary': '{n} open High / Medium findings need attention.',
  'jump_findings': 'Jump to findings',
  'findings_register': 'Findings register',
@@ -175,7 +176,7 @@ LABELS['ja'].update({'eyebrow': 'SECURITY REVIEW',
  'priority_note': '未対応の指摘を重大度順、同じ重大度では修正判断の準備ができた順に表示します。適用条件を確認してから修正してください。',
  'fix_now': '修正を計画',
  'verify_first': 'まず妥当性を確認',
- 'fix_now_note': '妥当性は Valid、確度は Confirmed です。記録された対応方針を基に修正し、安全な結果を確認してください。',
+ 'fix_now_note': 'Valid・Confirmed に加え、構造化された検証根拠がそろっています。記録された対応方針を基に修正し、安全な結果を確認してください。',
  'verify_first_note': '到達経路・成立条件・影響を確認し、根拠を記録してから修正要否を判断してください。',
  'missing_fix': '対応方針が未記録です。根拠を確認し、修正内容を具体化してください。',
  'no_open': '未対応の指摘は記録されていません。システムの安全性を保証するものではありません。',
@@ -184,7 +185,7 @@ LABELS['ja'].update({'eyebrow': 'SECURITY REVIEW',
  'excluded_short': '除外',
  'open_count': '未対応の指摘',
  'needs_validation': '未対応・要検証',
- 'closed_count': '修正済み / 受容済み',
+ 'closed_count': '修正の申告 / 受容',
  'unverified_line': '集計対象のうち {n} 件は未検証（Unverified）です。このうち High は {high} 件です。',
  'counts_note': '全体集計には Open・Fixed・Accepted を含みます。除外した指摘は含みません。',
  'count_basis': '重大度は想定される影響、確度は確かさ、妥当性はこの対象に指摘が成立するかを表します。',
@@ -218,11 +219,100 @@ LABELS['ja'].update({'eyebrow': 'SECURITY REVIEW',
  'missing_evidence': '妥当性の根拠が記録されていません。',
  'source_note': 'ソース抜粋の伏せ字は完全ではありません。共有前に内容を確認してください。',
  'no_script': '対話型ダッシュボードには JavaScript が必要です。診断書ではすべての記録を確認できます。',
- 'status_summary': '未対応 {open} · 修正済み {fixed} · 受容済み {accepted} · 除外 {excluded}',
+ 'status_summary': '未対応 {open} · 修正の申告 {fixed} · 受容 {accepted} · 除外 {excluded}',
  'risk_summary': '未対応の High / Medium が {n} 件あります。',
  'jump_findings': '指摘一覧へ移動',
  'findings_register': '指摘一覧',
  'all_verdicts': 'すべての妥当性'})
+
+
+VERIFICATION_LABELS = {
+    "en": {
+        "v_title": "Verification record", "v_retest": "Remediation verification",
+        "v_summary": "Recorded evidence: {static} static-supported, {runtime} locally reproduced, {pending} requiring further verification. {retested} fixes have complete retest records.",
+        "v_note": "These labels check the supplied evidence record, not its truth. Local results do not establish deployed behavior. Counts exclude ruled-out findings.",
+        "v_legacy": "Detailed verification evidence not recorded (legacy)",
+        "v_incomplete": "Verification incomplete", "v_static_supported": "Supported by static evidence",
+        "v_runtime_supported": "Reproduced in an isolated local environment",
+        "v_environment_unverified": "Environment conditions unverified",
+        "v_not_requested": "Retest not recorded", "v_fix_claimed": "Fix recorded; retest unverified",
+        "v_verified": "Complete before/after and control retest records", "v_retest_incomplete": "Retest incomplete",
+        "v_scope": "Evidence scope", "v_claims": "Claims and source trace", "v_falsification": "Checks for counterevidence",
+        "v_reviews": "Independent review", "v_environment": "Environment conditions", "v_runs": "Local test records",
+        "v_evidence": "Referenced evidence", "v_reachability": "Reachability", "v_preconditions": "Preconditions",
+        "v_defenses": "Compensating defenses", "v_impact": "Impact", "v_refs": "Evidence IDs",
+        "v_repository": "Repository", "v_commit": "Commit", "v_worktree": "Worktree", "v_case": "Case",
+        "v_expected": "Expected", "v_observed": "Observed", "v_command": "Recorded command (not executed by this report)",
+        "v_context": "Context", "v_time": "Recorded at", "v_exit": "Exit code", "v_failure": "Failure kind",
+        "v_withheld": "Evidence text withheld for sensitive material; inspect the authorized original.",
+        "v_reason": "Reason", "v_hash": "Artifact SHA-256", "v_location": "Evidence location",
+        "v_author": "Original reviewer", "v_exclusion": "Exclusion basis", "v_remediation": "Retest target",
+        "v_resolution": "Resolution of disagreement", "v_legacy_note": "Historical verification note (not structured evidence)",
+        "v_environment_verified": "Environment conditions recorded as verified",
+        "v_supported": "Supported", "v_contradicted": "Contradicted", "v_unknown": "Unknown",
+        "v_clear": "Countercheck clear", "v_contradiction": "Counterevidence found", "v_unresolved": "Unresolved",
+        "v_agree": "Evidence reviewed", "v_disagree": "Disagreement", "v_not_required": "Not required for this scoped claim",
+        "v_pass": "Pass", "v_fail": "Fail", "v_skip": "Skipped", "v_not_run": "Not run", "v_blocked": "Blocked",
+        "v_unsupported": "Unsupported", "v_error": "Error", "v_security": "Security assertion",
+        "v_positive_control": "Positive control", "v_regression": "Regression", "v_missing": "Not recorded",
+    },
+    "ja": {
+        "v_title": "検証記録", "v_retest": "修正の再検査",
+        "v_summary": "検証根拠：静的根拠で成立 {static} 件、ローカル再現 {runtime} 件、追加検証が必要 {pending} 件。修正前後と対照条件の再検査記録がそろった指摘は {retested} 件です。",
+        "v_note": "表示は提出された記録の整合性を確認したものです。証拠の真実性や本番環境での成立を保証しません。件数は除外した指摘を含みません。",
+        "v_legacy": "詳細な検証根拠なし（従来形式）", "v_incomplete": "検証未完了",
+        "v_static_supported": "静的根拠で成立", "v_runtime_supported": "隔離されたローカル環境で再現",
+        "v_environment_unverified": "環境条件が未確認", "v_not_requested": "再検査記録なし",
+        "v_fix_claimed": "修正の申告あり・再検査は未確認", "v_verified": "修正前後・対照条件の再検査記録あり",
+        "v_retest_incomplete": "再検査未完了", "v_scope": "根拠の対象範囲", "v_claims": "成立条件とソースの追跡",
+        "v_falsification": "指摘を否定する根拠の確認", "v_reviews": "別の確認者による再読", "v_environment": "環境条件",
+        "v_runs": "ローカルテストの記録", "v_evidence": "参照した根拠", "v_reachability": "到達可能性",
+        "v_preconditions": "成立の前提", "v_defenses": "ほかの層の防御策", "v_impact": "影響",
+        "v_refs": "根拠ID", "v_repository": "リポジトリ", "v_commit": "コミット", "v_worktree": "作業ツリー",
+        "v_case": "ケース", "v_expected": "期待結果", "v_observed": "観測結果", "v_command": "記録されたコマンド（帳票では実行しません）",
+        "v_context": "実行条件", "v_time": "記録日時", "v_exit": "終了コード", "v_failure": "失敗の種類",
+        "v_withheld": "機微な内容のため根拠本文を表示しません。許可された原本を確認してください。",
+        "v_reason": "理由", "v_hash": "根拠ファイルのSHA-256", "v_location": "根拠の場所",
+        "v_author": "最初の確認者", "v_exclusion": "除外の根拠", "v_remediation": "再検査の対象",
+        "v_resolution": "見解の相違を解決した根拠", "v_legacy_note": "以前の検証メモ（構造化された根拠ではありません）",
+        "v_environment_verified": "環境条件の確認記録あり",
+        "v_supported": "成立を支持", "v_contradicted": "反証あり", "v_unknown": "不明",
+        "v_clear": "反証なしと記録", "v_contradiction": "反証を発見", "v_unresolved": "未解決",
+        "v_agree": "根拠を再読", "v_disagree": "見解が不一致", "v_not_required": "この主張の範囲では不要",
+        "v_pass": "成功", "v_fail": "失敗", "v_skip": "省略", "v_not_run": "未実施", "v_blocked": "実施不可",
+        "v_unsupported": "非対応", "v_error": "エラー", "v_security": "安全条件の検査",
+        "v_positive_control": "正常系の対照検査", "v_regression": "回帰検査", "v_missing": "未記録",
+    },
+}
+for _lang, _labels in VERIFICATION_LABELS.items():
+    LABELS[_lang].update(_labels)
+
+_GAP_LABELS = {
+    "legacy_details_missing": ("Detailed verification evidence was not recorded.", "詳細な検証根拠が記録されていません。"),
+    "verdict_unresolved": ("The finding verdict has not been settled.", "指摘の妥当性判定がまだ確定していません。"),
+    "claims_incomplete": ("One or more required claims lack support.", "必要な成立条件の根拠が不足しています。"),
+    "falsification_incomplete": ("Counterevidence checks are incomplete or unresolved.", "反証の確認が未完了、または未解決です。"),
+    "review_missing": ("An independent evidence review is missing.", "別の確認者による根拠の再読がありません。"),
+    "review_disagreement": ("Reviewer disagreement remains unresolved.", "確認者間の見解の相違が未解決です。"),
+    "environment_unknown": ("Required environment conditions have not been verified.", "必要な環境条件が未確認です。"),
+    "runtime_incomplete": ("A runtime attempt is incomplete; it is not reproduction evidence.", "実行検証は未完了で、再現の根拠にはなりません。"),
+    "runtime_contradiction": ("A completed security test contradicts the claimed violation; reconcile the evidence.", "実行済みの安全条件テストが指摘の成立と矛盾しています。根拠を再確認してください。"),
+    "runtime_boundary_unverified": ("The security boundary was not verified through the real implementation.", "検証対象の実装を通した境界確認ができていません。"),
+    "retest_missing": ("The recorded fix has no complete retest record.", "修正の申告に対応する再検査記録がありません。"),
+    "retest_before_unverified": ("The vulnerable version lacks a qualifying assertion failure.", "修正前の版で安全条件が失敗した根拠が不足しています。"),
+    "retest_after_unverified": ("The fixed version lacks a successful security retest.", "修正後の版で安全条件を再検査した成功記録がありません。"),
+    "retest_case_mismatch": ("Before and after runs do not test the same case.", "修正前後で検査ケースが一致していません。"),
+    "retest_context_mismatch": ("Before and after execution conditions do not match.", "修正前後の実行条件が一致していません。"),
+    "retest_version_mismatch": ("A retest does not match its intended source version.", "再検査の対象版が指定された版と一致していません。"),
+    "retest_control_missing": ("Positive-control evidence is missing.", "正常系の対照検査がありません。"),
+    "retest_control_failed": ("A positive control did not pass under the required conditions.", "正常系の対照検査が必要な条件で成功していません。"),
+    "retest_regression_missing": ("Regression evidence is missing.", "回帰検査の根拠がありません。"),
+    "retest_regression_failed": ("A regression test did not pass under the required conditions.", "回帰検査が必要な条件で成功していません。"),
+    "retest_verification_incomplete": ("The original finding lacks sufficient verification.", "元の指摘を確かめる検証根拠が不足しています。"),
+}
+for _code, (_en, _ja) in _GAP_LABELS.items():
+    LABELS["en"]["v_gap_" + _code] = _en
+    LABELS["ja"]["v_gap_" + _code] = _ja
 
 
 class SchemaError(Exception):
@@ -393,6 +483,7 @@ def load(path):
         for k in ("result", "note"):
             text_field(perspective, k, where)
     data["perspectives"] = lens
+    validate_verification(data, SchemaError)
     rank = {s: i for i, s in enumerate(SEVERITIES)}
     # code findings before dependency advisories (D-*) at the same severity
     findings.sort(key=lambda f: (rank[f["severity"]], str(f["id"]).startswith("D-"), f["id"]))
@@ -421,16 +512,34 @@ def finding_anchor(data, finding):
     return "finding-" + str(next(i for i, f in enumerate(data["findings"], 1) if f is finding))
 
 
-def action_kind(finding):
+def action_kind(finding, verification=None):
     # A severity alone is not evidence that a finding applies to this project.
+    # Derived state must come from the complete record, never an input flag.
     return ("fix_now" if finding["status"] == "Open" and finding["verdict"] == "Valid"
-            and finding["confidence"] == "Confirmed" else "verify_first")
+            and finding["confidence"] == "Confirmed"
+            and (verification or {}).get("level") in ("static_supported", "runtime_supported")
+            else "verify_first")
+
+
+def public_verification_state(state):
+    """Private trace IDs are rendered through the redacted view, not serialized raw."""
+    return {key: state[key] for key in ("level", "retest", "gaps")}
+
+
+def display_finding(finding, state):
+    """Only curated verification details enter the report's embedded payload."""
+    public = {key: value for key, value in finding.items()
+              if key not in ("verification", "remediation", "_verification")}
+    public["_verification"] = public_verification_state(state)
+    return public
 
 
 def report_model(data):
     """One report-wide action model shared by both outputs; never mutates verdicts."""
     fs = active(data)
-    queue = [{"finding": f, "action": action_kind(f), "anchor": finding_anchor(data, f)}
+    verification = derive_verification(data, SchemaError)
+    queue = [{"finding": display_finding(f, verification[f["id"]]),
+              "action": action_kind(f, verification[f["id"]]), "anchor": finding_anchor(data, f)}
              for f in fs if f["status"] == "Open"]
     queue.sort(key=lambda item: (SEVERITIES.index(item["finding"]["severity"]),
                                 item["action"] != "fix_now", str(item["finding"]["id"])))
@@ -443,6 +552,14 @@ def report_model(data):
         "excluded": len(data["findings"]) - len(fs),
         "unverified": sum(f["verdict"] == "Unverified" for f in fs),
         "unverified_high": sum(f["verdict"] == "Unverified" and f["severity"] == "High" for f in fs),
+        "verification": {key: public_verification_state(state) for key, state in verification.items()},
+        "verification_counts": {
+            "static": sum(verification[f["id"]]["level"] == "static_supported" for f in fs),
+            "runtime": sum(verification[f["id"]]["level"] == "runtime_supported" for f in fs),
+            "pending": sum(verification[f["id"]]["level"] not in
+                           ("static_supported", "runtime_supported") for f in fs),
+            "retested": sum(verification[f["id"]]["retest"] == "verified" for f in fs),
+        },
         "queue": queue,
     }
 
@@ -464,7 +581,7 @@ ASSESSMENT_LABELS = {
         "a_limits": "Assessment limits",
         "a_limits_empty": "No limitations were recorded. Coverage completeness has not been established.",
         "a_queue": "Priority queue",
-        "a_queue_note": "Open, non-excluded findings only. Ordered by severity, then ready-to-fix findings before findings needing validation, then ID. Planning a fix requires both Valid and Confirmed; all other open findings require validation first.",
+        "a_queue_note": "Open, non-excluded findings only. Ordered by severity, then ready-to-fix findings before findings needing validation, then ID. Planning a fix requires Valid, Confirmed and sufficient structured verification; legacy or incomplete evidence requires validation first.",
         "a_queue_empty": "No open, non-excluded findings are recorded. Review the coverage and limitations before drawing conclusions.",
         "a_finding": "Finding",
         "a_next_action": "Next action",
@@ -500,7 +617,7 @@ ASSESSMENT_LABELS = {
         "a_limits": "診断の制約",
         "a_limits_empty": "制約事項の記載はありません。診断範囲の網羅性は確認されていません。",
         "a_queue": "優先対応一覧",
-        "a_queue_note": "未対応かつ除外されていない指摘のみを掲載しています。重大度、修正に進めるか検証が必要か、ID の順に並べています。修正に進む対象は Valid かつ Confirmed の指摘で、その他の未対応指摘は先に検証が必要です。",
+        "a_queue_note": "未対応かつ除外されていない指摘のみを掲載しています。重大度、修正に進めるか検証が必要か、ID の順に並べています。修正に進む対象は Valid・Confirmed に加え構造化された検証根拠がそろった指摘です。従来形式や根拠不足の指摘は先に検証が必要です。",
         "a_queue_empty": "未対応かつ除外されていない指摘は記録されていません。結論を出す前に、診断範囲と制約を確認してください。",
         "a_finding": "指摘事項",
         "a_next_action": "次の対応",
@@ -593,6 +710,7 @@ tr{break-inside:avoid;page-break-inside:avoid}
 .evidence-cell span{color:#566977}
 .finding{margin:6mm 0 0;padding:4mm 0 0;border-top:1px solid #bac6d1;break-inside:auto;page-break-inside:auto}
 .finding.compact{break-inside:avoid;page-break-inside:avoid}
+.verification-record{margin:3mm 0;padding:3mm;border:1px solid #d9dfe5;break-inside:auto;page-break-inside:auto}.verification-record h5{font-size:9pt;margin:3mm 0 1mm;break-after:avoid}.verification-record p{font-size:8.3pt;overflow-wrap:anywhere}.verification-level{font-weight:600}.verification-record section{break-inside:auto;page-break-inside:auto}
 .validation-method{break-before:avoid;page-break-before:avoid}
 .finding-header{break-inside:avoid;page-break-inside:avoid;break-after:avoid;page-break-after:avoid}
 .finding h3{font-size:13pt;margin:0 0 2.5mm}
@@ -726,10 +844,141 @@ def refs_html(f):
     return f"<ul class='refs'>{lis}</ul>"
 
 
+def verification_view(data, finding, state, lang):
+    """A curated, redacted view shared by HTML, dashboard and PDF."""
+    L = LABELS[lang]
+
+    def text(value):
+        value = str(value if value is not None else "")
+        return L["v_withheld"] if PRIVATE_KEY_RE.search(value) else redact(value)
+
+    def label(value):
+        return L.get("v_" + str(value), str(value))
+
+    def refs(record):
+        ids = record.get("evidence_ids", [])
+        return L["v_refs"] + ": " + ", ".join(text(i) for i in ids) if ids else ""
+
+    def join(*parts):
+        return "\n".join(str(part) for part in parts if part != "" and part is not None)
+
+    sections = []
+
+    def section(key, items):
+        if items:
+            sections.append({"title": L[key], "items": items})
+
+    raw_verification = finding.get("verification")
+    verification = raw_verification if isinstance(raw_verification, dict) and state["level"] != "legacy" else {}
+    if isinstance(raw_verification, str) and raw_verification:
+        section("v_legacy_note", [text(raw_verification)])
+    if verification:
+        assessment = data["assessment"]
+        section("v_scope", [join(*(L["v_" + key] + ": " + text(assessment.get(key))
+                                  for key in ("repository", "commit", "worktree")),
+                                 "diff_sha256: " + text(assessment["diff_sha256"])
+                                 if assessment.get("diff_sha256") else "")])
+        section("v_claims", [L["v_author"] + ": " + text(verification.get("reviewer"))] +
+                            [join(label(key) + ": " + label(record["status"]),
+                                  text(record.get("reason")), refs(record))
+                              for key in CLAIMS for record in (verification["claims"][key],)])
+        section("v_falsification", [join(text(record.get("check")), label(record.get("result")),
+                                         text(record.get("reason")), refs(record))
+                                    for record in verification.get("falsification", [])])
+        section("v_reviews", [join(text(record.get("reviewer")), label(record.get("conclusion")),
+                                    text(record.get("reason")), refs(record),
+                                    join(L["v_resolution"] + ": " + text(record["resolution"].get("reviewer")),
+                                         text(record["resolution"].get("reason")), refs(record["resolution"]))
+                                    if record.get("resolution") else "")
+                               for record in verification.get("reviews", [])])
+        environment = verification.get("environment") or {}
+        if environment:
+            section("v_environment", [join(L["v_environment_verified"] if environment.get("status") == "verified"
+                                            else label(environment.get("status")),
+                                            text(environment.get("reason")), refs(environment))])
+        if verification.get("exclusion"):
+            exclusion = verification["exclusion"]
+            section("v_exclusion", [join(text(exclusion["basis"]), text(exclusion["reason"]), refs(exclusion))])
+        if finding.get("remediation"):
+            remediation = finding["remediation"]
+            section("v_remediation", [join(L["v_commit"] + ": " + text(remediation["commit"]),
+                                           "diff_sha256: " + text(remediation["diff_sha256"])
+                                           if remediation.get("diff_sha256") else "",
+                                           *(key + ": " + text(remediation[key]) for key in ("before_run_id", "after_run_id")
+                                             if key in remediation))])
+    run_index = {record["id"]: record for record in data.get("test_runs", [])} if verification else {}
+    run_items = []
+    for run_id in state.get("run_ids", []):
+        run = run_index[run_id]
+        context = ", ".join(key + "=" + text(run.get("context", {}).get(key, ""))
+                            for key in ("environment", "configuration", "fixture", "test_version", "boundary"))
+        run_items.append(join(text(run_id) + " · " + label(run["role"]) + " · " + label(run["result"]),
+                              L["v_case"] + ": " + text(run["case_id"]),
+                              L["v_commit"] + ": " + text(run["commit"]),
+                              "diff_sha256: " + text(run["diff_sha256"]) if run.get("diff_sha256") else "",
+                              L["v_context"] + ": " + context,
+                              L["v_expected"] + ": " + text(run.get("expected")),
+                              L["v_observed"] + ": " + text(run.get("observed")),
+                              L["v_failure"] + ": " + text(run.get("failure_kind")),
+                              L["v_exit"] + ": " + text(run.get("exit_code")),
+                              L["v_time"] + ": " + text(run.get("recorded_at")),
+                              L["v_command"] + ": " + text(run.get("command")), refs(run)))
+    section("v_runs", run_items)
+    evidence_index = {record["id"]: record for record in data.get("evidence", [])} if verification else {}
+    evidence_items = []
+    for evidence_id in state.get("evidence_ids", []):
+        record = evidence_index[evidence_id]
+        normalized_location = record["location"].replace("\\", "/")
+        match = LOC_RE.match(normalized_location)
+        path = match.group("path") if match else normalized_location
+        withheld = sensitive_path(path) or finding.get("category", "").lower() == "secrets"
+        evidence_items.append(join(text(evidence_id) + " · " + text(record["kind"]),
+                                   L["v_location"] + ": " + text(record["location"]),
+                                   L["v_commit"] + ": " + text(record["commit"]),
+                                   "diff_sha256: " + text(record["diff_sha256"]) if record.get("diff_sha256") else "",
+                                   L["v_hash"] + ": " + text(record["sha256"]),
+                                   L["v_withheld"] if withheld else text(record.get("summary"))))
+    section("v_evidence", evidence_items)
+    return {
+        "level": label(state["level"]),
+        "retest": L["v_retest_incomplete"] if state["retest"] == "incomplete" else label(state["retest"]),
+        "gaps": [L.get("v_gap_" + code, code.replace("_", " ")) for code in state.get("gaps", [])],
+        "sections": sections,
+    }
+
+
+def verification_html(view, L):
+    gaps = ("<ul class='verification-gaps'>" + "".join(f"<li>{esc(gap)}</li>" for gap in view["gaps"]) + "</ul>"
+            if view["gaps"] else "")
+    sections = "".join(f"<section><h5>{esc(section['title'])}</h5>" +
+                       "".join(f"<p class='prose'>{esc(item)}</p>" for item in section["items"]) + "</section>"
+                       for section in view["sections"])
+    return (f"<div class='verification-record'><h4>{esc(L['v_title'])}</h4>"
+            f"<p class='verification-level'>{esc(view['level'])}</p>"
+            f"<p><strong>{esc(L['v_retest'])}:</strong> {esc(view['retest'])}</p>{gaps}{sections}</div>")
+
+
+def verification_summary_parts(model, L):
+    counts = model["verification_counts"]
+    return [{"key": part, "count": counts[part]} if part in counts else {"text": part}
+            for part in re.split(r"\{(static|runtime|pending|retested)\}", L["v_summary"])]
+
+
+def verification_summary_html(model, L):
+    parts = verification_summary_parts(model, L)
+    sentence = "".join(f"<strong data-verification-count='{part['key']}'>{part['count']}</strong>"
+                       if "count" in part else esc(part["text"]) for part in parts)
+    return (f"<div id='verification-summary'><p>{sentence}</p>"
+            f"<p class='small'>{esc(L['v_note'])}</p></div>")
+
+
 def render_assessment_html(data, L, lang):
     L = {**ASSESSMENT_LABELS.get(lang, ASSESSMENT_LABELS["en"]), **L}
     m, st, fs = data["meta"], stats(data), active(data)
     model = report_model(data)
+    verification_states = derive_verification(data, SchemaError)
+    verification_views = {f["id"]: verification_view(data, f, verification_states[f["id"]], lang)
+                          for f in data["findings"]}
     excluded = [f for f in data["findings"] if f["verdict"] in EXCLUDED]
     summary = L["a_summary"].format(**model)
     accounting = L["a_accounting"].format(total=len(fs), **model)
@@ -802,7 +1051,8 @@ def render_assessment_html(data, L, lang):
         f"<tr><td><a class='index-title' href='#{esc(finding_anchor(data, f))}'>{esc(f['title'])}</a>"
         f"<span class='index-id'>{esc(f['id'])}</span></td><td>{badge(f)}</td><td>{esc(f['status'])}</td>"
         f"<td class='evidence-cell'><div><span>{esc(L['confidence'])}:</span> {esc(f['confidence'])}</div>"
-        f"<div><span>{esc(L['verdict'])}:</span> {esc(f['verdict'])}</div></td></tr>" for f in fs)
+        f"<div><span>{esc(L['verdict'])}:</span> {esc(f['verdict'])}</div>"
+        f"<div>{esc(verification_views[f['id']]['level'])}</div></td></tr>" for f in fs)
     index_html = (f"<table class='index'><colgroup><col class='finding-col'><col class='severity-col'><col class='status-col'><col class='evidence-col'></colgroup>"
                   f"<thead><tr><th scope='col'>{esc(L['a_finding'])}</th><th scope='col'>{esc(L['severity'])}</th>"
                   f"<th scope='col'>{esc(L['status'])}</th><th scope='col'>{esc(L['a_evidence_state'])}</th></tr></thead>"
@@ -816,7 +1066,7 @@ def render_assessment_html(data, L, lang):
         state = f"<table class='finding-state'><thead><tr>{state_header}</tr></thead><tbody><tr>{state_values}</tr></tbody></table>"
         action = ""
         if f["status"] == "Open" and not is_excluded:
-            action = f"<p class='finding-context'><strong>{esc(L['a_next_action'])}:</strong> {esc(L['a_' + action_kind(f)])}</p>"
+            action = f"<p class='finding-context'><strong>{esc(L['a_next_action'])}:</strong> {esc(L['a_' + action_kind(f, model['verification'][f['id']])])}</p>"
         context = (f"<p class='finding-context'><strong>{esc(L['location'])}:</strong> <code>{esc(f['location'])}</code></p>"
                    f"<p class='finding-context'><strong>{esc(L['category'])}:</strong> {value(f.get('category'))}</p>")
         # Keep source statements in full. Long prose and source blocks may split
@@ -828,6 +1078,7 @@ def render_assessment_html(data, L, lang):
         if validation.get("method"):
             evidence += f"<p class='small validation-method'><strong>{esc(L['a_method'])}:</strong> {esc(validation['method'])}</p>"
         content += field("evidence", evidence)
+        content += verification_html(verification_views[f["id"]], L)
         for key in ("actor", "request"):
             if f.get(key):
                 content += field(key, prose(f[key]))
@@ -846,7 +1097,7 @@ def render_assessment_html(data, L, lang):
         record_length = sum(len(str(f.get(k) or "")) for k in
                             ("title", "location", "category", "actor", "request", "impact", "fix"))
         record_length += len(str(validation.get("evidence") or "")) + len(str(previous or ""))
-        compact = " compact" if not f.get("snippet") and record_length <= 700 else ""
+        compact = " compact" if not f.get("snippet") and not f.get("verification") and record_length <= 400 else ""
         return (f"<article class='finding sev-{esc(f['severity'])}{compact}' id='{esc(finding_anchor(data, f))}'>"
                 f"<div class='finding-header'><h3><span class='finding-id'>{esc(f['id'])}</span>{esc(f['title'])}</h3>"
                 f"{state}{action}{context}</div>{content}"
@@ -869,6 +1120,7 @@ def render_assessment_html(data, L, lang):
 <section class="summary-section" id="executive-summary"><h2>{esc(L['summary'])}</h2>
 <p class="lead">{esc(summary)}</p>{metrics_html}<p class="small">{esc(accounting)}</p>
 <p class="small">{esc(L['a_status_note'])}</p>
+{verification_summary_html(model, L)}
 <h3 class="limit-heading">{esc(L['a_limits'])}</h3><p class="small">{esc(L['a_uncertainty'])}</p>
 <div class="limits">{bullets(data.get('limitations', []), 'a_limits_empty')}</div></section>
 <section id="priority-queue"><h2>{esc(L['a_queue'])}</h2><p class="section-note">{esc(L['a_queue_note'])}</p>{queue_html}</section>
@@ -942,7 +1194,7 @@ DASHBOARD = r"""<!doctype html>
 :root{color-scheme:light;--bg:#f3f5f7;--panel:#fff;--text:#172333;--muted:#526376;--line:#dce3eb;--soft:#eaf0f6;--high:#ae2530;--medium:#945005;--low:#1b5daf;--info:#536378;--accent:#194f90;--tint:#edf4fc;--warn:#fff6e8;--warn-line:#e9c58e}
 @media(prefers-color-scheme:dark){:root:not([data-theme="light"]){color-scheme:dark;--bg:#111923;--panel:#192532;--text:#e8eef5;--muted:#acbacb;--line:#344456;--soft:#233445;--high:#ffaaa7;--medium:#f2c177;--low:#9dc6ff;--info:#b4c4d5;--accent:#a0c7ff;--tint:#20364c;--warn:#332b20;--warn-line:#76623e}}
 :root[data-theme="dark"]{color-scheme:dark;--bg:#111923;--panel:#192532;--text:#e8eef5;--muted:#acbacb;--line:#344456;--soft:#233445;--high:#ffaaa7;--medium:#f2c177;--low:#9dc6ff;--info:#b4c4d5;--accent:#a0c7ff;--tint:#20364c;--warn:#332b20;--warn-line:#76623e}
-*{box-sizing:border-box}[hidden]{display:none!important}html{scroll-behavior:smooth;scroll-padding-top:20px}body{margin:0;overflow-wrap:anywhere;background:var(--bg);color:var(--text);font:14px/1.65 system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif}main{max-width:1320px;margin:auto;padding:32px 28px 48px}a{color:var(--accent);text-underline-offset:3px}button,input,select{font:inherit}button,a,input,select,summary{-webkit-tap-highlight-color:transparent}:focus-visible{outline:3px solid var(--accent);outline-offset:3px}button{cursor:pointer}button,.button{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:8px 12px;text-decoration:none}button:hover,.button:hover{background:var(--soft)}.skip{position:absolute;left:20px;top:-100px}.skip:focus{top:8px;z-index:2}.masthead{display:flex;justify-content:space-between;align-items:center;gap:12px;border-bottom:1px solid var(--line);padding-bottom:18px;margin-bottom:26px}.brand{font-size:12px;font-weight:750;letter-spacing:.15em;color:var(--accent)}.tools{display:flex;gap:8px;flex-wrap:wrap}.hero{display:flex;justify-content:space-between;gap:24px;margin-bottom:20px}.hero h1{font-size:clamp(25px,3.5vw,38px);line-height:1.25;letter-spacing:-.04em;margin:3px 0 9px;overflow-wrap:anywhere}.eyebrow,.meta,.muted{color:var(--muted)}.eyebrow{font-size:13px}.meta{max-width:820px;overflow-wrap:anywhere}.hero-aside{align-self:flex-end;font-size:12px;text-align:right;max-width:280px}.summary-banner{padding:16px 20px;background:var(--tint);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;margin-bottom:16px}.summary-banner strong{display:block;font-size:18px}.summary-banner p{margin:5px 0 0}.cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:16px 0}.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px 20px;text-align:left}.card .n{font-size:32px;line-height:1.25;font-weight:750;letter-spacing:-.03em}.card .l{font-size:12px;color:var(--muted);display:block;margin-bottom:8px}.card .sub{font-size:12px;color:var(--muted);margin-top:6px}.card.urgent .n{color:var(--high)}.card.review .n{color:var(--medium)}.report-note{font-size:12px;color:var(--muted);margin:8px 0 22px}.section-head{display:flex;justify-content:space-between;gap:16px;align-items:baseline;margin:26px 0 12px}h2{font-size:19px;letter-spacing:-.02em;margin:0}h3{font-size:15px;margin:0 0 6px}.section-head p{margin:4px 0 0;color:var(--muted)}.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:20px}.priority-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,330px),1fr));gap:12px}.hero>div,.priority-item,.panel{min-width:0}.priority-item h3{overflow-wrap:anywhere}.priority-item{border-top:3px solid var(--line)}.priority-item.sev-High{border-top-color:var(--high)}.priority-item.sev-Medium{border-top-color:var(--medium)}.priority-top{display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:10px}.priority-item h3 a{text-decoration:none;color:var(--text)}.priority-item h3 a:hover{text-decoration:underline}.priority-item p{margin:8px 0;overflow-wrap:anywhere}.priority-item .action-label{font-size:12px;font-weight:700;color:var(--accent)}.priority-item .impact{color:var(--muted)}.priority-item .action{padding-top:10px;border-top:1px solid var(--line)}.priority-item .location{font-size:12px;color:var(--muted)}.badge{display:inline-block;border:1px solid currentColor;border-radius:5px;padding:1px 7px;font-size:11px;line-height:1.7;font-weight:750;white-space:nowrap}.High{color:var(--high)}.Medium{color:var(--medium)}.Low{color:var(--low)}.Info{color:var(--info)}.verdict{font-size:12px;color:var(--muted)}.section-note{font-size:12px;color:var(--muted);margin:10px 0}.coverage{margin:20px 0;background:var(--warn);border-color:var(--warn-line)}summary{cursor:pointer;font-weight:700}summary .small{font-weight:400;color:var(--muted);margin-left:10px}.coverage p{margin:10px 0}.scope-meta{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:5px 16px;margin:16px 0}.scope-meta dt{font-size:12px;color:var(--muted)}.scope-meta dd{margin:0;overflow-wrap:anywhere}.coverage-columns{display:grid;grid-template-columns:1fr 1fr;gap:24px}.coverage ul{margin:6px 0;padding-left:20px}.perspective{border-bottom:1px solid var(--warn-line);padding:9px 0}.perspective:last-child{border:0}.perspective strong{display:block}.perspective p{margin:3px 0;font-size:13px}.chart-section{margin:20px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:16px}.grid .panel{padding:16px}.grid h3{font-size:13px}.bar{display:grid;grid-template-columns:minmax(85px,46%) 1fr 26px;gap:8px;align-items:center;margin:7px 0;font-size:12px}.bar .t{overflow-wrap:anywhere}.bar .track{height:7px;background:var(--soft);border-radius:4px;overflow:hidden}.bar .fill{height:100%;background:var(--accent)}.bar .v{text-align:right;font-variant-numeric:tabular-nums}.filters{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.filters label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}.filters select,.filters input{width:100%;min-width:0;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:9px;font-size:13px}.filters .search{grid-column:span 2}.filter-bottom{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:14px}.result-count{font-size:12px;color:var(--muted);margin:0}.tablewrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;margin-top:12px}table{border-collapse:collapse;width:100%;table-layout:fixed}th,td{text-align:left;padding:12px;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}th{font-size:11px;color:var(--muted);font-weight:700;background:var(--soft)}th:nth-child(1){width:9%}th:nth-child(2){width:9%}th:nth-child(3){width:14%}th:nth-child(4){width:9%}th:nth-child(5){width:11%}th:nth-child(6){width:30%}th:nth-child(7){width:18%}tr.row{cursor:pointer}tr.row:hover{background:var(--tint)}.finding-toggle{border:0;border-radius:3px;padding:0;background:transparent;text-align:left;font-weight:650;color:var(--text);width:100%}.finding-toggle:hover{background:transparent;color:var(--accent)}.finding-toggle .toggle-label{font-size:11px;display:block;font-weight:400;color:var(--accent);margin-top:4px}.location{display:block;overflow-wrap:anywhere;margin-top:4px;font-size:11px;color:var(--muted)}tr.detail>td{background:var(--tint);padding:18px 24px}tr.detail dl{display:grid;grid-template-columns:150px minmax(0,1fr);gap:8px 18px;margin:12px 0}tr.detail dt{font-size:12px;color:var(--muted)}tr.detail dd{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}.detail-actions{display:flex;justify-content:space-between;gap:12px;align-items:center}.action-guidance{border-left:3px solid var(--accent);padding:8px 12px;background:var(--panel)}.action-guidance strong{display:block}.action-guidance p{margin:4px 0}.history{border:1px dashed var(--line);padding:12px;margin-top:16px}.history p{margin:5px 0;white-space:pre-wrap}.lists{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:12px;margin-top:24px}.lists h2{font-size:16px}.lists ul{margin:10px 0 0;padding-left:18px}.empty{color:var(--muted);padding:20px}.snippet{margin:0;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);overflow-x:auto;font:12px/1.6 ui-monospace,Menlo,monospace;white-space:pre}.snippet span{display:block}.snippet .hit{background:var(--warn)}.snippet b{color:var(--muted);font-weight:400}.refs{margin:0;padding-left:18px}.refs li{overflow-wrap:anywhere}.rt{display:inline-block;min-width:60px;color:var(--muted);font-size:12px}.footer{font-size:12px;color:var(--muted);border-top:1px solid var(--line);margin-top:32px;padding-top:16px}code{font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
+*{box-sizing:border-box}[hidden]{display:none!important}html{scroll-behavior:smooth;scroll-padding-top:20px}body{margin:0;overflow-wrap:anywhere;background:var(--bg);color:var(--text);font:14px/1.65 system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif}main{max-width:1320px;margin:auto;padding:32px 28px 48px}a{color:var(--accent);text-underline-offset:3px}button,input,select{font:inherit}button,a,input,select,summary{-webkit-tap-highlight-color:transparent}:focus-visible{outline:3px solid var(--accent);outline-offset:3px}button{cursor:pointer}button,.button{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:8px 12px;text-decoration:none}button:hover,.button:hover{background:var(--soft)}.skip{position:absolute;left:20px;top:-100px}.skip:focus{top:8px;z-index:2}.masthead{display:flex;justify-content:space-between;align-items:center;gap:12px;border-bottom:1px solid var(--line);padding-bottom:18px;margin-bottom:26px}.brand{font-size:12px;font-weight:750;letter-spacing:.15em;color:var(--accent)}.tools{display:flex;gap:8px;flex-wrap:wrap}.hero{display:flex;justify-content:space-between;gap:24px;margin-bottom:20px}.hero h1{font-size:clamp(25px,3.5vw,38px);line-height:1.25;letter-spacing:-.04em;margin:3px 0 9px;overflow-wrap:anywhere}.eyebrow,.meta,.muted{color:var(--muted)}.eyebrow{font-size:13px}.meta{max-width:820px;overflow-wrap:anywhere}.hero-aside{align-self:flex-end;font-size:12px;text-align:right;max-width:280px}.summary-banner{padding:16px 20px;background:var(--tint);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;margin-bottom:16px}.summary-banner strong{display:block;font-size:18px}.summary-banner p{margin:5px 0 0}.cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:16px 0}.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px 20px;text-align:left}.card .n{font-size:32px;line-height:1.25;font-weight:750;letter-spacing:-.03em}.card .l{font-size:12px;color:var(--muted);display:block;margin-bottom:8px}.card .sub{font-size:12px;color:var(--muted);margin-top:6px}.card.urgent .n{color:var(--high)}.card.review .n{color:var(--medium)}.report-note{font-size:12px;color:var(--muted);margin:8px 0 22px}.section-head{display:flex;justify-content:space-between;gap:16px;align-items:baseline;margin:26px 0 12px}h2{font-size:19px;letter-spacing:-.02em;margin:0}h3{font-size:15px;margin:0 0 6px}.section-head p{margin:4px 0 0;color:var(--muted)}.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:20px}.priority-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,330px),1fr));gap:12px}.hero>div,.priority-item,.panel{min-width:0}.priority-item h3{overflow-wrap:anywhere}.priority-item{border-top:3px solid var(--line)}.priority-item.sev-High{border-top-color:var(--high)}.priority-item.sev-Medium{border-top-color:var(--medium)}.priority-top{display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:10px}.priority-item h3 a{text-decoration:none;color:var(--text)}.priority-item h3 a:hover{text-decoration:underline}.priority-item p{margin:8px 0;overflow-wrap:anywhere}.priority-item .action-label{font-size:12px;font-weight:700;color:var(--accent)}.priority-item .impact{color:var(--muted)}.priority-item .action{padding-top:10px;border-top:1px solid var(--line)}.priority-item .location{font-size:12px;color:var(--muted)}.badge{display:inline-block;border:1px solid currentColor;border-radius:5px;padding:1px 7px;font-size:11px;line-height:1.7;font-weight:750;white-space:nowrap}.High{color:var(--high)}.Medium{color:var(--medium)}.Low{color:var(--low)}.Info{color:var(--info)}.verdict{font-size:12px;color:var(--muted)}.section-note{font-size:12px;color:var(--muted);margin:10px 0}.coverage{margin:20px 0;background:var(--warn);border-color:var(--warn-line)}summary{cursor:pointer;font-weight:700}summary .small{font-weight:400;color:var(--muted);margin-left:10px}.coverage p{margin:10px 0}.scope-meta{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:5px 16px;margin:16px 0}.scope-meta dt{font-size:12px;color:var(--muted)}.scope-meta dd{margin:0;overflow-wrap:anywhere}.coverage-columns{display:grid;grid-template-columns:1fr 1fr;gap:24px}.coverage ul{margin:6px 0;padding-left:20px}.perspective{border-bottom:1px solid var(--warn-line);padding:9px 0}.perspective:last-child{border:0}.perspective strong{display:block}.perspective p{margin:3px 0;font-size:13px}.chart-section{margin:20px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:16px}.grid .panel{padding:16px}.grid h3{font-size:13px}.bar{display:grid;grid-template-columns:minmax(85px,46%) 1fr 26px;gap:8px;align-items:center;margin:7px 0;font-size:12px}.bar .t{overflow-wrap:anywhere}.bar .track{height:7px;background:var(--soft);border-radius:4px;overflow:hidden}.bar .fill{height:100%;background:var(--accent)}.bar .v{text-align:right;font-variant-numeric:tabular-nums}.filters{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.filters label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}.filters select,.filters input{width:100%;min-width:0;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:9px;font-size:13px}.filters .search{grid-column:span 2}.filter-bottom{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:14px}.result-count{font-size:12px;color:var(--muted);margin:0}.tablewrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;margin-top:12px}table{border-collapse:collapse;width:100%;table-layout:fixed}th,td{text-align:left;padding:12px;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}th{font-size:11px;color:var(--muted);font-weight:700;background:var(--soft)}th:nth-child(1){width:9%}th:nth-child(2){width:9%}th:nth-child(3){width:14%}th:nth-child(4){width:9%}th:nth-child(5){width:11%}th:nth-child(6){width:30%}th:nth-child(7){width:18%}tr.row{cursor:pointer}tr.row:hover{background:var(--tint)}.finding-toggle{border:0;border-radius:3px;padding:0;background:transparent;text-align:left;font-weight:650;color:var(--text);width:100%}.finding-toggle:hover{background:transparent;color:var(--accent)}.finding-toggle .toggle-label{font-size:11px;display:block;font-weight:400;color:var(--accent);margin-top:4px}.location{display:block;overflow-wrap:anywhere;margin-top:4px;font-size:11px;color:var(--muted)}tr.detail>td{background:var(--tint);padding:18px 24px}tr.detail dl{display:grid;grid-template-columns:150px minmax(0,1fr);gap:8px 18px;margin:12px 0}tr.detail dt{font-size:12px;color:var(--muted)}tr.detail dd{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}.detail-actions{display:flex;justify-content:space-between;gap:12px;align-items:center}.action-guidance{border-left:3px solid var(--accent);padding:8px 12px;background:var(--panel)}.action-guidance strong{display:block}.action-guidance p{margin:4px 0}.verification-record{margin:16px 0;padding:16px;border:1px solid var(--line);border-radius:6px;min-width:0}.verification-record h4{font-size:15px;margin:0 0 8px}.verification-record h5{font-size:13px;margin:18px 0 6px}.verification-record .prose{white-space:pre-wrap;overflow-wrap:anywhere}.verification-level{display:block;font-size:12px;font-weight:600;margin-top:7px}.history{border:1px dashed var(--line);padding:12px;margin-top:16px}.history p{margin:5px 0;white-space:pre-wrap}.lists{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:12px;margin-top:24px}.lists h2{font-size:16px}.lists ul{margin:10px 0 0;padding-left:18px}.empty{color:var(--muted);padding:20px}.snippet{margin:0;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);overflow-x:auto;font:12px/1.6 ui-monospace,Menlo,monospace;white-space:pre}.snippet span{display:block}.snippet .hit{background:var(--warn)}.snippet b{color:var(--muted);font-weight:400}.refs{margin:0;padding-left:18px}.refs li{overflow-wrap:anywhere}.rt{display:inline-block;min-width:60px;color:var(--muted);font-size:12px}.footer{font-size:12px;color:var(--muted);border-top:1px solid var(--line);margin-top:32px;padding-top:16px}code{font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
 @media(max-width:850px){main{padding:22px 18px}.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.hero{display:block}.hero-aside{text-align:left;max-width:none;margin-top:12px}.coverage-columns{grid-template-columns:1fr}.filters{grid-template-columns:repeat(2,minmax(0,1fr))}table,tbody,tr,td{display:block}thead{display:none}tr.row{padding:14px;border-bottom:1px solid var(--line);display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}tr.row td{border:0;padding:0;font-size:12px}tr.row td:before{content:attr(data-label);display:block;color:var(--muted);font-size:10px;margin-bottom:3px}tr.row td:nth-child(6){grid-column:1/-1;grid-row:1}.finding-toggle{font-size:15px}tr.row td:nth-child(7){grid-column:span 2}.detail-actions{align-items:flex-start}tr.detail>td{padding:16px}tr.detail dl{grid-template-columns:1fr;gap:3px}tr.detail dd{margin-bottom:10px}}
 @media(max-width:480px){main{padding:16px 12px}.masthead{align-items:flex-start;flex-direction:column;gap:12px}.tools{width:100%}.tools .button{flex:1}.card{padding:14px}.card .n{font-size:28px}.panel{padding:16px}.section-head{display:block}.filters{grid-template-columns:1fr 1fr;gap:10px}.filters label:first-child,.filters .search{grid-column:1/-1}.filter-bottom{align-items:flex-start;flex-direction:column}.scope-meta{grid-template-columns:1fr;gap:2px}.scope-meta dd{margin-bottom:8px}.priority-top{flex-wrap:wrap}}
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
@@ -957,6 +1209,7 @@ DASHBOARD = r"""<!doctype html>
 <div class="summary-banner" id="summary"></div>
 <div class="cards" id="cards"></div><p class="report-note" data-l="counts_note"></p>
 <section aria-labelledby="priority-heading"><div class="section-head"><div><h2 id="priority-heading" data-l="priority"></h2><p data-l="priority_note"></p></div><a href="#findings" data-l="view_all"></a></div><div class="priority-list" id="priority"></div><p class="section-note" id="queue-note"></p></section>
+<section class="panel" id="verification-summary" aria-label="Verification summary"></section>
 <details class="panel coverage" id="coverage" open><summary><span data-l="coverage_heading"></span><span class="small" id="coverage-count"></span></summary><p data-l="coverage_note"></p><dl class="scope-meta" id="scope-meta"></dl><div class="coverage-columns"><section><h3 data-l="limitations"></h3><div id="limitations"></div></section><section><h3 data-l="perspectives"></h3><div id="perspectives"></div></section></div></details>
 <details class="chart-section"><summary data-l="overview"></summary><p class="section-note" data-l="count_basis"></p><div class="grid"><div class="panel"><h3 data-l="by_sev"></h3><div id="c-sev"></div></div><div class="panel"><h3 data-l="by_conf"></h3><div id="c-conf"></div></div><div class="panel"><h3 data-l="by_cat"></h3><div id="c-cat"></div></div><div class="panel"><h3 data-l="by_status"></h3><div id="c-status"></div></div><div class="panel"><h3 data-l="by_verdict"></h3><div id="c-verdict"></div><p class="section-note" data-l="excluded_note"></p></div></div></details>
 <section id="findings" aria-labelledby="findings-heading"><div class="section-head"><div><h2 id="findings-heading" data-l="findings_register"></h2><p data-l="findings_note"></p></div></div>
@@ -978,7 +1231,7 @@ function byId(id){return document.getElementById(id);}
 function fmt(text,values){return text.replace(/\{(\w+)\}/g,function(_,key){return values[key];});}
 function badge(f){return el('span',{'class':'badge '+f.severity},f.severity);}
 function excluded(f){return D.excluded_verdicts.indexOf(f.verdict)>=0;}
-function action(f){return f.status==='Open'&&f.verdict==='Valid'&&f.confidence==='Confirmed'?'fix_now':'verify_first';}
+function action(f){var proof=R.verification[f.id];return f.status==='Open'&&f.verdict==='Valid'&&f.confidence==='Confirmed'&&proof&&['static_supported','runtime_supported'].indexOf(proof.level)>=0?'fix_now':'verify_first';}
 function count(fs,key){var c=Object.create(null);fs.forEach(function(f){c[f[key]]=(c[f[key]]||0)+1;});return c;}
 function listInto(box,items,empty){if(!items.length){box.appendChild(el('p',{'class':'muted'},empty));return;}var ul=el('ul');items.forEach(function(x){ul.appendChild(el('li',null,x));});box.appendChild(ul);}
 document.title=L.dash_title+' - '+D.meta.project;byId('h').textContent=D.meta.project;
@@ -989,6 +1242,9 @@ var summary=byId('summary');
 summary.appendChild(el('strong',null,fmt(L.unverified_line,{n:R.unverified,high:R.unverified_high})));
 summary.appendChild(el('p',null,F.length?(D.open_hm?fmt(L.risk_summary,{n:D.open_hm}):(R.open_count?fmt(L.open_summary,{n:R.open_count}):L.no_open)):L.no_findings));
 summary.appendChild(el('p',{'class':'muted'},fmt(L.status_summary,{open:R.open_count,fixed:R.fixed,accepted:R.accepted,excluded:R.excluded})));
+var verificationSummary=byId('verification-summary'),verificationSentence=el('p');verificationSummary.setAttribute('aria-label',L.v_title);D.verification_summary.forEach(function(part){verificationSentence.appendChild(part.key?el('strong',{'data-verification-count':part.key},part.count):document.createTextNode(part.text));});verificationSummary.appendChild(verificationSentence);verificationSummary.appendChild(el('p',{'class':'muted'},L.v_note));
+function verificationNode(f){var view=D.verification_views[f.id],box=el('div',{'class':'verification-record'});box.appendChild(el('h4',null,L.v_title));box.appendChild(el('p',{'class':'verification-level'},view.level));box.appendChild(el('p',null,L.v_retest+': '+view.retest));if(view.gaps.length){var ul=el('ul',{'class':'verification-gaps'});view.gaps.forEach(function(gap){ul.appendChild(el('li',null,gap));});box.appendChild(ul);}view.sections.forEach(function(section){var group=el('section');group.appendChild(el('h5',null,section.title));section.items.forEach(function(item){group.appendChild(el('p',{'class':'prose'},item));});box.appendChild(group);});return box;}
+
 [[L.open_hm,D.open_hm,'urgent',L.open_count+': '+R.open_count],[L.needs_validation,R.verify_first,'review',L.fix_now+': '+R.fix_now],[L.closed_count,R.fixed+' / '+R.accepted,'',L.included+': '+F.length],[L.excluded_short,R.excluded,'',L.all_records+': '+ALL.length]].forEach(function(c){var d=el('div',{'class':'card '+c[2]});d.appendChild(el('span',{'class':'l'},c[0]));d.appendChild(el('div',{'class':'n'},c[1]));d.appendChild(el('div',{'class':'sub'},c[3]));byId('cards').appendChild(d);});
 var top=R.queue.slice(0,4);top.forEach(function(item){var f=item.finding,p=el('article',{'class':'panel priority-item sev-'+f.severity}),head=el('div',{'class':'priority-top'});head.appendChild(badge(f));head.appendChild(el('span',{'class':'action-label'},L[item.action]));p.appendChild(head);var h=el('h3');h.appendChild(el('a',{href:'#'+item.anchor},f.id+' · '+f.title));p.appendChild(h);p.appendChild(el('div',{'class':'verdict'},f.confidence+' · '+f.verdict));p.appendChild(el('code',{'class':'location'},f.location));if(f.impact)p.appendChild(el('p',{'class':'impact'},f.impact));p.appendChild(el('p',{'class':'action'},item.action==='fix_now'?(f.fix||L.missing_fix):L.verify_first_note));byId('priority').appendChild(p);});
 if(!top.length)byId('priority').appendChild(el('div',{'class':'panel muted'},L.no_open));byId('queue-note').textContent=fmt(L.queue_more,{shown:top.length,total:R.open_count});
@@ -1011,14 +1267,14 @@ if(f.status==='Open'&&!excluded(f)){var a=action(f),guidance=el('div',{'class':'
 function field(label,value){dl.appendChild(el('dt',null,label));var dd=el('dd');if(value instanceof Node)dd.appendChild(value);else dd.textContent=value;dl.appendChild(dd);}
 field(L.location,f.location);['actor','request','impact'].forEach(function(k){if(f[k])field(L[k],f[k]);});field(L.fix,f.fix||(f.status==='Open'&&!excluded(f)?L.missing_fix:L.not_recorded));field(L.evidence,f.validation.evidence||L.missing_evidence);if(f.validation.method)field(L.validation_method,f.validation.method);
 if(f.snippet){var pre=el('pre',{'class':'snippet'});f.snippet.lines.forEach(function(text,i){var n=f.snippet.start+i,ln=el('span',{'class':n>=f.snippet.hit[0]&&n<=f.snippet.hit[1]?'hit':''});ln.appendChild(el('b',null,String(n).padStart(5,' ')+' '));ln.appendChild(document.createTextNode(text));pre.appendChild(ln);});field(L.snippet,pre);if(f.snippet.truncated)field(L.note,L.snippet_truncated);}
-var refs=(f.source_link?[{type:'source',url:f.source_link,title:L.source_link}]:[]).concat(f.references||[]);if(refs.length){var ul=el('ul',{'class':'refs'});refs.forEach(function(r){var li=el('li');li.appendChild(el('span',{'class':'rt'},r.type));li.appendChild(el('a',{href:r.url,target:'_blank',rel:'noopener noreferrer'},r.title||r.url));ul.appendChild(li);});field(L.references,ul);}td.appendChild(dl);
+var refs=(f.source_link?[{type:'source',url:f.source_link,title:L.source_link}]:[]).concat(f.references||[]);if(refs.length){var ul=el('ul',{'class':'refs'});refs.forEach(function(r){var li=el('li');li.appendChild(el('span',{'class':'rt'},r.type));li.appendChild(el('a',{href:r.url,target:'_blank',rel:'noopener noreferrer'},r.title||r.url));ul.appendChild(li);});field(L.references,ul);}td.appendChild(dl);td.appendChild(verificationNode(f));
 if(f.previous_validation&&typeof f.previous_validation==='object'){var history=el('aside',{'class':'history'});history.appendChild(el('strong',null,L.previous_validation));history.appendChild(el('p',null,L.history_note));['verdict','evidence','method'].forEach(function(k){if(typeof f.previous_validation[k]==='string')history.appendChild(el('p',null,f.previous_validation[k]));});td.appendChild(history);}dt.appendChild(td);return dt;}
 function draw(){var tb=byId('rows');tb.textContent='';var term=q.value.trim().toLowerCase(),scope=v('f-scope');var pool=scope==='all'?ALL:ALL.filter(function(f){return scope==='excluded'?excluded(f):!excluded(f);});var shown=pool.filter(function(f){return (!v('f-sev')||f.severity===v('f-sev'))&&(!v('f-conf')||f.confidence===v('f-conf'))&&(!v('f-cat')||f.category===v('f-cat'))&&(!v('f-status')||f.status===v('f-status'))&&(!v('f-verdict')||f.verdict===v('f-verdict'))&&(!term||JSON.stringify(f).toLowerCase().indexOf(term)>=0);});
 shown.sort(function(a,b){var status=v('f-sort')==='priority'?Number(a.status!=='Open')-Number(b.status!=='Open'):0;return status||SEV.indexOf(a.severity)-SEV.indexOf(b.severity)||(v('f-sort')==='priority'?Number(action(a)!=='fix_now')-Number(action(b)!=='fix_now'):0)||String(a.id).localeCompare(String(b.id));});
 byId('result-count').textContent=fmt(L.showing,{shown:shown.length,total:pool.length});
 if(!shown.length){var empty=el('tr'),td=el('td',{colspan:7,'class':'empty'},pool.length?L.no_matches:L.no_records);empty.appendChild(td);tb.appendChild(empty);return;}
 shown.forEach(function(f){var anchor=D.anchors[f.id],tr=el('tr',{'class':'row',id:anchor}),dt=details(f,anchor);var labels=['ID',L.severity,L.confidence,L.status,L.verdict,L.title_col,L.category];var values=[f.id,null,f.confidence,f.status,f.verdict,null,f.category],button;
-values.forEach(function(value,i){var cell=el('td',{'data-label':labels[i]},value);if(i===1)cell.appendChild(badge(f));if(i===5){button=el('button',{type:'button','class':'finding-toggle','aria-expanded':String(!dt.hidden),'aria-controls':dt.id},f.title);button.appendChild(el('span',{'class':'toggle-label'},dt.hidden?L.expand:L.collapse));cell.appendChild(button);cell.appendChild(el('code',{'class':'location'},f.location));}tr.appendChild(cell);});
+values.forEach(function(value,i){var cell=el('td',{'data-label':labels[i]},value);if(i===1)cell.appendChild(badge(f));if(i===5){button=el('button',{type:'button','class':'finding-toggle','aria-expanded':String(!dt.hidden),'aria-controls':dt.id},f.title);button.appendChild(el('span',{'class':'toggle-label'},dt.hidden?L.expand:L.collapse));cell.appendChild(button);cell.appendChild(el('code',{'class':'location'},f.location));cell.appendChild(el('span',{'class':'verification-level'},D.verification_views[f.id].level));}tr.appendChild(cell);});
 function toggle(){dt.hidden=!dt.hidden;if(dt.hidden)expanded.delete(anchor);else expanded.add(anchor);button.setAttribute('aria-expanded',String(!dt.hidden));button.querySelector('.toggle-label').textContent=dt.hidden?L.expand:L.collapse;}
 button.onclick=function(e){e.stopPropagation();toggle();};tr.onclick=function(e){if(!e.target.closest('a,button'))toggle();};tb.appendChild(tr);tb.appendChild(dt);});}
 function openHash(){var anchor=window.location.hash.slice(1),f=ALL.find(function(x){return D.anchors[x.id]===anchor;});if(!f)return;reset();if(excluded(f))byId('f-scope').value='all';expanded.add(anchor);draw();var row=byId(anchor);row.scrollIntoView({block:'start'});row.querySelector('button').focus({preventScroll:true});}
@@ -1038,9 +1294,15 @@ def render_dashboard(data, L, lang):
             http_url(f["source_link"], "source_link")
         for ref in f.get("references", []):
             http_url(ref["url"], "references.url")
+    model = report_model(data)
+    verification_states = derive_verification(data, SchemaError)
     payload = {
-        "meta": data["meta"], "findings": data["findings"], "labels": L,
-        "open_hm": stats(data)["open_hm"], "report": report_model(data),
+        "meta": data["meta"],
+        "findings": [display_finding(f, model["verification"][f["id"]]) for f in data["findings"]],
+        "labels": L, "open_hm": stats(data)["open_hm"], "report": model,
+        "verification_views": {f["id"]: verification_view(data, f, verification_states[f["id"]], lang)
+                               for f in data["findings"]},
+        "verification_summary": verification_summary_parts(model, L),
         "anchors": {str(f["id"]): finding_anchor(data, f) for f in data["findings"]},
         "order": {"severity": SEVERITIES, "confidence": CONFIDENCES, "status": STATUSES, "verdict": VERDICTS},
         "excluded_verdicts": sorted(EXCLUDED),

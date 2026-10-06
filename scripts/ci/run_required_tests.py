@@ -15,6 +15,9 @@ REQUIRED_TESTS = frozenset({
     "test_ci_report_artifacts.ReportArtifactTests.test_japanese_sample_pdf",
     "test_ci_report_artifacts.ReportArtifactTests.test_english_long_pdf_retains_every_evidence_paragraph",
     "test_ci_report_artifacts.ReportArtifactTests.test_japanese_long_pdf_retains_every_evidence_paragraph",
+    "test_verification_reports.VerificationReportTests.test_browser_verification_records_both_languages_mobile",
+    "test_verification_reports.VerificationPDFTests.test_english_verification_sample_pdf",
+    "test_verification_reports.VerificationPDFTests.test_japanese_verification_sample_pdf",
 })
 
 
