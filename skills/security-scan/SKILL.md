@@ -30,10 +30,38 @@ Phases: `RECON → CHECKLIST → REVIEW → VERIFY → REPORT`.
 - **Name the crown jewels**: the data whose exposure or tampering would hurt
   most (other tenants' records, prices and contracts, credentials, PII, admin
   capability). Severity is judged against these
-- **Size the run**: a handful of handlers is one careful pass. On a large
-  codebase, split the review by resource domain plus one cross-cutting reviewer
-  (auth, middleware, session, error handling), each read-only with the same
-  output format, and merge before VERIFY
+- **Create a new, empty output directory** outside the audited repository and
+  follow the *Run contract* below; it is the same on every host
+
+## Run contract
+
+Claude Code, Codex and Antigravity read this same file. Wherever hosts would
+otherwise choose differently, the choice is fixed here, and
+`scripts/contract_check.py <out>` must pass before the chat summary.
+
+| Item | Fixed choice |
+|---|---|
+| Independence | Never read another assessment's outputs — other hosts' report directories, an earlier `findings.json`, review records — unless the request is to merge or compare them. A run that reuses another run's findings is not an assessment |
+| Review units | Group the route inventory by resource domain: one unit per domain plus one cross-cutting unit (auth, middleware, session, error handling, config). Each unit applies every applicable perspective to every route in it. With subagents, one reviewer per unit; without, the same units sequentially in the same order. Reviewer notes stay in scratch, not in the output directory |
+| Granularity | One finding per root cause, i.e. per fix location. The same flaw on several routes is one finding that lists them in `request`; flaws needing different fixes are separate findings |
+| IDs | `F-001`… for code, config and platform findings, numbered without gaps in severity order (then path); `D-*` only from `deps_scan.py`. No other prefixes |
+| Dependencies | `deps_scan.py <repo> --audit --out deps.json` and `--into findings.json` (without `--audit` if the requester declines the advisory query; that lands in limitations). Never hand-write, merge or split `D-*`; per-package review goes into that finding's `validation`. Platform end of life is one `F-*` finding under *Dependencies and platform* |
+| Record format | `schema_version: 2`. `scripts/evidence_capture.py` pins the commit and writes the source evidence; every `F-*` finding carries an explicit `validation.verdict` and structured `verification` (four claims citing evidence IDs, at least one falsification check). Three-pass coverage, the sequential workflow, integrity receipts and reproduction bundles run only on request |
+| Severity | The table below, decided before confidence; confidence never raises or lowers it |
+| Outputs | Exactly `findings.json`, `deps.json`, `evidence/`, `dashboard.html`, `assessment.html`, `assessment.pdf`, in the requester's language. No README, summary PDF or extra audit dumps unless asked (`contract_check.py --allow NAME`) |
+| `meta.assessor` | Host and model, e.g. `Claude Code (<model>)`, `Codex (<model>)`, `Antigravity (<model>)` |
+| Read-only | `allowed-tools` above is enforced by Claude Code only. Elsewhere keep to it yourself: read, search and run this skill's scripts; write nothing inside the audited repository |
+
+| Severity | When |
+|---|---|
+| High | An anonymous or ordinary signed-in actor, with nothing beyond what any account has, can read or alter another actor's crown-jewel data, take over an account, bypass authentication or payment, or reach code, SQL or command execution. Also an internet-facing end-of-life runtime or framework, and a malicious package |
+| Medium | A High-class impact that needs one condition the attacker does not control alone (victim interaction, victim-specific knowledge, a plausible but unconfirmed setting, a non-admin privileged role), or direct impact on lower-value data or business rules (limits, metadata, non-sensitive profile fields) |
+| Low | Defense-in-depth gaps (headers, cookie flags with compensating controls, internal TLS checks), low-value disclosure, or a path needing an admin, an insider or an unlikely chain |
+| Info | A hardening note with no attacker path |
+
+Each further condition the attacker does not control lowers severity one level.
+An `Environment-dependent` finding is graded as if its stated condition holds,
+and names that condition.
 
 ## Phases
 
@@ -41,9 +69,9 @@ Phases: `RECON → CHECKLIST → REVIEW → VERIFY → REPORT`.
 |---|---|---|
 | RECON | Build the attack-surface map: stack, every entry point with its auth and role guard, how tenancy is enforced and which models escape it, data sinks, config; run `scripts/deps_scan.py` for the dependency inventory and supply-chain checks | `reference/recon.md`, `reference/dependencies.md` |
 | CHECKLIST | Choose the perspectives that apply and turn the map into this app's checklist; attach early suspicions marked unverified | `reference/perspectives.md`, `reference/report.md` |
-| REVIEW | One pass (or one independent reviewer) per perspective; handlers a low-privilege actor can reach first, admin-only handlers for the severe classes only; `deps_scan.py --audit` for known-vulnerable and malicious packages | `reference/perspectives.md`, `reference/dependencies.md` |
+| REVIEW | One pass (or one independent reviewer) per review unit from the *Run contract*, applying every applicable perspective; handlers a low-privilege actor can reach first, admin-only handlers for the severe classes only; `deps_scan.py --audit --into` for known-vulnerable and malicious packages | `reference/perspectives.md`, `reference/dependencies.md` |
 | VERIFY | Record evidence-linked reachability, preconditions, defenses and impact; try to falsify the claim; preserve unknown conditions and independent reviewer findings; distinguish static support from isolated runtime evidence | `reference/validation.md`, `reference/verification-workflow.md`, `reference/evidence-integrity.md` |
-| REPORT | Write `findings.json` with a `path:line` location for every code finding and `references` (advisory, fix commit, article) for every library finding; render the dashboard and the assessment PDF with `scripts/render.py --repo <audited-repo>` so code excerpts are embedded; then give the summary in chat | `reference/findings-schema.md`, `reference/report.md` |
+| REPORT | Write `findings.json` with a `path:line` location for every code finding and `references` (advisory, fix commit, article) for every library finding; capture cited source with `scripts/evidence_capture.py`; render the dashboard and the assessment PDF with `scripts/render.py --repo <audited-repo>` so code excerpts are embedded; pass `scripts/contract_check.py`; then give the summary in chat | `reference/findings-schema.md`, `reference/report.md` |
 | REPRODUCE *(on request)* | Generate a deterministic synthetic seed/repro/cleanup bundle for a selected finding; verify its pins and hashes, repeat the local model twice and preserve unsupported/error outcomes. A synthetic model is not application runtime verification | `reference/reproduction-bundles.md` |
 | VERIFY-FIX *(on request)* | With explicit permission, test the same case before/after in owned local or throwaway code; require a legitimate secure-assertion failure before, pass after, plus passing positive control and regression. Record retest evidence separately from `Fixed` | `reference/fix-verification.md` |
 
@@ -52,7 +80,7 @@ Phases: `RECON → CHECKLIST → REVIEW → VERIFY → REPORT`.
 | Output | What it is |
 |---|---|
 | Chat summary | First line status and counts, verified findings by severity, decisions for a human |
-| `findings.json` | The single source every other output is rendered from |
+| `findings.json` | The single source every other output is rendered from (`deps.json` and `evidence/` support it) |
 | `dashboard.html` | Interactive, self-contained dashboard of the findings and perspective coverage |
 | `assessment.pdf` | The formal assessment document: cover, summary, overview, perspectives, findings, sound items, limitations, next steps |
 
@@ -165,9 +193,9 @@ requester's language (`--lang ja|en`).
 
 ## Done when
 
-Every entry point reachable by a non-admin actor has been read, every
-perspective in `reference/perspectives.md` is recorded as applied, N/A or not
-checked, every High and Medium finding has a recorded verdict and explicit
+`scripts/contract_check.py` passes, every entry point reachable by a non-admin
+actor has been read, every perspective in `reference/perspectives.md` is
+recorded as applied, N/A or not checked, every High and Medium finding has a recorded verdict and explicit
 verification basis (or the first line names the outstanding validation and
 insufficient-evidence counts), and the report states its own blind spots. Record
 uncertainty honestly; a completed report need not claim every finding is verified.

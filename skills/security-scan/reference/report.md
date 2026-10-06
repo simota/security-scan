@@ -50,7 +50,8 @@ Write in the requester's language.
 6. **Next step** — validation gaps first where necessary; otherwise a supported
    fix order. A local reproduction or fix test requires its own explicit scope
 7. **Files** — link the dashboard and assessment rendered from `findings.json`
-   using `reference/findings-schema.md`
+   using `reference/findings-schema.md`. The output directory holds exactly
+   the set named in `SKILL.md` (*Run contract*); extra files only on request
 
 Use the same recorded verdicts, confidence, verification basis and retest state
 in chat, dashboard and PDF. `findings.json` is the record. Every chat finding

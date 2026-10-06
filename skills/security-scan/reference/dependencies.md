@@ -10,11 +10,13 @@ From this skill's directory:
 
 ```
 python3 scripts/deps_scan.py <repo> --out deps.json            # static only, no network
-python3 scripts/deps_scan.py <repo> --audit --into findings.json  # + vulnerability databases
+python3 scripts/deps_scan.py <repo> --audit --out deps.json --into findings.json  # + vulnerability databases
 ```
 
-`--into` replaces the `D-*` findings in `findings.json` and records every audit
-that did not run under `limitations`. It covers, across npm, Composer, Python,
+`--into` replaces the `D-*` findings in `findings.json`, records every audit
+that did not run under `limitations`, and stamps `dependency_scan` with the
+count it wrote; `scripts/contract_check.py` rejects a file whose `D-*` count
+differs, so `D-*` findings are never hand-written, merged or split. It covers, across npm, Composer, Python,
 Bundler, Go, Cargo, Maven/Gradle (inventory), CI workflows and Dockerfiles:
 
 | Check | Why it matters |
@@ -63,7 +65,11 @@ needs rerunning outside the sandbox with the requester's agreement.
 
 - Group many advisories for one package into one fix line in `next_steps`
   ("upgrade guzzlehttp/guzzle to ≥ the highest fixed version"), but keep each
-  advisory as its own finding so the dashboard counts stay true
+  scanner finding as written so the dashboard counts stay true. Record the
+  per-package review in the existing `D-*` findings' `validation`; do not add
+  per-package findings under another prefix
+- State application (`F-*`) and dependency (`D-*`) counts separately in the
+  chat summary, so scanner volume does not hide the code findings
 - A vulnerable package that is a dev-only dependency is still reported; say it
   is dev-only in `impact` and lower severity only with a reason
 - Record in `perspectives`: lockfiles audited, tools run, tools not run

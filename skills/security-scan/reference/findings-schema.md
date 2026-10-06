@@ -125,6 +125,13 @@ profile below adds an explicitly declared perspective/target coverage plan.
 
 ### Assessment pin and evidence registry
 
+`scripts/evidence_capture.py <repo> --findings findings.json <path>…` writes
+both for source evidence: it reads each path from the commit's blob (refusing
+a path whose checked-out bytes differ), copies it to `evidence/source/<path>`
+beside `findings.json`, sets `schema_version`, `assessment` and `meta.commit`,
+appends one `SRC-NNN` record per new path and prints the path → ID map. Edit
+the generic `summary` into the sanitized observation when it matters.
+
 `assessment` is required in version 2:
 
 | Field | Required content |
@@ -384,7 +391,10 @@ Render with `--repo` only for the requester's own copy of the report: the
 excerpts are source code, so the outputs carry the repository's confidentiality.
 
 IDs starting with `D-` belong to `scripts/deps_scan.py`: `--into findings.json`
-replaces them on each run, so do not hand-write findings with that prefix.
+replaces them on each run and stamps the top-level `dependency_scan` record
+(`tool`, `audit`, `findings`, `not_run`), so do not hand-write findings with
+that prefix. Code findings use `F-001`… without gaps; `scripts/contract_check.py`
+checks both, together with the rest of the run contract.
 
 Same rules as the report: no working payloads, no secret values.
 
