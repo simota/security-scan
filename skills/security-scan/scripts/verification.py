@@ -18,13 +18,16 @@ GAPS = (
     "retest_context_mismatch", "retest_version_mismatch", "retest_control_missing",
     "retest_control_failed", "retest_regression_missing", "retest_regression_failed",
     "retest_verification_incomplete",
+    "evidence_integrity_unchecked", "evidence_integrity_failed",
 )
 DEFINITIVE = ("Valid", "FalsePositive", "NotApplicable")
 
 
 class _Validator:
-    def __init__(self, data, error_type):
+    def __init__(self, data, error_type, integrity=None):
         self.data, self.error_type = data, error_type
+        self.integrity = integrity
+        self.integrity_required = False
         self.evidence, self.runs = {}, {}
         self.assessment_pin = None
         self.structured = False
@@ -104,6 +107,8 @@ class _Validator:
         self.pin(record, where)
         for key in ("location", "summary", "sha256"):
             self.text(record, key, where)
+        if "source_path" in record:
+            self.text(record, "source_path", where)
         if not re.fullmatch(r"[0-9a-fA-F]{64}", record["sha256"]):
             self.error(where + ".sha256", "must be a SHA-256 hex digest")
 
@@ -144,6 +149,11 @@ class _Validator:
             # historical records without interpreting them as new proof.
             return
         self.structured = True
+        if "evidence_integrity" in self.data:
+            policy = self.obj(self.data["evidence_integrity"], "evidence_integrity")
+            if set(policy) != {"required"} or type(policy.get("required")) is not bool:
+                self.error("evidence_integrity", "requires only a boolean required field")
+            self.integrity_required = policy["required"]
         assessment = self.obj(self.data.get("assessment"), "assessment")
         self.text(assessment, "repository", "assessment")
         self.assessment_pin = self.pin(assessment, "assessment")
@@ -242,7 +252,7 @@ class _Validator:
                 self.error(where + ".remediation", "requires structured verification")
             return {"level": "legacy", "retest": "fix_claimed" if finding.get("status") == "Fixed" else "not_requested",
                     "gaps": ["legacy_details_missing"] + (["retest_missing"] if finding.get("status") == "Fixed" else []),
-                    "evidence_ids": [], "run_ids": []}
+                    "evidence_ids": [], "run_ids": [], "integrity": integrity_state(self.data, [], None)}
         verification = self.obj(finding["verification"], where + ".verification")
         at = where + ".verification"
         reviewer = self.text(verification, "reviewer", at)
@@ -351,28 +361,54 @@ class _Validator:
             all_runs.update(remediation.get(key, []))
         for ref in all_runs:
             all_refs.update(self.runs[ref].get("evidence_ids", []))
+        provenance = integrity_state(self.data, sorted(all_refs), self.integrity)
+        # Recorded declarations retain their previous interpretation. Explicit
+        # required policy, or a freshly observed contrary file check, cannot be
+        # bypassed by a supplied verdict, historical receipt or completed journal.
+        if provenance["status"] == "incomplete" or (self.integrity_required and provenance["status"] != "checked"):
+            gaps.append("evidence_integrity_failed" if provenance["status"] == "incomplete" else "evidence_integrity_unchecked")
+            level = "incomplete"
+            if retest == "verified":
+                retest = "incomplete"
+                gaps.append("retest_verification_incomplete")
         # Derived output is intentionally codes/IDs only; report text is escaped by its renderer.
         return {"level": level, "retest": retest, "gaps": sorted(set(gaps)),
-                "evidence_ids": sorted(all_refs), "run_ids": sorted(all_runs)}
+                "evidence_ids": sorted(all_refs), "run_ids": sorted(all_runs), "integrity": provenance}
 
 
-def derive_verification(data, error_type=ValueError):
+def integrity_state(data, evidence_ids, integrity=None):
+    """Curate fresh byte/source checks separately from recorded support levels."""
+    # Old schemas allow arbitrary extension records and IDs. Merely rendering
+    # their declarations must not opt into the stricter local-reader contract.
+    if integrity is None or data.get("schema_version", 1) != 2:
+        return {"status": "declared", "reasons": ["not_checked"], "records": [],
+                "bytes_checked": 0, "sources_checked": 0, "evidence_total": len(evidence_ids)}
+    from evidence_integrity import provenance_state
+    result = provenance_state(data, evidence_ids, integrity)
+    records = result.get("records", [])
+    result.update(bytes_checked=sum(item.get("bytes") == "matched" for item in records),
+                  sources_checked=sum(item.get("source") == "matched" for item in records),
+                  evidence_total=len(evidence_ids))
+    return result
+
+
+def derive_verification(data, error_type=ValueError, integrity=None):
     """Return fresh per-finding states without mutating/trusting derived input.
 
     Base finding fields are validated by render.load before this function. Errors
     use the supplied SchemaError type so malformed new records retain CLI exit 2.
     """
-    validator = _Validator(data, error_type)
+    validator = _Validator(data, error_type, integrity)
     validator.setup()
     return {finding["id"]: validator.finding(finding, "findings[{}]".format(i))
             for i, finding in enumerate(data["findings"])}
 
 
-def validate_verification(data, error_type=ValueError):
+def validate_verification(data, error_type=ValueError, integrity=None):
     """Validate and replace every user-supplied derived finding state."""
     for finding in data["findings"]:
         finding.pop("_verification", None)
-    states = derive_verification(data, error_type)
+    states = derive_verification(data, error_type, integrity)
     for finding in data["findings"]:
         finding["_verification"] = states[finding["id"]]
     return data

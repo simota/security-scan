@@ -63,7 +63,23 @@ def generated_files(plan, finding_id):
     return files
 
 
-def build_manifest(findings_path, finding_id, plan):
+def check_evidence(data, evidence_ids, evidence_root=None, evidence_repository=None):
+    from evidence_integrity import verify_evidence
+    from verification import integrity_state
+    if evidence_repository and not evidence_root:
+        raise BundleError("An explicit evidence root is required")
+    checked = None
+    if evidence_root is not None:
+        checked = verify_evidence(data, evidence_root, repository=evidence_repository,
+                                  evidence_ids=evidence_ids)
+    state = integrity_state(data, evidence_ids, checked)
+    required = data.get("evidence_integrity", {}).get("required", False)
+    if state["status"] == "incomplete" or (required and state["status"] != "checked"):
+        raise BundleError("Source evidence requires current byte and commit verification")
+    return checked
+
+
+def build_manifest(findings_path, finding_id, plan, evidence_root=None, evidence_repository=None):
     plan = validate_plan(plan)
     safe_id(finding_id)
     findings_path = runtime.safe_path(findings_path, False)
@@ -82,6 +98,7 @@ def build_manifest(findings_path, finding_id, plan):
         if item["commit"].lower() != data["assessment"]["commit"].lower() or item.get("diff_sha256", "").lower() != data["assessment"].get("diff_sha256", "").lower():
             raise BundleError("Source evidence must match the assessment revision and worktree")
         selected.append({"id": ref, "sha256": item["sha256"].lower()})
+    checked = check_evidence(data, plan["evidence_ids"], evidence_root, evidence_repository)
     pin = {key: data["assessment"][key] for key in ("commit", "diff_sha256", "worktree") if key in data["assessment"]}
     base = {"bundle_version": 1, "finding_id": finding_id, "findings_sha256": runtime.digest(raw),
             "finding_input_sha256": input_digest(data, finding), "assessment": pin,
@@ -90,6 +107,10 @@ def build_manifest(findings_path, finding_id, plan):
             "status": "not_run", "boundary": "mocked", "limitation": LIMITATION,
             "expectations": {"before_security": "fail:assertion", "after_security": "pass",
                              "owner_positive_control": "pass", "missing_resource_negative_control": "pass"}}
+    if checked is not None:
+        # A checked bundle cannot be replayed later without the same fresh
+        # checks. Only a digest is stored, never local roots or artifact content.
+        base["evidence_receipt_sha256"] = runtime.digest(runtime.canonical(checked.receipt))
     identifier = runtime.digest(runtime.canonical(base))
     base.update(bundle_id=identifier, namespace="ss-" + identifier[:20])
     files = generated_files(plan, finding_id)
@@ -118,8 +139,8 @@ def write_raw_new(path, raw):
         os.fsync(stream.fileno())
 
 
-def generate(findings, finding_id, plan, out):
-    manifest, files = build_manifest(findings, finding_id, plan)
+def generate(findings, finding_id, plan, out, evidence_root=None, evidence_repository=None):
+    manifest, files = build_manifest(findings, finding_id, plan, evidence_root, evidence_repository)
     out = new_directory(out)
     for name, raw in files.items():
         write_raw_new(out / name, raw)
@@ -128,11 +149,14 @@ def generate(findings, finding_id, plan, out):
     return {"status": "not_run", "bundle_id": manifest["bundle_id"], "template": plan["template"], "limitation": LIMITATION}
 
 
-def verify(bundle, findings):
+def verify(bundle, findings, evidence_root=None, evidence_repository=None):
     bundle = runtime.safe_path(bundle, True)
-    manifest = runtime.manifest_at(bundle, findings)
+    # This bypass is local to the trusted verifier: build_manifest below must
+    # recompute the receipt from actual files before this function returns.
+    manifest = runtime.manifest_at(bundle, findings, evidence_checked=True)
     # Rebuild from trusted generator + current inputs, not just self-reported hashes.
-    expected, files = build_manifest(findings, manifest.get("finding_id"), manifest.get("plan"))
+    expected, files = build_manifest(findings, manifest.get("finding_id"), manifest.get("plan"),
+                                     evidence_root, evidence_repository)
     # Generation and replay Python/SQLite versions may differ; record both, don't
     # mislabel tool changes as a byte-for-byte environment reproduction.
     expected["tools"] = manifest.get("tools")
@@ -179,10 +203,10 @@ def export_records(manifest, result, out):
     return records
 
 
-def run(bundle, findings, out, timeout=10):
+def run(bundle, findings, out, timeout=10, evidence_root=None, evidence_repository=None):
     if type(timeout) is not int or not 1 <= timeout <= 60:
         raise BundleError("Timeout must be an integer 1..60 seconds")
-    manifest = verify(bundle, findings)
+    manifest = verify(bundle, findings, evidence_root, evidence_repository)
     bundle = runtime.safe_path(bundle, True)
     out = runtime.safe_path(out, True)
     if bundle == out or bundle in out.parents or out in bundle.parents:
@@ -198,7 +222,9 @@ def run(bundle, findings, out, timeout=10):
         try:
             # Isolate imports/environment; execute only byte-checked auditor source.
             # No shell, plan-derived argv, project hooks, imports or stored commands.
-            program = "__file__ = " + repr(str(bundle / "run.py")) + "\n" + source_bytes("run").decode("utf-8")
+            program = ("__file__ = " + repr(str(bundle / "run.py")) + "\n" +
+                       runtime.read_bytes(Path(__file__).with_name("reproduction_runtime.py")).decode("utf-8") +
+                       '\n\nif __name__ == "__main__":\n    sys.exit(entry("run", evidence_checked=True))\n')
             process = subprocess.run([sys.executable, "-I", "-S", "-c", program,
                                       "--findings", str(runtime.safe_path(findings, False))],
                                      cwd=str(bundle), env={"PATH": os.defpath}, stdin=subprocess.DEVNULL,
@@ -224,7 +250,7 @@ def run(bundle, findings, out, timeout=10):
     result["reproducibility_scope"] = "semantic results within this run; byte-identical environment not guaranteed"
     # Re-read before evidence publication; changed source/bundle invalidates success.
     try:
-        verify(bundle, findings)
+        verify(bundle, findings, evidence_root, evidence_repository)
     except (BundleError, OSError, ValueError):
         result.update(status="stale", repeatable=False, reason="Inputs changed during replay; do not use results as current evidence")
     runtime.write_new(out / "results.json", result)
@@ -240,22 +266,28 @@ def main(argv=None):
     generate_parser.add_argument("--finding", required=True)
     generate_parser.add_argument("--plan", type=Path, required=True)
     generate_parser.add_argument("--out", type=Path, required=True)
+    generate_parser.add_argument("--evidence-root", type=Path)
+    generate_parser.add_argument("--evidence-repository", type=Path)
     for command in ("verify", "run"):
         child = sub.add_parser(command)
         child.add_argument("bundle", type=Path)
         child.add_argument("--findings", type=Path, required=True)
+        child.add_argument("--evidence-root", type=Path)
+        child.add_argument("--evidence-repository", type=Path)
         if command == "run":
             child.add_argument("--out", type=Path, required=True)
             child.add_argument("--timeout", type=int, default=10)
     args = parser.parse_args(argv)
     try:
         if args.action == "generate":
-            result = generate(args.findings, args.finding, runtime.load_json(args.plan), args.out)
+            result = generate(args.findings, args.finding, runtime.load_json(args.plan), args.out,
+                              args.evidence_root, args.evidence_repository)
         elif args.action == "verify":
-            manifest = verify(args.bundle, args.findings)
+            manifest = verify(args.bundle, args.findings, args.evidence_root, args.evidence_repository)
             result = {"status": "not_run", "integrity": "checked", "bundle_id": manifest["bundle_id"], "limitation": LIMITATION}
         else:
-            result = run(args.bundle, args.findings, args.out, args.timeout)
+            result = run(args.bundle, args.findings, args.out, args.timeout,
+                         args.evidence_root, args.evidence_repository)
         print(json.dumps(result, ensure_ascii=True, indent=2))
         return 0 if result["status"] in ("not_run", "completed") else 3
     except (BundleError, OSError, ValueError, KeyError, TypeError) as exc:

@@ -139,8 +139,10 @@ at initialization or restart. Newly added records need an explicit invalidate
 and resume before they can be used; they do not silently appear in an already
 issued handoff. A stage records the input and output digests so
 the next reviewer can identify the exact result they received. These hashes
-detect changes to the declared records; they do not prove that an evidence file
-exists, its declared hash is truthful or a command actually ran.
+detect changes to the declared records; they do not themselves prove that an
+evidence file exists, its declared hash matches actual bytes or a command ran.
+Optional fresh local checks add byte/source-blob correspondence, never execution
+or reviewer authentication.
 
 Updating a relevant source record outside the workflow makes the current round
 stale. Resume against the new input starts again at conditions while preserving
@@ -153,6 +155,42 @@ A skipped stage is not completion. Unknown conditions, unresolved disagreements,
 infrastructure errors and stale input remain visible and block promotion.
 Evidence-backed exclusions remain in the report. An unknown or failed check
 does not mean the application is safe.
+
+## Fresh local evidence checks
+
+Use `reference/evidence-integrity.md` when a review depends on actual evidence
+files. `init`, `next`, `status`, `submit`, `resume` and `invalidate` accept
+`--evidence-root ROOT` and `--evidence-repository OWNED_LOCAL_REPO`. They read
+current sources for that invocation; an old receipt cannot satisfy the check.
+The separate `evidence` command aliases receipt generation without advancing a
+stage or changing the findings. Its flags follow the standalone evidence CLI:
+
+```sh
+python3 skills/security-scan/scripts/verification_workflow.py evidence findings.json \
+  --root /path/to/local-evidence --repository /path/to/owned-local-repository \
+  --out /path/to/new-receipt.json
+```
+
+```sh
+python3 skills/security-scan/scripts/verification_workflow.py next findings.json \
+  --finding F-001 --out /path/to/new-handoff.json \
+  --evidence-root /path/to/local-evidence \
+  --evidence-repository /path/to/owned-local-repository
+python3 skills/security-scan/scripts/verification_workflow.py submit findings.json \
+  --finding F-001 --submission /path/to/stage-result.json \
+  --evidence-root /path/to/local-evidence \
+  --evidence-repository /path/to/owned-local-repository
+```
+
+Top-level version-2 `evidence_integrity: {"required": true}` makes fresh checks
+an additional prerequisite for sufficient structured support and retest. Keep
+supplying the evidence flags during the review; completing a workflow cannot
+bypass an unmet integrity requirement. The policy and relevant declarations
+are bound into the review context. Changed evidence, test records or policy
+require current checks and, when the round is stale, explicit restart as above.
+A matched source blob does not resolve unknown conditions, contrary runtime
+observations or reviewer disagreements. Legacy/default records remain declared
+unless actual sources are checked; do not retroactively certify historical work.
 
 ## Safety boundaries
 

@@ -9,6 +9,8 @@ Render with (paths relative to this skill's directory):
 
 ```
 python3 scripts/render.py findings.json --out <dir> [--lang ja|en] [--no-pdf] [--repo <audited-repo>]
+# Optional fresh evidence checks:
+# --evidence-root <local-artifacts> --evidence-repository <owned-local-repo>
 ```
 
 It writes:
@@ -143,10 +145,26 @@ its pin. All IDs in `evidence_ids` must exist and may not be duplicated within
 a reference list. Supported/contradicted claims must reference evidence;
 `unknown` claims may have an empty list.
 
-Artifact locations and digests are recorded, not opened, downloaded or checked
-against file contents. The separate `--repo` source-excerpt feature does not
-attest to the evidence registry's hashes or revision. Use a matching authorized
-checkout and inspect the original artifacts before relying on them.
+By default artifact locations and digests remain declarations. Optional fresh
+local checks are described in `reference/evidence-integrity.md`: provide an
+explicit evidence root and, for source, an owned local Git repository. A checked
+`location` is a safe relative artifact-file path, without a URL or line selector.
+Source records also need explicit `source_path`, the repository-relative blob
+path at the declared full clean commit pin. The verifier reads complete artifact
+bytes, compares SHA-256, and compares source bytes with that commit's blob;
+dirty-worktree pins are unsupported. Runtime/environment checks establish byte
+correspondence, not the truth of events or deployment conditions.
+
+Optional top-level `evidence_integrity: {"required": true}` opts a version-2
+assessment into fresh-integrity gates for structured support and retest. All
+existing semantic verification requirements still apply. Without that policy,
+existing record-level derivation remains compatible and provenance distinguishes
+declarations from freshly checked sources. No legacy input receives retrospective
+credit. Separate receipts bind assessment/evidence/test-run declarations, policy
+and engine hash; imported receipts are never verification authority. Consumers
+must recheck actual sources with `--evidence-root` and `--evidence-repository`.
+The independent `--repo` source-excerpt feature does not attest to evidence hashes
+or revision and does not substitute for these flags.
 
 ### Per-finding verification
 
@@ -278,10 +296,13 @@ referenced `evidence_ids` and `run_ids`. `level` is one of `legacy`,
 `_verification` is replaced, never trusted. Do not hand-author these labels as
 proof; supply the underlying records.
 
-Schema checks establish structure and declared consistency only. They cannot
-prove artifacts exist, verify their hashes, authenticate identities or execution,
-check the truth of a claim, prove equivalent fixture semantics, or establish
-that every relevant route was examined. The records grant no authorization to
+Schema checks alone establish structure and declared consistency. Fresh local
+evidence checks can additionally establish file-byte and source-blob
+correspondence within their supported boundaries. Neither authenticates
+identities or execution, establishes the truth of a claim, proves equivalent
+fixture semantics, or establishes that every relevant route was examined.
+Required integrity can keep support/retest incomplete; matching bytes alone
+cannot make an unresolved finding valid. The records grant no authorization to
 run commands or use credentials. Runtime work remains explicitly authorized,
 owned local/throwaway testing under `reference/fix-verification.md`.
 

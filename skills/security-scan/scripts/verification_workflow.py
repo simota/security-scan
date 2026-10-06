@@ -16,7 +16,7 @@ import tempfile
 import uuid
 from datetime import datetime, timezone
 
-from verification import CLAIMS, DEFINITIVE, derive_verification
+from verification import CLAIMS, DEFINITIVE, derive_verification, integrity_state
 
 STAGES = ("conditions", "falsification", "decision")
 OUTCOMES = ("complete", "held", "error", "unknown", "conflict")
@@ -25,7 +25,8 @@ REASONS = ("not_started", "awaiting_submission", "stages_complete", "input_chang
            "manually_invalidated", "stage_held", "stage_error", "stage_unknown",
            "stage_conflict", "claims_incomplete", "falsification_incomplete",
            "verification_incomplete", "environment_unknown", "review_disagreement",
-           "runtime_contradiction", "runtime_incomplete", "runtime_boundary_unverified")
+           "runtime_contradiction", "runtime_incomplete", "runtime_boundary_unverified",
+           "evidence_integrity_unchecked", "evidence_integrity_failed")
 _DERIVED = {"_verification", "_workflow", "verdict", "source_link", "snippet"}
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -139,7 +140,8 @@ def input_digest(data, finding):
                   "assessment": data.get("assessment"), "finding": source, "scope": scope,
                   "round_id": _round_id(finding),
                   "evidence": sorted((x for x in data.get("evidence", []) if x.get("id") in evidence_ids), key=lambda x: x["id"]),
-                  "test_runs": sorted(selected_runs, key=lambda x: x["id"])})
+                  "test_runs": sorted(selected_runs, key=lambda x: x["id"]),
+                  **({"evidence_integrity": data["evidence_integrity"]} if "evidence_integrity" in data else {})})
 
 
 def _catalog_scope(data):
@@ -360,11 +362,11 @@ def _replay(workflow):
     return stages, invalidated
 
 
-def _verification_state(data, finding):
+def _verification_state(data, finding, integrity=None):
     # Evaluate this finding independently so another malformed finding cannot
     # accidentally contribute evidence or block an otherwise valid stage.
     scoped = dict(data, findings=[finding])
-    return derive_verification(scoped, WorkflowError)[finding["id"]]
+    return derive_verification(scoped, WorkflowError, integrity)[finding["id"]]
 
 
 def _decision_result(state):
@@ -374,6 +376,9 @@ def _decision_result(state):
         return "conflict", conflicts
     if "environment_unknown" in gaps:
         return "unknown", ["environment_unknown"]
+    integrity_gaps = [x for x in ("evidence_integrity_unchecked", "evidence_integrity_failed") if x in gaps]
+    if integrity_gaps:
+        return "held", integrity_gaps
     runtime_gaps = [x for x in ("runtime_incomplete", "runtime_boundary_unverified") if x in gaps]
     if runtime_gaps:
         return "held", runtime_gaps
@@ -382,7 +387,7 @@ def _decision_result(state):
     return "complete", []
 
 
-def derive_workflow(data, finding, error_type=ValueError):
+def derive_workflow(data, finding, error_type=ValueError, integrity=None):
     """Return fresh workflow state; no stored derived status is trusted."""
     try:
         result = {"opted_in": False, "status": "not_started", "next_stage": "conditions",
@@ -401,7 +406,7 @@ def derive_workflow(data, finding, error_type=ValueError):
         elif len(stages) < len(STAGES):
             result.update(status="ready", next_stage=STAGES[len(stages)], reasons=["awaiting_submission"])
         else:
-            status, reasons = _decision_result(_verification_state(data, finding))
+            status, reasons = _decision_result(_verification_state(data, finding, integrity))
             result.update(status=status, next_stage=None if status == "complete" else "decision",
                           reasons=reasons or ["stages_complete"])
         result["reason"] = result["reasons"][0]
@@ -410,10 +415,10 @@ def derive_workflow(data, finding, error_type=ValueError):
         raise error_type(str(exc)) from None
 
 
-def validate_workflows(data, error_type=ValueError):
+def validate_workflows(data, error_type=ValueError, integrity=None):
     for finding in data["findings"]:
         finding.pop("_workflow", None)
-    states = [(finding, derive_workflow(data, finding, error_type)) for finding in data["findings"]]
+    states = [(finding, derive_workflow(data, finding, error_type, integrity)) for finding in data["findings"]]
     for finding, state in states:
         finding["_workflow"] = state
     return data
@@ -428,12 +433,12 @@ def _event(action, actor, reason, before, after, **fields):
     return result
 
 
-def initialize(data, finding_id, actor, reason="Initialize sequential verification"):
+def initialize(data, finding_id, actor, reason="Initialize sequential verification", integrity=None):
     _validate_base(data)
     finding = _finding(data, finding_id)
-    _verification_state(data, finding)
+    _verification_state(data, finding, integrity)
     if "verification_workflow" in finding:
-        return derive_workflow(data, finding, WorkflowError)
+        return derive_workflow(data, finding, WorkflowError, integrity)
     candidate = copy.deepcopy(finding)
     event = _event("init", actor, reason, "0" * 64, "0" * 64,
                    scope=_catalog_scope(data), round_id=uuid.uuid4().hex)
@@ -442,7 +447,7 @@ def initialize(data, finding_id, actor, reason="Initialize sequential verificati
     event["input_digest"] = event["output_digest"] = digest
     candidate["verification_workflow"]["input_digest"] = digest
     _seal(event)
-    result = derive_workflow(data, candidate, WorkflowError)
+    result = derive_workflow(data, candidate, WorkflowError, integrity)
     finding.clear()
     finding.update(candidate)
     return result
@@ -464,12 +469,12 @@ def _validate_observations(data, finding, output):
             _error("submission.evidence_ids", "evidence must match assessment commit/worktree pin")
 
 
-def submit(data, finding_id, output):
+def submit(data, finding_id, output, integrity=None):
     """Apply one manually supplied stage transactionally; identical retries are no-ops."""
     _submission_shape(output)
     _validate_base(data)
     finding = _finding(data, finding_id)
-    state = derive_workflow(data, finding, WorkflowError)
+    state = derive_workflow(data, finding, WorkflowError, integrity)
     if not state["opted_in"]:
         _error("workflow", "initialize before submitting")
     workflow = finding["verification_workflow"]
@@ -484,7 +489,7 @@ def submit(data, finding_id, output):
         _error("submission.input_digest", "stale handoff")
     if output["stage"] == "falsification" and output["actor"].strip().casefold() == state["stages"][0]["actor"].strip().casefold():
         _error("submission.actor", "conditions and falsification require different declared actors")
-    _verification_state(data, finding)
+    _verification_state(data, finding, integrity)
     _validate_observations(data, finding, output)
     candidate = copy.deepcopy(finding)
     previous = {}
@@ -502,7 +507,7 @@ def submit(data, finding_id, output):
                                          "run_ids": copy.deepcopy(prior_verification.get("run_ids", []))}
             candidate["validation"] = {"verdict": "Unverified", "method": "sequential verification",
                                        "evidence": "Conditions recorded; independent falsification and decision pending."}
-            verification = _verification_state(data, candidate)
+            verification = _verification_state(data, candidate, integrity)
             if "claims_incomplete" in verification["gaps"] and not any(c["status"] == "contradicted" for c in output["claims"].values()):
                 status, reasons = "unknown", ["claims_incomplete"]
             if any(c["status"] == "unknown" for c in output["claims"].values()):
@@ -520,7 +525,7 @@ def submit(data, finding_id, output):
             candidate["verification"]["reviews"] = copy.deepcopy(output["reviews"])
             if not any(isinstance(review, dict) and str(review.get("reviewer", "")).strip().casefold() == output["actor"].strip().casefold() for review in output["reviews"]):
                 _error("submission.reviews", "must include the falsification actor's own review")
-            verification = _verification_state(data, candidate)
+            verification = _verification_state(data, candidate, integrity)
             if "falsification_incomplete" in verification["gaps"]:
                 status, reasons = "unknown", ["falsification_incomplete"]
             elif "review_disagreement" in verification["gaps"]:
@@ -534,7 +539,7 @@ def submit(data, finding_id, output):
                 candidate["verification"]["exclusion"] = copy.deepcopy(output["exclusion"])
             else:
                 candidate["verification"].pop("exclusion", None)
-            verification = _verification_state(data, candidate)
+            verification = _verification_state(data, candidate, integrity)
             status, reasons = _decision_result(verification)
             if status != "complete":
                 # Keep the candidate unresolved; requested conclusions remain in
@@ -552,27 +557,27 @@ def submit(data, finding_id, output):
     event["output_digest"] = after
     _seal(event, history[-2])
     candidate["verification_workflow"]["input_digest"] = after
-    result = derive_workflow(data, candidate, WorkflowError)
+    result = derive_workflow(data, candidate, WorkflowError, integrity)
     finding.clear()
     finding.update(candidate)
     return result
 
 
-def invalidate(data, finding_id, actor, reason):
+def invalidate(data, finding_id, actor, reason, integrity=None):
     finding = _finding(data, finding_id)
-    state = derive_workflow(data, finding, WorkflowError)
+    state = derive_workflow(data, finding, WorkflowError, integrity)
     if not state["opted_in"]:
         _error("workflow", "initialize before invalidating")
     workflow = finding["verification_workflow"]
     event = _event("invalidate", actor, reason, workflow["input_digest"], workflow["input_digest"])
     _seal(event, workflow["history"][-1])
     workflow["history"].append(event)
-    return derive_workflow(data, finding, WorkflowError)
+    return derive_workflow(data, finding, WorkflowError, integrity)
 
 
-def resume(data, finding_id, actor, reason):
+def resume(data, finding_id, actor, reason, integrity=None):
     finding = _finding(data, finding_id)
-    state = derive_workflow(data, finding, WorkflowError)
+    state = derive_workflow(data, finding, WorkflowError, integrity)
     if not state["opted_in"]:
         _error("workflow", "initialize before resuming")
     if state["status"] in ("ready", "complete"):
@@ -589,15 +594,15 @@ def resume(data, finding_id, actor, reason):
     event["output_digest"] = after
     _seal(event, workflow["history"][-2])
     workflow["input_digest"] = after
-    result = derive_workflow(data, candidate, WorkflowError)
+    result = derive_workflow(data, candidate, WorkflowError, integrity)
     finding.clear()
     finding.update(candidate)
     return result
 
 
-def next_handoff(data, finding_id):
+def next_handoff(data, finding_id, integrity=None):
     finding = _finding(data, finding_id)
-    state = derive_workflow(data, finding, WorkflowError)
+    state = derive_workflow(data, finding, WorkflowError, integrity)
     if state["status"] != "ready":
         _error("workflow", "next requires a ready workflow; initialize or resume first")
     stage = state["next_stage"]
@@ -625,7 +630,8 @@ def next_handoff(data, finding_id):
             "finding": _normalized_finding(finding), "assessment": copy.deepcopy(data["assessment"]),
             "evidence": copy.deepcopy([item for item in data.get("evidence", []) if item["id"] in _scope(finding)["evidence_ids"]]),
             "test_runs": copy.deepcopy([item for item in data.get("test_runs", []) if item["id"] in _scope(finding)["run_ids"]]),
-            "previous_stages": state["stages"], "submission_template": template}
+            "previous_stages": state["stages"], "submission_template": template,
+            "evidence_integrity": integrity_state(data, _scope(finding)["evidence_ids"], integrity)}
 
 
 def _read_json(path):
@@ -674,11 +680,16 @@ def main(argv=None):
     if selected and selected[0] == "bundle":
         from reproduction import main as reproduction_main
         return reproduction_main(["generate"] + list(selected[1:]))
+    if selected and selected[0] == "evidence":
+        from evidence_integrity import main as evidence_main
+        return evidence_main(["verify"] + list(selected[1:]))
     parser = argparse.ArgumentParser(description=__doc__, epilog="Generate reproduction artifacts without changing findings: bundle FINDINGS --finding ID --plan PLAN --out NEW_DIRECTORY")
     sub = parser.add_subparsers(dest="command", required=True)
     for command in ("init", "status", "next", "handoff", "submit", "resume", "invalidate"):
         child = sub.add_parser(command)
         child.add_argument("findings", type=Path)
+        child.add_argument("--evidence-root", type=Path)
+        child.add_argument("--evidence-repository", type=Path)
         child.add_argument("--finding", required=command != "status")
         if command == "status":
             child.add_argument("--require-complete", action="store_true", help="exit 3 unless all selected findings have complete opted-in workflows")
@@ -690,6 +701,8 @@ def main(argv=None):
         if command in ("next", "handoff"):
             child.add_argument("--out", type=Path)
     args = parser.parse_args(argv)
+    if args.evidence_repository and not args.evidence_root:
+        parser.error("--evidence-repository requires --evidence-root")
     lock = None
     try:
         if args.command in ("init", "submit", "resume", "invalidate"):
@@ -703,22 +716,29 @@ def main(argv=None):
         data, raw = _read_json(args.findings)
         _object(data, "input")
         _validate_base(data)
+        integrity = None
+        if args.evidence_root:
+            from evidence_integrity import verify_evidence
+            try:
+                integrity = verify_evidence(data, args.evidence_root, repository=args.evidence_repository)
+            except (ValueError, OSError):
+                _error("evidence_integrity", "cannot check the explicit local evidence roots")
         # Derived caches are renderer-only and never written by the controller.
         for finding in data["findings"]:
             finding.pop("_workflow", None)
             finding.pop("_verification", None)
         if args.command == "init":
-            result = initialize(data, args.finding, args.actor, args.reason)
+            result = initialize(data, args.finding, args.actor, args.reason, integrity)
         elif args.command == "submit":
             output, _ = _read_json(args.submission)
-            result = submit(data, args.finding, output)
+            result = submit(data, args.finding, output, integrity)
         elif args.command in ("resume", "invalidate"):
-            result = globals()[args.command](data, args.finding, args.actor, args.reason)
+            result = globals()[args.command](data, args.finding, args.actor, args.reason, integrity)
         elif args.command in ("next", "handoff"):
-            result = next_handoff(data, args.finding)
+            result = next_handoff(data, args.finding, integrity)
         else:
             selected = [_finding(data, args.finding)] if args.finding else data["findings"]
-            result = {finding["id"]: derive_workflow(data, finding, WorkflowError) for finding in selected}
+            result = {finding["id"]: derive_workflow(data, finding, WorkflowError, integrity) for finding in selected}
         if lock is not None:
             _save(args.findings, data, raw)
         rendered = json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + "\n"

@@ -21,6 +21,9 @@ REQUIRED_TESTS = frozenset({
     "test_workflow_reports.WorkflowReportTests.test_browser_workflow_handoffs_both_languages_mobile",
     "test_workflow_reports.WorkflowPDFTests.test_english_workflow_evidence_pdf",
     "test_workflow_reports.WorkflowPDFTests.test_japanese_workflow_evidence_pdf",
+    "test_evidence_reports.EvidenceReportTests.test_browser_integrity_provenance_both_languages_mobile",
+    "test_evidence_reports.EvidencePDFTests.test_english_integrity_pdf",
+    "test_evidence_reports.EvidencePDFTests.test_japanese_integrity_pdf",
 })
 
 

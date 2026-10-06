@@ -16,7 +16,7 @@ import stat
 import sys
 import time
 
-VERSION = "1"
+VERSION = "2"
 TEMPLATES = ("sqlite-owner-scope-v1", "manual-target-v1")
 SCRIPTS = ("seed.py", "reproduce.py", "cleanup.py", "run.py")
 MAX_BYTES = 4 * 1024 * 1024
@@ -129,7 +129,7 @@ def tools_record():
             "runtime": VERSION, "implementation": platform.python_implementation()}
 
 
-def manifest_at(bundle, findings):
+def manifest_at(bundle, findings, evidence_checked=False):
     bundle = safe_path(bundle, True)
     manifest = load_json(bundle / "manifest.json")
     if not isinstance(manifest, dict) or manifest.get("bundle_version") != 1:
@@ -137,8 +137,19 @@ def manifest_at(bundle, findings):
     seal = load_json(bundle / "manifest.sha256.json")
     if seal != {"sha256": digest(canonical(manifest))}:
         raise BundleError("Manifest digest mismatch")
-    if digest(read_bytes(findings)) != manifest.get("findings_sha256"):
+    findings_bytes = read_bytes(findings)
+    if digest(findings_bytes) != manifest.get("findings_sha256"):
         raise BundleError("Stale findings input; generate a new bundle")
+    findings_data = parse_json(findings_bytes)
+    if not isinstance(findings_data, dict) or type(findings_data.get("schema_version")) is not int or findings_data["schema_version"] != 2:
+        raise BundleError("Source findings must retain schema version 2")
+    policy = findings_data.get("evidence_integrity", {})
+    if (not isinstance(policy, dict) or ("evidence_integrity" in findings_data and
+            (set(policy) != {"required"} or type(policy.get("required")) is not bool))):
+        raise BundleError("Invalid source evidence policy")
+    required = policy.get("required") is True
+    if (required or "evidence_receipt_sha256" in manifest) and not evidence_checked:
+        raise BundleError("This bundle requires the repository runner's fresh evidence checks")
     files = manifest.get("files")
     if not isinstance(files, dict) or set(files) != set(SCRIPTS) | {"adapter.todo.json"}:
         raise BundleError("Unexpected bundle file inventory")
@@ -149,6 +160,10 @@ def manifest_at(bundle, findings):
     identifier = manifest.get("bundle_id")
     if not isinstance(identifier, str) or not re.fullmatch(r"[0-9a-f]{64}", identifier):
         raise BundleError("Invalid bundle identity")
+    identity = {key: value for key, value in manifest.items()
+                if key not in ("bundle_id", "namespace", "files", "fixture_sha256", "configuration_sha256")}
+    if digest(canonical(identity)) != identifier:
+        raise BundleError("Bundle identity does not bind the current manifest")
     if manifest.get("namespace") != "ss-" + identifier[:20]:
         raise BundleError("Invalid fixture namespace")
     versions = manifest.get("tools")
@@ -306,14 +321,17 @@ def acquire_lock(bundle):
     return lock
 
 
-def entry(action, argv=None):
+def entry(action, argv=None, evidence_checked=False):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--findings", type=Path, required=True, help="Unchanged findings file used to generate this bundle")
     args = parser.parse_args(argv)
     lock = None
     try:
         bundle = safe_path(Path(__file__).absolute().parent, True)
-        manifest = manifest_at(bundle, args.findings)
+        # Cleanup grants no evidence credit and must remain usable when source
+        # evidence disappears. It still checks immutable inputs, bundle identity
+        # and the exact owned fixture inventory/hash before deleting anything.
+        manifest = manifest_at(bundle, args.findings, evidence_checked=evidence_checked or action == "cleanup")
         if manifest["plan"]["template"] == "manual-target-v1":
             print(json.dumps({"status": "unsupported", "reason": "Target adapter requires review and implementation; nothing executed."}))
             return 3
