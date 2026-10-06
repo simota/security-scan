@@ -41,7 +41,6 @@ jobs:
     timeout-minutes: 20
     env:
       PYTHONDONTWRITEBYTECODE: "1"
-      SECURITY_SCAN_REPORT_ARTIFACTS: ${{ runner.temp }}/security-scan-report-artifacts
     steps:
       - name: Check out source without persistent credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -72,6 +71,8 @@ jobs:
                   env.write(f"CHROME={chrome}\n")
           PY
       - name: Require real browser and PDF tests with zero skips
+        env:
+          SECURITY_SCAN_REPORT_ARTIFACTS: ${{ runner.temp }}/security-scan-report-artifacts
         run: python scripts/ci/run_required_tests.py
       - name: Retain synthetic browser and PDF evidence
         if: ${{ !cancelled() }}
