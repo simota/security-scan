@@ -133,6 +133,36 @@ nonblank strings; malformed types are rejected before output, rather than
 coerced into text or allowed to cause a traceback. Optional text can be omitted
 or empty. See the schema for object/list fields and the absent source-URL case.
 
+### Optional three-pass assurance
+
+For a recorded **discovery → conditions → independent challenge and decision**
+sequence, add the schema-version-2 `three_pass` profile. It requires an explicit
+perspective/target coverage plan, evidence-backed discovery (including N/A and
+zero-candidate cells), three distinct declared actors, four claim-specific
+negative checks, and independent review covering every claim's evidence at all
+severities. Existing findings and reports without this profile keep their
+existing interpretation.
+
+Use the existing manual workflow handoffs, then run:
+
+```sh
+python3 skills/security-scan/scripts/verification_workflow.py audit findings.json --require-complete
+python3 skills/security-scan/scripts/render.py findings.json --out /tmp/three-pass-report --lang ja
+```
+
+The audit and English/Japanese dashboard, HTML assessment and PDF show per-pass
+counts and remaining gaps. Aggregate completion covers every planned scope cell
+and every current candidate workflow; missing workflows and changed inputs block
+readiness. Zero candidates stays held. Distinct actor names are declarations,
+not authenticated identities, and three passes imply no accuracy percentage,
+security guarantee or complete vulnerability detection. The CLI accepts review
+records and does not call AI providers or execute target tests.
+
+See [the profile and handoff guide](skills/security-scan/reference/three-pass-check.md)
+for the schema, scope-challenge aggregation, safe local workflow and limitations.
+`make benchmark` checks deterministic synthetic acceptance/hold cases; its results
+measure these record-handling rules, not vulnerability detection accuracy.
+
 ### Ordered verification handoffs
 
 The optional local workflow splits verification into **conditions → independent
@@ -350,6 +380,7 @@ skills/security-scan/
   reference/dependencies.md    dependency, vulnerability and supply-chain review
   reference/validation.md      verdicts and how each finding is validated
   reference/verification-workflow.md conditions, falsification and decision handoffs
+  reference/three-pass-check.md optional discovery/conditions/challenge coverage profile
   reference/evidence-integrity.md local artifact bytes, source commits and safety limits
   reference/fix-verification.md local regression tests that lock a fix in
   reference/reproduction-bundles.md deterministic synthetic seed/repro bundles and limits

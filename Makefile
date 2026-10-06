@@ -50,7 +50,7 @@ LANG_OUT ?= ja
 DEMO_INPUT ?= $(REPO)/examples/findings.sample$(if $(filter ja,$(LANG_OUT)),.ja,).json
 NO_PDF   ?=
 
-.PHONY: help link unlink status check demo deps test
+.PHONY: help link unlink status check demo deps test benchmark
 
 help: ## list targets
 	@echo "$(NAME) - skill install"
@@ -97,6 +97,9 @@ status: ## show what is installed, per host
 	  elif [ -e "$$d" ]; then echo "file     $$d - not a skill directory"; \
 	  else echo "absent   $$d"; fi; \
 	done
+
+benchmark: ## check synthetic three-pass gate outcomes (not detector accuracy)
+	@cd "$(REPO)" && PYTHONDONTWRITEBYTECODE=1 $(PYTHON) scripts/ci/benchmark_three_pass.py
 
 test: ## run offline regression tests (no external audit commands)
 	@cd "$(REPO)" && PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m unittest discover -s tests -v
