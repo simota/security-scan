@@ -40,7 +40,7 @@ Phases: `RECON → CHECKLIST → REVIEW → VERIFY → REPORT`.
 | RECON | Build the attack-surface map: stack, every entry point with its auth and role guard, how tenancy is enforced and which models escape it, data sinks, config; run `scripts/deps_scan.py` for the dependency inventory and supply-chain checks | `reference/recon.md`, `reference/dependencies.md` |
 | CHECKLIST | Choose the perspectives that apply and turn the map into this app's checklist; attach early suspicions marked unverified | `reference/perspectives.md`, `reference/report.md` |
 | REVIEW | One pass (or one independent reviewer) per perspective; handlers a low-privilege actor can reach first, admin-only handlers for the severe classes only; `deps_scan.py --audit` for known-vulnerable and malicious packages | `reference/perspectives.md`, `reference/dependencies.md` |
-| VERIFY | Record evidence-linked reachability, preconditions, defenses and impact; try to falsify the claim; preserve unknown conditions and independent reviewer findings; distinguish static support from isolated runtime evidence | `reference/validation.md` |
+| VERIFY | Record evidence-linked reachability, preconditions, defenses and impact; try to falsify the claim; preserve unknown conditions and independent reviewer findings; distinguish static support from isolated runtime evidence | `reference/validation.md`, `reference/verification-workflow.md` |
 | REPORT | Write `findings.json` with a `path:line` location for every code finding and `references` (advisory, fix commit, article) for every library finding; render the dashboard and the assessment PDF with `scripts/render.py --repo <audited-repo>` so code excerpts are embedded; then give the summary in chat | `reference/findings-schema.md`, `reference/report.md` |
 | VERIFY-FIX *(on request)* | With explicit permission, test the same case before/after in owned local or throwaway code; require a legitimate secure-assertion failure before, pass after, plus passing positive control and regression. Record retest evidence separately from `Fixed` | `reference/fix-verification.md` |
 
@@ -121,6 +121,11 @@ requester's language (`--lang ja|en`).
 - `Fixed` is a recorded claim. An independently evidenced retest requires the
   runtime-supported original case, matching before/after records and passing
   normal/positive-control and regression records
+- For ordered reviewer handoffs, use `scripts/verification_workflow.py` and
+  `reference/verification-workflow.md`: conditions → independent falsification →
+  evidence-based decision. It accepts review outputs and controls stage order;
+  it does not launch AI reviewers or application tests. A stale or unfinished
+  opted-in workflow cannot become fix-ready
 - `scripts/verification.py` checks record structure and declared consistency,
   not whether artifacts are truthful, test commands ran or all paths were covered
 - Dependency findings come from `scripts/deps_scan.py` (static checks, plus

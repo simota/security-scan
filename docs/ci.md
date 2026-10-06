@@ -43,6 +43,17 @@ The older smoke test's dependency skips are also caught by this runner.
 - Verification states, retest gaps, report-wide counts and redacted proof details
   are checked in the real browser in both languages at 375 px. HTML-like proof
   remains inert text, and the new checks are mandatory in the zero-skip runner.
+- Staged-verification reports are checked in both languages and at 375 px in
+  the real browser. Pending, held and stale handoffs cannot become fix-ready
+  through earlier evidence. Stage status, next manual stage, gaps, evidence
+  lineage and recorded history remain visible. Secret-bearing identifiers and
+  hostile text are redacted and inert, and raw stage output patches/extensions
+  are excluded from the dashboard payload.
+- Two additional workflow PDFs (English and Japanese) retain every curated stage,
+  lineage and history entry, including interrupted and resumed verification.
+  Fixtures advance through the actual manual submission helpers. They do not
+  execute AI agents, recorded commands or application tests, and neither
+  completion nor a digest authenticates artifacts or reviewers.
 
 The `synthetic-report-evidence` Actions artifact retains the generated HTML,
 PDFs, extracted UTF-8 text, page metadata and browser screenshots for seven days.

@@ -17,6 +17,15 @@ explicit `schema_version: 2` enables structured verification. Versionless/versio
 extension fields, including objects named `verification`, `evidence` or
 `remediation`, remain uninterpreted legacy records.
 
+## Ordered handoffs
+
+Use `scripts/verification_workflow.py` when the review needs enforced stage order:
+conditions, independent falsification, then the evidence-based decision. The
+workflow accepts stage results and records their lineage; it does not call a
+reviewer or execute a test. Changing relevant input requires a fresh round.
+Unknown, conflicting, failed or unfinished work stays blocked. See
+`reference/verification-workflow.md` for the CLI and exact handoff contract.
+
 ## Verdicts
 
 | Verdict | Meaning | Who may set it |

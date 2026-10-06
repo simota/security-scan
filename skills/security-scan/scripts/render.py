@@ -23,6 +23,7 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import quote, urlsplit
 from url_redaction import redact_urls
 from verification import CLAIMS, derive_verification, validate_verification
+from verification_workflow import derive_workflow, validate_workflows
 
 SEVERITIES = ["High", "Medium", "Low", "Info"]
 CONFIDENCES = ["Confirmed", "Environment-dependent", "Suspected"]
@@ -287,6 +288,81 @@ VERIFICATION_LABELS = {
 for _lang, _labels in VERIFICATION_LABELS.items():
     LABELS[_lang].update(_labels)
 
+
+WORKFLOW_LABELS = {
+    "en": {
+        "w_title": "Staged verification handoff", "w_status": "Workflow state",
+        "w_next": "Next manual stage", "w_none": "No further stage recorded",
+        "w_note": "Manual sequence: check conditions, independently seek counterevidence, then decide from the evidence. These records do not run AI agents or commands, authenticate artifacts, or verify reviewer identities.",
+        "w_conditions": "1. Check conditions", "w_falsification": "2. Independent falsification",
+        "w_decision": "3. Evidence-based decision", "w_stages": "Stage submissions",
+        "w_history": "Recorded workflow history", "w_gaps": "Gaps and hold reasons",
+        "w_lineage": "Evidence lineage", "w_input_digest": "Bound input SHA-256",
+        "w_not_started": "Not started", "w_ready": "Ready for manual handoff",
+        "w_held": "Held for more evidence", "w_error": "Invalid or failed stage",
+        "w_unknown": "Unknown outcome", "w_conflict": "Conflicting evidence",
+        "w_stale": "Stale inputs; restart verification", "w_complete": "Sequence complete (record checks only)",
+        "w_pending": "Pending", "w_stage_complete": "Stage complete (record checks only)", "w_pass": "Recorded as passed", "w_fail": "Recorded as failed",
+        "w_reviewer": "Recorded reviewer", "w_reason": "Reason", "w_recorded_at": "Recorded at",
+        "w_evidence_ids": "Evidence IDs", "w_run_ids": "Test run IDs", "w_review_ids": "Review IDs",
+        "w_submission_id": "Submission ID", "w_parent_submission_id": "Previous submission ID",
+        "w_result": "Result", "w_event": "Event", "w_stage": "Stage",
+        "w_actor": "Recorded actor", "w_summary": "Stage summary", "w_output_digest": "Resulting input SHA-256",
+        "w_initialize": "Initialized", "w_submit": "Stage submitted", "w_resume": "Resumed", "w_invalidate": "Invalidated",
+        "w_no_stages": "No stage submission has been recorded.",
+        "w_no_history": "No workflow history has been recorded.",
+        "w_safety": "Workflow completion is not a security guarantee or a verified fix.",
+    },
+    "ja": {
+        "w_title": "段階的な検証の引き継ぎ", "w_status": "検証フローの状態",
+        "w_next": "次に手動で行う段階", "w_none": "次の段階の記録なし",
+        "w_note": "手動で成立条件の確認、独立した反証、証拠による判定の順に進めます。この記録は AI やコマンドを実行せず、証拠ファイルの真正性や確認者の本人性も証明しません。",
+        "w_conditions": "1. 成立条件の確認", "w_falsification": "2. 独立した反証",
+        "w_decision": "3. 証拠による判定", "w_stages": "各段階の提出記録",
+        "w_history": "検証フローの履歴", "w_gaps": "不足する根拠・保留理由",
+        "w_lineage": "根拠のつながり", "w_input_digest": "紐づく入力の SHA-256",
+        "w_not_started": "未開始", "w_ready": "手動で次の段階へ引き継ぎ可能",
+        "w_held": "根拠が不足しているため保留", "w_error": "無効な記録または段階の失敗",
+        "w_unknown": "結果不明", "w_conflict": "根拠が矛盾", "w_stale": "入力が変更済み・検証を再開してください",
+        "w_complete": "手順完了（記録の確認のみ）", "w_pending": "未完了", "w_stage_complete": "段階完了（記録の確認のみ）",
+        "w_pass": "成功と記録", "w_fail": "失敗と記録", "w_reviewer": "記録上の確認者",
+        "w_reason": "理由", "w_recorded_at": "記録日時", "w_evidence_ids": "根拠 ID",
+        "w_run_ids": "テスト実行 ID", "w_review_ids": "再読 ID", "w_submission_id": "提出 ID",
+        "w_parent_submission_id": "前の提出 ID", "w_result": "結果", "w_event": "イベント", "w_stage": "段階",
+        "w_actor": "記録上の実施者", "w_summary": "段階の要約", "w_output_digest": "提出後の入力 SHA-256",
+        "w_initialize": "開始", "w_submit": "段階の提出", "w_resume": "再開", "w_invalidate": "無効化",
+        "w_no_stages": "各段階の提出記録はありません。", "w_no_history": "検証フローの履歴はありません。",
+        "w_safety": "手順の完了は、安全性の保証や修正結果の検証を意味しません。",
+    },
+}
+for _lang, _labels in WORKFLOW_LABELS.items():
+    LABELS[_lang].update(_labels)
+
+
+_WORKFLOW_GAPS = {
+    "not_started": ("Initialize the manual verification sequence.", "手動で検証の手順を開始してください。"),
+    "awaiting_submission": ("The next stage needs a manually supplied result.", "次の段階の結果を手動で提出してください。"),
+    "stages_complete": ("All required stage records are complete.", "必要な段階の記録がそろっています。"),
+    "input_changed": ("The input differs from the recorded handoff. Restart from conditions.", "入力が引き継ぎ時の記録と異なります。成立条件の確認から再開してください。"),
+    "manually_invalidated": ("The workflow was explicitly invalidated. Restart from conditions.", "検証フローは明示的に無効化されました。成立条件の確認から再開してください。"),
+    "stage_held": ("The stage was held; supply the missing evidence before resuming.", "段階は保留中です。足りない根拠を補ってから再開してください。"),
+    "stage_error": ("The stage recorded an error and cannot advance.", "段階にエラーが記録されているため、先へ進めません。"),
+    "stage_unknown": ("The stage outcome is unknown and cannot advance.", "段階の結果が不明なため、先へ進めません。"),
+    "stage_conflict": ("The stage recorded conflicting evidence that needs review.", "根拠の矛盾が記録されています。内容を再確認してください。"),
+    "verification_incomplete": ("The supplied evidence does not support a definitive decision.", "提出された根拠では最終判定に進めません。"),
+}
+for _code, (_en, _ja) in _WORKFLOW_GAPS.items():
+    LABELS["en"]["w_gap_" + _code] = _en
+    LABELS["ja"]["w_gap_" + _code] = _ja
+LABELS["en"].update(w_init="Initialized", w_scope="Frozen handoff scope", w_current_digest="Current input SHA-256", w_event_digest="Journal event SHA-256",
+                    w_previous_event_digest="Previous journal event SHA-256", w_recorded_digest="Recorded workflow tip SHA-256",
+                    w_restart="Restarted from conditions; earlier stage records are historical",
+                    w_continue="Resumed the held stage with unchanged inputs")
+LABELS["ja"].update(w_init="開始", w_scope="引き継ぎ時に固定した範囲", w_current_digest="現在の入力 SHA-256", w_event_digest="履歴イベントの SHA-256",
+                    w_previous_event_digest="前の履歴イベントの SHA-256", w_recorded_digest="記録されたフロー末尾の SHA-256",
+                    w_restart="成立条件の確認から再開。以前の段階は履歴として保持",
+                    w_continue="入力を変更せず、保留した段階を再開")
+
 _GAP_LABELS = {
     "legacy_details_missing": ("Detailed verification evidence was not recorded.", "詳細な検証根拠が記録されていません。"),
     "verdict_unresolved": ("The finding verdict has not been settled.", "指摘の妥当性判定がまだ確定していません。"),
@@ -383,6 +459,11 @@ def load(path):
         raise SchemaError(f"{path}: invalid JSON numeric value") from None
     except RecursionError:
         raise SchemaError(f"{path}: JSON nesting is too deep") from None
+    return validate_data(data)
+
+
+def validate_data(data):
+    """Validate and normalize a parsed report using the same contract as the CLI."""
     validate_json_values(data)
     if not isinstance(data, dict):
         raise SchemaError("top level must be an object")
@@ -484,6 +565,7 @@ def load(path):
             text_field(perspective, k, where)
     data["perspectives"] = lens
     validate_verification(data, SchemaError)
+    validate_workflows(data, SchemaError)
     rank = {s: i for i, s in enumerate(SEVERITIES)}
     # code findings before dependency advisories (D-*) at the same severity
     findings.sort(key=lambda f: (rank[f["severity"]], str(f["id"]).startswith("D-"), f["id"]))
@@ -512,12 +594,13 @@ def finding_anchor(data, finding):
     return "finding-" + str(next(i for i, f in enumerate(data["findings"], 1) if f is finding))
 
 
-def action_kind(finding, verification=None):
+def action_kind(finding, verification=None, workflow=None):
     # A severity alone is not evidence that a finding applies to this project.
     # Derived state must come from the complete record, never an input flag.
     return ("fix_now" if finding["status"] == "Open" and finding["verdict"] == "Valid"
             and finding["confidence"] == "Confirmed"
             and (verification or {}).get("level") in ("static_supported", "runtime_supported")
+            and ("verification_workflow" not in finding or (workflow or {}).get("status") == "complete")
             else "verify_first")
 
 
@@ -529,21 +612,31 @@ def public_verification_state(state):
 def display_finding(finding, state):
     """Only curated verification details enter the report's embedded payload."""
     public = {key: value for key, value in finding.items()
-              if key not in ("verification", "remediation", "_verification")}
+              if key not in ("verification", "remediation", "_verification",
+                             "verification_workflow", "_workflow")}
     public["_verification"] = public_verification_state(state)
     return public
+
+
+def workflow_states(data):
+    """Only schema-2 opt-in records affect the staged workflow display."""
+    return {f["id"]: derive_workflow(data, f, SchemaError) for f in data["findings"]
+            if data.get("schema_version") == 2 and "verification_workflow" in f}
 
 
 def report_model(data):
     """One report-wide action model shared by both outputs; never mutates verdicts."""
     fs = active(data)
     verification = derive_verification(data, SchemaError)
+    workflows = workflow_states(data)
     queue = [{"finding": display_finding(f, verification[f["id"]]),
-              "action": action_kind(f, verification[f["id"]]), "anchor": finding_anchor(data, f)}
+              "action": action_kind(f, verification[f["id"]], workflows.get(f["id"])), "anchor": finding_anchor(data, f)}
              for f in fs if f["status"] == "Open"]
     queue.sort(key=lambda item: (SEVERITIES.index(item["finding"]["severity"]),
                                 item["action"] != "fix_now", str(item["finding"]["id"])))
     return {
+        **({"workflows": {key: {"status": state["status"], "next_stage": state["next_stage"]}
+                           for key, state in workflows.items()}} if workflows else {}),
         "open_count": len(queue),
         "fix_now": sum(item["action"] == "fix_now" for item in queue),
         "verify_first": sum(item["action"] == "verify_first" for item in queue),
@@ -710,7 +803,7 @@ tr{break-inside:avoid;page-break-inside:avoid}
 .evidence-cell span{color:#566977}
 .finding{margin:6mm 0 0;padding:4mm 0 0;border-top:1px solid #bac6d1;break-inside:auto;page-break-inside:auto}
 .finding.compact{break-inside:avoid;page-break-inside:avoid}
-.verification-record{margin:3mm 0;padding:3mm;border:1px solid #d9dfe5;break-inside:auto;page-break-inside:auto}.verification-record h5{font-size:9pt;margin:3mm 0 1mm;break-after:avoid}.verification-record p{font-size:8.3pt;overflow-wrap:anywhere}.verification-level{font-weight:600}.verification-record section{break-inside:auto;page-break-inside:auto}
+.verification-record,.workflow-record{margin:3mm 0;padding:3mm;border:1px solid #d9dfe5;break-inside:auto;page-break-inside:auto}.verification-record h5,.workflow-record h5{font-size:9pt;margin:3mm 0 1mm;break-after:avoid}.verification-record p,.workflow-record p{font-size:8.3pt;overflow-wrap:anywhere}.verification-level{font-weight:600}.verification-record section,.workflow-record section{break-inside:auto;page-break-inside:auto}
 .validation-method{break-before:avoid;page-break-before:avoid}
 .finding-header{break-inside:avoid;page-break-inside:avoid;break-after:avoid;page-break-after:avoid}
 .finding h3{font-size:13pt;margin:0 0 2.5mm}
@@ -949,6 +1042,84 @@ def verification_view(data, finding, state, lang):
     }
 
 
+
+def workflow_view(data, finding, state, lang):
+    """Display only named, redacted lineage fields; never embed raw stage patches."""
+    L = LABELS[lang]
+
+    def text(value):
+        value = str(value if value is not None else "")
+        return L["v_withheld"] if PRIVATE_KEY_RE.search(value) else redact(value)
+
+    def label(value):
+        return L.get("w_" + str(value), text(value))
+
+    def reason(value):
+        return L.get("w_gap_" + str(value), L.get("v_gap_" + str(value), text(value)))
+
+    def record_text(record):
+        # Event bodies can contain untrusted extensions or full historical proofs.
+        # Keep the known metadata, and redact even identifiers and digest labels.
+        lines = []
+        if isinstance(record.get("submission"), dict):
+            submission = record["submission"]
+            record = {**{key: submission[key] for key in ("stage", "summary", "evidence_ids", "run_ids") if key in submission}, **record}
+        for key in ("action", "event", "stage", "status", "actor", "summary", "reason", "recorded_at",
+                    "input_digest", "output_digest", "previous_event_digest", "event_digest"):
+            if key in record and isinstance(record[key], str):
+                name = "w_result" if key == "status" else "w_event" if key == "action" else "w_" + key
+                value = label(record[key]) if key in ("action", "event", "stage", "status") else text(record[key])
+                if key == "status" and record[key] == "complete":
+                    value = L["w_stage_complete"]
+                lines.append(L.get(name, key) + ": " + value)
+        for key in ("evidence_ids", "run_ids"):
+            if isinstance(record.get(key), list) and record[key]:
+                lines.append(L["w_" + key] + ": " + ", ".join(text(item) for item in record[key]
+                                                                           if isinstance(item, str)))
+        scope = record.get("scope")
+        if isinstance(scope, dict):
+            for key in ("evidence_ids", "run_ids"):
+                if isinstance(scope.get(key), list):
+                    lines.append(L["w_scope"] + " · " + L["w_" + key] + ": " + ", ".join(
+                        text(item) for item in scope[key] if isinstance(item, str)))
+        if isinstance(record.get("restart"), bool):
+            lines.append(L["w_restart"] if record["restart"] else L["w_continue"])
+        if isinstance(record.get("reasons"), list):
+            lines.extend(reason(item) for item in record["reasons"] if isinstance(item, str))
+        return "\n".join(lines)
+
+    submitted = state.get("stages", [])
+    sections = []
+    for stage in ("conditions", "falsification", "decision"):
+        records = [record for record in submitted if isinstance(record, dict) and record.get("stage") == stage]
+        sections.append({"title": L["w_" + stage],
+                         "items": [record_text(record) for record in records] or [L["w_pending"]]})
+    if state.get("input_digest"):
+        sections.append({"title": L["w_lineage"], "items": [L["w_current_digest"] + ": " + text(state["input_digest"]),
+                                                                          L["w_recorded_digest"] + ": " + text(finding["verification_workflow"]["input_digest"])]})
+    history = [record_text(record) for record in state.get("history", []) if isinstance(record, dict)]
+    sections.append({"title": L["w_history"], "items": [entry for entry in history if entry] or [L["w_no_history"]]})
+    gaps = [reason(item) for item in state.get("reasons", []) if isinstance(item, str)] if state["status"] != "complete" else []
+    if not gaps and state.get("reason") and state["status"] != "complete":
+        gaps = [reason(state["reason"])]
+    return {"status": label(state["status"]), "next_stage": label(state["next_stage"]) if state.get("next_stage") else L["w_none"],
+            "gaps": gaps, "sections": sections}
+
+
+def workflow_html(view, L):
+    if view is None:
+        return ""
+    gaps = ("<h5>" + esc(L["w_gaps"]) + "</h5><ul class='workflow-gaps'>" +
+            "".join(f"<li>{esc(gap)}</li>" for gap in view["gaps"]) + "</ul>" if view["gaps"] else "")
+    sections = "".join(f"<section><h5>{esc(section['title'])}</h5>" +
+                       "".join(f"<p class='prose'>{esc(item)}</p>" for item in section["items"]) + "</section>"
+                       for section in view["sections"])
+    return (f"<div class='workflow-record'><h4>{esc(L['w_title'])}</h4>"
+            f"<p class='workflow-status'><strong>{esc(L['w_status'])}:</strong> {esc(view['status'])}</p>"
+            f"<p class='workflow-next'><strong>{esc(L['w_next'])}:</strong> {esc(view['next_stage'])}</p>"
+            f"<p class='small'>{esc(L['w_note'])}</p>{gaps}{sections}<p class='small'>{esc(L['w_safety'])}</p></div>")
+
+
 def verification_html(view, L):
     gaps = ("<ul class='verification-gaps'>" + "".join(f"<li>{esc(gap)}</li>" for gap in view["gaps"]) + "</ul>"
             if view["gaps"] else "")
@@ -981,6 +1152,9 @@ def render_assessment_html(data, L, lang):
     verification_states = derive_verification(data, SchemaError)
     verification_views = {f["id"]: verification_view(data, f, verification_states[f["id"]], lang)
                           for f in data["findings"]}
+    workflows = workflow_states(data)
+    workflow_views = {f["id"]: workflow_view(data, f, workflows[f["id"]], lang)
+                      for f in data["findings"] if f["id"] in workflows}
     excluded = [f for f in data["findings"] if f["verdict"] in EXCLUDED]
     summary = L["a_summary"].format(**model)
     accounting = L["a_accounting"].format(total=len(fs), **model)
@@ -1054,7 +1228,9 @@ def render_assessment_html(data, L, lang):
         f"<span class='index-id'>{esc(f['id'])}</span></td><td>{badge(f)}</td><td>{esc(f['status'])}</td>"
         f"<td class='evidence-cell'><div><span>{esc(L['confidence'])}:</span> {esc(f['confidence'])}</div>"
         f"<div><span>{esc(L['verdict'])}:</span> {esc(f['verdict'])}</div>"
-        f"<div>{esc(verification_views[f['id']]['level'])}</div></td></tr>" for f in fs)
+        f"<div>{esc(verification_views[f['id']]['level'])}</div>"
+        + (f"<div class='workflow-status'>{esc(workflow_views[f['id']]['status'])}</div>"
+           if f["id"] in workflow_views else "") + "</td></tr>" for f in fs)
     index_html = (f"<table class='index'><colgroup><col class='finding-col'><col class='severity-col'><col class='status-col'><col class='evidence-col'></colgroup>"
                   f"<thead><tr><th scope='col'>{esc(L['a_finding'])}</th><th scope='col'>{esc(L['severity'])}</th>"
                   f"<th scope='col'>{esc(L['status'])}</th><th scope='col'>{esc(L['a_evidence_state'])}</th></tr></thead>"
@@ -1068,7 +1244,7 @@ def render_assessment_html(data, L, lang):
         state = f"<table class='finding-state'><thead><tr>{state_header}</tr></thead><tbody><tr>{state_values}</tr></tbody></table>"
         action = ""
         if f["status"] == "Open" and not is_excluded:
-            action = f"<p class='finding-context'><strong>{esc(L['a_next_action'])}:</strong> {esc(L['a_' + action_kind(f, model['verification'][f['id']])])}</p>"
+            action = f"<p class='finding-context'><strong>{esc(L['a_next_action'])}:</strong> {esc(L['a_' + action_kind(f, model['verification'][f['id']], model.get('workflows', {}).get(f['id']))])}</p>"
         context = (f"<p class='finding-context'><strong>{esc(L['location'])}:</strong> <code>{esc(f['location'])}</code></p>"
                    f"<p class='finding-context'><strong>{esc(L['category'])}:</strong> {value(f.get('category'))}</p>")
         # Keep source statements in full. Long prose and source blocks may split
@@ -1080,6 +1256,7 @@ def render_assessment_html(data, L, lang):
         if validation.get("method"):
             evidence += f"<p class='small validation-method'><strong>{esc(L['a_method'])}:</strong> {esc(validation['method'])}</p>"
         content += field("evidence", evidence)
+        content += workflow_html(workflow_views.get(f["id"]), L)
         content += verification_html(verification_views[f["id"]], L)
         for key in ("actor", "request"):
             if f.get(key):
@@ -1099,7 +1276,7 @@ def render_assessment_html(data, L, lang):
         record_length = sum(len(str(f.get(k) or "")) for k in
                             ("title", "location", "category", "actor", "request", "impact", "fix"))
         record_length += len(str(validation.get("evidence") or "")) + len(str(previous or ""))
-        compact = " compact" if not f.get("snippet") and not f.get("verification") and record_length <= 400 else ""
+        compact = " compact" if not f.get("snippet") and not f.get("verification") and not f.get("verification_workflow") and record_length <= 400 else ""
         return (f"<article class='finding sev-{esc(f['severity'])}{compact}' id='{esc(finding_anchor(data, f))}'>"
                 f"<div class='finding-header'><h3><span class='finding-id'>{esc(f['id'])}</span>{esc(f['title'])}</h3>"
                 f"{state}{action}{context}</div>{content}"
@@ -1196,7 +1373,7 @@ DASHBOARD = r"""<!doctype html>
 :root{color-scheme:light;--bg:#f3f5f7;--panel:#fff;--text:#172333;--muted:#526376;--line:#dce3eb;--soft:#eaf0f6;--high:#ae2530;--medium:#945005;--low:#1b5daf;--info:#536378;--accent:#194f90;--tint:#edf4fc;--warn:#fff6e8;--warn-line:#e9c58e}
 @media(prefers-color-scheme:dark){:root:not([data-theme="light"]){color-scheme:dark;--bg:#111923;--panel:#192532;--text:#e8eef5;--muted:#acbacb;--line:#344456;--soft:#233445;--high:#ffaaa7;--medium:#f2c177;--low:#9dc6ff;--info:#b4c4d5;--accent:#a0c7ff;--tint:#20364c;--warn:#332b20;--warn-line:#76623e}}
 :root[data-theme="dark"]{color-scheme:dark;--bg:#111923;--panel:#192532;--text:#e8eef5;--muted:#acbacb;--line:#344456;--soft:#233445;--high:#ffaaa7;--medium:#f2c177;--low:#9dc6ff;--info:#b4c4d5;--accent:#a0c7ff;--tint:#20364c;--warn:#332b20;--warn-line:#76623e}
-*{box-sizing:border-box}[hidden]{display:none!important}html{scroll-behavior:smooth;scroll-padding-top:20px}body{margin:0;overflow-wrap:anywhere;background:var(--bg);color:var(--text);font:14px/1.65 system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif}main{max-width:1320px;margin:auto;padding:32px 28px 48px}a{color:var(--accent);text-underline-offset:3px}button,input,select{font:inherit}button,a,input,select,summary{-webkit-tap-highlight-color:transparent}:focus-visible{outline:3px solid var(--accent);outline-offset:3px}button{cursor:pointer}button,.button{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:8px 12px;text-decoration:none}button:hover,.button:hover{background:var(--soft)}.skip{position:absolute;left:20px;top:-100px}.skip:focus{top:8px;z-index:2}.masthead{display:flex;justify-content:space-between;align-items:center;gap:12px;border-bottom:1px solid var(--line);padding-bottom:18px;margin-bottom:26px}.brand{font-size:12px;font-weight:750;letter-spacing:.15em;color:var(--accent)}.tools{display:flex;gap:8px;flex-wrap:wrap}.hero{display:flex;justify-content:space-between;gap:24px;margin-bottom:20px}.hero h1{font-size:clamp(25px,3.5vw,38px);line-height:1.25;letter-spacing:-.04em;margin:3px 0 9px;overflow-wrap:anywhere}.eyebrow,.meta,.muted{color:var(--muted)}.eyebrow{font-size:13px}.meta{max-width:820px;overflow-wrap:anywhere}.hero-aside{align-self:flex-end;font-size:12px;text-align:right;max-width:280px}.summary-banner{padding:16px 20px;background:var(--tint);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;margin-bottom:16px}.summary-banner strong{display:block;font-size:18px}.summary-banner p{margin:5px 0 0}.cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:16px 0}.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px 20px;text-align:left}.card .n{font-size:32px;line-height:1.25;font-weight:750;letter-spacing:-.03em}.card .l{font-size:12px;color:var(--muted);display:block;margin-bottom:8px}.card .sub{font-size:12px;color:var(--muted);margin-top:6px}.card.urgent .n{color:var(--high)}.card.review .n{color:var(--medium)}.report-note{font-size:12px;color:var(--muted);margin:8px 0 22px}.section-head{display:flex;justify-content:space-between;gap:16px;align-items:baseline;margin:26px 0 12px}h2{font-size:19px;letter-spacing:-.02em;margin:0}h3{font-size:15px;margin:0 0 6px}.section-head p{margin:4px 0 0;color:var(--muted)}.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:20px}.priority-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,330px),1fr));gap:12px}.hero>div,.priority-item,.panel{min-width:0}.priority-item h3{overflow-wrap:anywhere}.priority-item{border-top:3px solid var(--line)}.priority-item.sev-High{border-top-color:var(--high)}.priority-item.sev-Medium{border-top-color:var(--medium)}.priority-top{display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:10px}.priority-item h3 a{text-decoration:none;color:var(--text)}.priority-item h3 a:hover{text-decoration:underline}.priority-item p{margin:8px 0;overflow-wrap:anywhere}.priority-item .action-label{font-size:12px;font-weight:700;color:var(--accent)}.priority-item .impact{color:var(--muted)}.priority-item .action{padding-top:10px;border-top:1px solid var(--line)}.priority-item .location{font-size:12px;color:var(--muted)}.badge{display:inline-block;border:1px solid currentColor;border-radius:5px;padding:1px 7px;font-size:11px;line-height:1.7;font-weight:750;white-space:nowrap}.High{color:var(--high)}.Medium{color:var(--medium)}.Low{color:var(--low)}.Info{color:var(--info)}.verdict{font-size:12px;color:var(--muted)}.section-note{font-size:12px;color:var(--muted);margin:10px 0}.coverage{margin:20px 0;background:var(--warn);border-color:var(--warn-line)}summary{cursor:pointer;font-weight:700}summary .small{font-weight:400;color:var(--muted);margin-left:10px}.coverage p{margin:10px 0}.scope-meta{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:5px 16px;margin:16px 0}.scope-meta dt{font-size:12px;color:var(--muted)}.scope-meta dd{margin:0;overflow-wrap:anywhere}.coverage-columns{display:grid;grid-template-columns:1fr 1fr;gap:24px}.coverage ul{margin:6px 0;padding-left:20px}.perspective{border-bottom:1px solid var(--warn-line);padding:9px 0}.perspective:last-child{border:0}.perspective strong{display:block}.perspective p{margin:3px 0;font-size:13px}.chart-section{margin:20px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:16px}.grid .panel{padding:16px}.grid h3{font-size:13px}.bar{display:grid;grid-template-columns:minmax(85px,46%) 1fr 26px;gap:8px;align-items:center;margin:7px 0;font-size:12px}.bar .t{overflow-wrap:anywhere}.bar .track{height:7px;background:var(--soft);border-radius:4px;overflow:hidden}.bar .fill{height:100%;background:var(--accent)}.bar .v{text-align:right;font-variant-numeric:tabular-nums}.filters{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.filters label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}.filters select,.filters input{width:100%;min-width:0;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:9px;font-size:13px}.filters .search{grid-column:span 2}.filter-bottom{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:14px}.result-count{font-size:12px;color:var(--muted);margin:0}.tablewrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;margin-top:12px}table{border-collapse:collapse;width:100%;table-layout:fixed}th,td{text-align:left;padding:12px;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}th{font-size:11px;color:var(--muted);font-weight:700;background:var(--soft)}th:nth-child(1){width:9%}th:nth-child(2){width:9%}th:nth-child(3){width:14%}th:nth-child(4){width:9%}th:nth-child(5){width:11%}th:nth-child(6){width:30%}th:nth-child(7){width:18%}tr.row{cursor:pointer}tr.row:hover{background:var(--tint)}.finding-toggle{border:0;border-radius:3px;padding:0;background:transparent;text-align:left;font-weight:650;color:var(--text);width:100%}.finding-toggle:hover{background:transparent;color:var(--accent)}.finding-toggle .toggle-label{font-size:11px;display:block;font-weight:400;color:var(--accent);margin-top:4px}.location{display:block;overflow-wrap:anywhere;margin-top:4px;font-size:11px;color:var(--muted)}tr.detail>td{background:var(--tint);padding:18px 24px}tr.detail dl{display:grid;grid-template-columns:150px minmax(0,1fr);gap:8px 18px;margin:12px 0}tr.detail dt{font-size:12px;color:var(--muted)}tr.detail dd{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}.detail-actions{display:flex;justify-content:space-between;gap:12px;align-items:center}.action-guidance{border-left:3px solid var(--accent);padding:8px 12px;background:var(--panel)}.action-guidance strong{display:block}.action-guidance p{margin:4px 0}.verification-record{margin:16px 0;padding:16px;border:1px solid var(--line);border-radius:6px;min-width:0}.verification-record h4{font-size:15px;margin:0 0 8px}.verification-record h5{font-size:13px;margin:18px 0 6px}.verification-record .prose{white-space:pre-wrap;overflow-wrap:anywhere}.verification-level{display:block;font-size:12px;font-weight:600;margin-top:7px}.history{border:1px dashed var(--line);padding:12px;margin-top:16px}.history p{margin:5px 0;white-space:pre-wrap}.lists{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:12px;margin-top:24px}.lists h2{font-size:16px}.lists ul{margin:10px 0 0;padding-left:18px}.empty{color:var(--muted);padding:20px}.snippet{margin:0;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);overflow-x:auto;font:12px/1.6 ui-monospace,Menlo,monospace;white-space:pre}.snippet span{display:block}.snippet .hit{background:var(--warn)}.snippet b{color:var(--muted);font-weight:400}.refs{margin:0;padding-left:18px}.refs li{overflow-wrap:anywhere}.rt{display:inline-block;min-width:60px;color:var(--muted);font-size:12px}.footer{font-size:12px;color:var(--muted);border-top:1px solid var(--line);margin-top:32px;padding-top:16px}code{font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
+*{box-sizing:border-box}[hidden]{display:none!important}html{scroll-behavior:smooth;scroll-padding-top:20px}body{margin:0;overflow-wrap:anywhere;background:var(--bg);color:var(--text);font:14px/1.65 system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif}main{max-width:1320px;margin:auto;padding:32px 28px 48px}a{color:var(--accent);text-underline-offset:3px}button,input,select{font:inherit}button,a,input,select,summary{-webkit-tap-highlight-color:transparent}:focus-visible{outline:3px solid var(--accent);outline-offset:3px}button{cursor:pointer}button,.button{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:8px 12px;text-decoration:none}button:hover,.button:hover{background:var(--soft)}.skip{position:absolute;left:20px;top:-100px}.skip:focus{top:8px;z-index:2}.masthead{display:flex;justify-content:space-between;align-items:center;gap:12px;border-bottom:1px solid var(--line);padding-bottom:18px;margin-bottom:26px}.brand{font-size:12px;font-weight:750;letter-spacing:.15em;color:var(--accent)}.tools{display:flex;gap:8px;flex-wrap:wrap}.hero{display:flex;justify-content:space-between;gap:24px;margin-bottom:20px}.hero h1{font-size:clamp(25px,3.5vw,38px);line-height:1.25;letter-spacing:-.04em;margin:3px 0 9px;overflow-wrap:anywhere}.eyebrow,.meta,.muted{color:var(--muted)}.eyebrow{font-size:13px}.meta{max-width:820px;overflow-wrap:anywhere}.hero-aside{align-self:flex-end;font-size:12px;text-align:right;max-width:280px}.summary-banner{padding:16px 20px;background:var(--tint);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;margin-bottom:16px}.summary-banner strong{display:block;font-size:18px}.summary-banner p{margin:5px 0 0}.cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:16px 0}.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px 20px;text-align:left}.card .n{font-size:32px;line-height:1.25;font-weight:750;letter-spacing:-.03em}.card .l{font-size:12px;color:var(--muted);display:block;margin-bottom:8px}.card .sub{font-size:12px;color:var(--muted);margin-top:6px}.card.urgent .n{color:var(--high)}.card.review .n{color:var(--medium)}.report-note{font-size:12px;color:var(--muted);margin:8px 0 22px}.section-head{display:flex;justify-content:space-between;gap:16px;align-items:baseline;margin:26px 0 12px}h2{font-size:19px;letter-spacing:-.02em;margin:0}h3{font-size:15px;margin:0 0 6px}.section-head p{margin:4px 0 0;color:var(--muted)}.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:20px}.priority-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,330px),1fr));gap:12px}.hero>div,.priority-item,.panel{min-width:0}.priority-item h3{overflow-wrap:anywhere}.priority-item{border-top:3px solid var(--line)}.priority-item.sev-High{border-top-color:var(--high)}.priority-item.sev-Medium{border-top-color:var(--medium)}.priority-top{display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:10px}.priority-item h3 a{text-decoration:none;color:var(--text)}.priority-item h3 a:hover{text-decoration:underline}.priority-item p{margin:8px 0;overflow-wrap:anywhere}.priority-item .action-label{font-size:12px;font-weight:700;color:var(--accent)}.priority-item .impact{color:var(--muted)}.priority-item .action{padding-top:10px;border-top:1px solid var(--line)}.priority-item .location{font-size:12px;color:var(--muted)}.badge{display:inline-block;border:1px solid currentColor;border-radius:5px;padding:1px 7px;font-size:11px;line-height:1.7;font-weight:750;white-space:nowrap}.High{color:var(--high)}.Medium{color:var(--medium)}.Low{color:var(--low)}.Info{color:var(--info)}.verdict{font-size:12px;color:var(--muted)}.section-note{font-size:12px;color:var(--muted);margin:10px 0}.coverage{margin:20px 0;background:var(--warn);border-color:var(--warn-line)}summary{cursor:pointer;font-weight:700}summary .small{font-weight:400;color:var(--muted);margin-left:10px}.coverage p{margin:10px 0}.scope-meta{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:5px 16px;margin:16px 0}.scope-meta dt{font-size:12px;color:var(--muted)}.scope-meta dd{margin:0;overflow-wrap:anywhere}.coverage-columns{display:grid;grid-template-columns:1fr 1fr;gap:24px}.coverage ul{margin:6px 0;padding-left:20px}.perspective{border-bottom:1px solid var(--warn-line);padding:9px 0}.perspective:last-child{border:0}.perspective strong{display:block}.perspective p{margin:3px 0;font-size:13px}.chart-section{margin:20px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:16px}.grid .panel{padding:16px}.grid h3{font-size:13px}.bar{display:grid;grid-template-columns:minmax(85px,46%) 1fr 26px;gap:8px;align-items:center;margin:7px 0;font-size:12px}.bar .t{overflow-wrap:anywhere}.bar .track{height:7px;background:var(--soft);border-radius:4px;overflow:hidden}.bar .fill{height:100%;background:var(--accent)}.bar .v{text-align:right;font-variant-numeric:tabular-nums}.filters{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.filters label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}.filters select,.filters input{width:100%;min-width:0;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:9px;font-size:13px}.filters .search{grid-column:span 2}.filter-bottom{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:14px}.result-count{font-size:12px;color:var(--muted);margin:0}.tablewrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;margin-top:12px}table{border-collapse:collapse;width:100%;table-layout:fixed}th,td{text-align:left;padding:12px;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}th{font-size:11px;color:var(--muted);font-weight:700;background:var(--soft)}th:nth-child(1){width:9%}th:nth-child(2){width:9%}th:nth-child(3){width:14%}th:nth-child(4){width:9%}th:nth-child(5){width:11%}th:nth-child(6){width:30%}th:nth-child(7){width:18%}tr.row{cursor:pointer}tr.row:hover{background:var(--tint)}.finding-toggle{border:0;border-radius:3px;padding:0;background:transparent;text-align:left;font-weight:650;color:var(--text);width:100%}.finding-toggle:hover{background:transparent;color:var(--accent)}.finding-toggle .toggle-label{font-size:11px;display:block;font-weight:400;color:var(--accent);margin-top:4px}.location{display:block;overflow-wrap:anywhere;margin-top:4px;font-size:11px;color:var(--muted)}tr.detail>td{background:var(--tint);padding:18px 24px}tr.detail dl{display:grid;grid-template-columns:150px minmax(0,1fr);gap:8px 18px;margin:12px 0}tr.detail dt{font-size:12px;color:var(--muted)}tr.detail dd{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}.detail-actions{display:flex;justify-content:space-between;gap:12px;align-items:center}.action-guidance{border-left:3px solid var(--accent);padding:8px 12px;background:var(--panel)}.action-guidance strong{display:block}.action-guidance p{margin:4px 0}.verification-record,.workflow-record{margin:16px 0;padding:16px;border:1px solid var(--line);border-radius:6px;min-width:0}.verification-record h4,.workflow-record h4{font-size:15px;margin:0 0 8px}.verification-record h5,.workflow-record h5{font-size:13px;margin:18px 0 6px}.verification-record .prose,.workflow-record .prose{white-space:pre-wrap;overflow-wrap:anywhere}.verification-level,.workflow-status,.workflow-next{display:block;font-size:12px;font-weight:600;margin-top:7px}.history{border:1px dashed var(--line);padding:12px;margin-top:16px}.history p{margin:5px 0;white-space:pre-wrap}.lists{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:12px;margin-top:24px}.lists h2{font-size:16px}.lists ul{margin:10px 0 0;padding-left:18px}.empty{color:var(--muted);padding:20px}.snippet{margin:0;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);overflow-x:auto;font:12px/1.6 ui-monospace,Menlo,monospace;white-space:pre}.snippet span{display:block}.snippet .hit{background:var(--warn)}.snippet b{color:var(--muted);font-weight:400}.refs{margin:0;padding-left:18px}.refs li{overflow-wrap:anywhere}.rt{display:inline-block;min-width:60px;color:var(--muted);font-size:12px}.footer{font-size:12px;color:var(--muted);border-top:1px solid var(--line);margin-top:32px;padding-top:16px}code{font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
 @media(max-width:850px){main{padding:22px 18px}.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.hero{display:block}.hero-aside{text-align:left;max-width:none;margin-top:12px}.coverage-columns{grid-template-columns:1fr}.filters{grid-template-columns:repeat(2,minmax(0,1fr))}table,tbody,tr,td{display:block}thead{display:none}tr.row{padding:14px;border-bottom:1px solid var(--line);display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}tr.row td{border:0;padding:0;font-size:12px}tr.row td:before{content:attr(data-label);display:block;color:var(--muted);font-size:10px;margin-bottom:3px}tr.row td:nth-child(6){grid-column:1/-1;grid-row:1}.finding-toggle{font-size:15px}tr.row td:nth-child(7){grid-column:span 2}.detail-actions{align-items:flex-start}tr.detail>td{padding:16px}tr.detail dl{grid-template-columns:1fr;gap:3px}tr.detail dd{margin-bottom:10px}}
 @media(max-width:480px){main{padding:16px 12px}.masthead{align-items:flex-start;flex-direction:column;gap:12px}.tools{width:100%}.tools .button{flex:1}.card{padding:14px}.card .n{font-size:28px}.panel{padding:16px}.section-head{display:block}.filters{grid-template-columns:1fr 1fr;gap:10px}.filters label:first-child,.filters .search{grid-column:1/-1}.filter-bottom{align-items:flex-start;flex-direction:column}.scope-meta{grid-template-columns:1fr;gap:2px}.scope-meta dd{margin-bottom:8px}.priority-top{flex-wrap:wrap}}
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
@@ -1233,7 +1410,7 @@ function byId(id){return document.getElementById(id);}
 function fmt(text,values){return text.replace(/\{(\w+)\}/g,function(_,key){return values[key];});}
 function badge(f){return el('span',{'class':'badge '+f.severity},f.severity);}
 function excluded(f){return D.excluded_verdicts.indexOf(f.verdict)>=0;}
-function action(f){var proof=R.verification[f.id];return f.status==='Open'&&f.verdict==='Valid'&&f.confidence==='Confirmed'&&proof&&['static_supported','runtime_supported'].indexOf(proof.level)>=0?'fix_now':'verify_first';}
+function action(f){var proof=R.verification[f.id],workflow=(R.workflows||{})[f.id];return f.status==='Open'&&f.verdict==='Valid'&&f.confidence==='Confirmed'&&proof&&['static_supported','runtime_supported'].indexOf(proof.level)>=0&&(!workflow||workflow.status==='complete')?'fix_now':'verify_first';}
 function count(fs,key){var c=Object.create(null);fs.forEach(function(f){c[f[key]]=(c[f[key]]||0)+1;});return c;}
 function listInto(box,items,empty){if(!items.length){box.appendChild(el('p',{'class':'muted'},empty));return;}var ul=el('ul');items.forEach(function(x){ul.appendChild(el('li',null,x));});box.appendChild(ul);}
 document.title=L.dash_title+' - '+D.meta.project;byId('h').textContent=D.meta.project;
@@ -1245,10 +1422,11 @@ summary.appendChild(el('strong',null,fmt(L.unverified_line,{n:R.unverified,high:
 summary.appendChild(el('p',null,F.length?(D.open_hm?fmt(L.risk_summary,{n:D.open_hm}):(R.open_count?fmt(L.open_summary,{n:R.open_count}):L.no_open)):L.no_findings));
 summary.appendChild(el('p',{'class':'muted'},fmt(L.status_summary,{open:R.open_count,fixed:R.fixed,accepted:R.accepted,excluded:R.excluded})));
 var verificationSummary=byId('verification-summary'),verificationSentence=el('p');verificationSummary.setAttribute('aria-label',L.v_title);D.verification_summary.forEach(function(part){verificationSentence.appendChild(part.key?el('strong',{'data-verification-count':part.key},part.count):document.createTextNode(part.text));});verificationSummary.appendChild(verificationSentence);verificationSummary.appendChild(el('p',{'class':'muted'},L.v_note));
+function workflowNode(f){var view=D.workflow_views[f.id];if(!view)return null;var box=el('div',{'class':'workflow-record'});box.appendChild(el('h4',null,L.w_title));box.appendChild(el('p',{'class':'workflow-status'},L.w_status+': '+view.status));box.appendChild(el('p',{'class':'workflow-next'},L.w_next+': '+view.next_stage));box.appendChild(el('p',{'class':'muted'},L.w_note));if(view.gaps.length){box.appendChild(el('h5',null,L.w_gaps));var ul=el('ul',{'class':'workflow-gaps'});view.gaps.forEach(function(gap){ul.appendChild(el('li',null,gap));});box.appendChild(ul);}view.sections.forEach(function(section){var group=el('section');group.appendChild(el('h5',null,section.title));section.items.forEach(function(item){group.appendChild(el('p',{'class':'prose'},item));});box.appendChild(group);});box.appendChild(el('p',{'class':'muted'},L.w_safety));return box;}
 function verificationNode(f){var view=D.verification_views[f.id],box=el('div',{'class':'verification-record'});box.appendChild(el('h4',null,L.v_title));box.appendChild(el('p',{'class':'verification-level'},view.level));box.appendChild(el('p',null,L.v_retest+': '+view.retest));if(view.gaps.length){var ul=el('ul',{'class':'verification-gaps'});view.gaps.forEach(function(gap){ul.appendChild(el('li',null,gap));});box.appendChild(ul);}view.sections.forEach(function(section){var group=el('section');group.appendChild(el('h5',null,section.title));section.items.forEach(function(item){group.appendChild(el('p',{'class':'prose'},item));});box.appendChild(group);});return box;}
 
 [[L.open_hm,D.open_hm,'urgent',L.open_count+': '+R.open_count],[L.needs_validation,R.verify_first,'review',L.fix_now+': '+R.fix_now],[L.closed_count,R.fixed+' / '+R.accepted,'',L.included+': '+F.length],[L.excluded_short,R.excluded,'',L.all_records+': '+ALL.length]].forEach(function(c){var d=el('div',{'class':'card '+c[2]});d.appendChild(el('span',{'class':'l'},c[0]));d.appendChild(el('div',{'class':'n'},c[1]));d.appendChild(el('div',{'class':'sub'},c[3]));byId('cards').appendChild(d);});
-var top=R.queue.slice(0,4);top.forEach(function(item){var f=item.finding,p=el('article',{'class':'panel priority-item sev-'+f.severity}),head=el('div',{'class':'priority-top'});head.appendChild(badge(f));head.appendChild(el('span',{'class':'action-label'},L[item.action]));p.appendChild(head);var h=el('h3');h.appendChild(el('a',{href:'#'+item.anchor},f.id+' · '+f.title));p.appendChild(h);p.appendChild(el('div',{'class':'verdict'},f.confidence+' · '+f.verdict));p.appendChild(el('code',{'class':'location'},f.location));if(f.impact)p.appendChild(el('p',{'class':'impact'},f.impact));p.appendChild(el('p',{'class':'action'},item.action==='fix_now'?(f.fix||L.missing_fix):L.verify_first_note));byId('priority').appendChild(p);});
+var top=R.queue.slice(0,4);top.forEach(function(item){var f=item.finding,p=el('article',{'class':'panel priority-item sev-'+f.severity}),head=el('div',{'class':'priority-top'});head.appendChild(badge(f));head.appendChild(el('span',{'class':'action-label'},L[item.action]));p.appendChild(head);var h=el('h3');h.appendChild(el('a',{href:'#'+item.anchor},f.id+' · '+f.title));p.appendChild(h);p.appendChild(el('div',{'class':'verdict'},f.confidence+' · '+f.verdict));p.appendChild(el('code',{'class':'location'},f.location));if(D.workflow_views[f.id])p.appendChild(el('p',{'class':'workflow-next'},L.w_next+': '+D.workflow_views[f.id].next_stage));if(f.impact)p.appendChild(el('p',{'class':'impact'},f.impact));p.appendChild(el('p',{'class':'action'},item.action==='fix_now'?(f.fix||L.missing_fix):L.verify_first_note));byId('priority').appendChild(p);});
 if(!top.length)byId('priority').appendChild(el('div',{'class':'panel muted'},L.no_open));byId('queue-note').textContent=fmt(L.queue_more,{shown:top.length,total:R.open_count});
 ['scope','method','commit'].forEach(function(k){byId('scope-meta').appendChild(el('dt',null,L[k==='scope'?'scope_l':k]));byId('scope-meta').appendChild(el('dd',null,D.meta[k]||L.not_recorded));});
 byId('coverage-count').textContent=L.limitations_count+': '+D.limitations.length;listInto(byId('limitations'),D.limitations,L.limitations_empty);
@@ -1269,14 +1447,14 @@ if(f.status==='Open'&&!excluded(f)){var a=action(f),guidance=el('div',{'class':'
 function field(label,value){dl.appendChild(el('dt',null,label));var dd=el('dd');if(value instanceof Node)dd.appendChild(value);else dd.textContent=value;dl.appendChild(dd);}
 field(L.location,f.location);['actor','request','impact'].forEach(function(k){if(f[k])field(L[k],f[k]);});field(L.fix,f.fix||(f.status==='Open'&&!excluded(f)?L.missing_fix:L.not_recorded));field(L.evidence,f.validation.evidence||L.missing_evidence);if(f.validation.method)field(L.validation_method,f.validation.method);
 if(f.snippet){var pre=el('pre',{'class':'snippet'});f.snippet.lines.forEach(function(text,i){var n=f.snippet.start+i,ln=el('span',{'class':n>=f.snippet.hit[0]&&n<=f.snippet.hit[1]?'hit':''});ln.appendChild(el('b',null,String(n).padStart(5,' ')+' '));ln.appendChild(document.createTextNode(text));pre.appendChild(ln);});field(L.snippet,pre);if(f.snippet.truncated)field(L.note,L.snippet_truncated);}
-var refs=(f.source_link?[{type:'source',url:f.source_link,title:L.source_link}]:[]).concat(f.references||[]);if(refs.length){var ul=el('ul',{'class':'refs'});refs.forEach(function(r){var li=el('li');li.appendChild(el('span',{'class':'rt'},r.type));li.appendChild(el('a',{href:r.url,target:'_blank',rel:'noopener noreferrer'},r.title||r.url));ul.appendChild(li);});field(L.references,ul);}td.appendChild(dl);td.appendChild(verificationNode(f));
+var refs=(f.source_link?[{type:'source',url:f.source_link,title:L.source_link}]:[]).concat(f.references||[]);if(refs.length){var ul=el('ul',{'class':'refs'});refs.forEach(function(r){var li=el('li');li.appendChild(el('span',{'class':'rt'},r.type));li.appendChild(el('a',{href:r.url,target:'_blank',rel:'noopener noreferrer'},r.title||r.url));ul.appendChild(li);});field(L.references,ul);}td.appendChild(dl);var workflow=workflowNode(f);if(workflow)td.appendChild(workflow);td.appendChild(verificationNode(f));
 if(f.previous_validation&&typeof f.previous_validation==='object'){var history=el('aside',{'class':'history'});history.appendChild(el('strong',null,L.previous_validation));history.appendChild(el('p',null,L.history_note));['verdict','evidence','method'].forEach(function(k){if(typeof f.previous_validation[k]==='string')history.appendChild(el('p',null,f.previous_validation[k]));});td.appendChild(history);}dt.appendChild(td);return dt;}
 function draw(){var tb=byId('rows');tb.textContent='';var term=q.value.trim().toLowerCase(),scope=v('f-scope');var pool=scope==='all'?ALL:ALL.filter(function(f){return scope==='excluded'?excluded(f):!excluded(f);});var shown=pool.filter(function(f){return (!v('f-sev')||f.severity===v('f-sev'))&&(!v('f-conf')||f.confidence===v('f-conf'))&&(!v('f-cat')||f.category===v('f-cat'))&&(!v('f-status')||f.status===v('f-status'))&&(!v('f-verdict')||f.verdict===v('f-verdict'))&&(!term||JSON.stringify(f).toLowerCase().indexOf(term)>=0);});
 shown.sort(function(a,b){var status=v('f-sort')==='priority'?Number(a.status!=='Open')-Number(b.status!=='Open'):0;return status||SEV.indexOf(a.severity)-SEV.indexOf(b.severity)||(v('f-sort')==='priority'?Number(action(a)!=='fix_now')-Number(action(b)!=='fix_now'):0)||String(a.id).localeCompare(String(b.id));});
 byId('result-count').textContent=fmt(L.showing,{shown:shown.length,total:pool.length});
 if(!shown.length){var empty=el('tr'),td=el('td',{colspan:7,'class':'empty'},pool.length?L.no_matches:L.no_records);empty.appendChild(td);tb.appendChild(empty);return;}
 shown.forEach(function(f){var anchor=D.anchors[f.id],tr=el('tr',{'class':'row',id:anchor}),dt=details(f,anchor);var labels=['ID',L.severity,L.confidence,L.status,L.verdict,L.title_col,L.category];var values=[f.id,null,f.confidence,f.status,f.verdict,null,f.category],button;
-values.forEach(function(value,i){var cell=el('td',{'data-label':labels[i]},value);if(i===1)cell.appendChild(badge(f));if(i===5){button=el('button',{type:'button','class':'finding-toggle','aria-expanded':String(!dt.hidden),'aria-controls':dt.id},f.title);button.appendChild(el('span',{'class':'toggle-label'},dt.hidden?L.expand:L.collapse));cell.appendChild(button);cell.appendChild(el('code',{'class':'location'},f.location));cell.appendChild(el('span',{'class':'verification-level'},D.verification_views[f.id].level));}tr.appendChild(cell);});
+values.forEach(function(value,i){var cell=el('td',{'data-label':labels[i]},value);if(i===1)cell.appendChild(badge(f));if(i===5){button=el('button',{type:'button','class':'finding-toggle','aria-expanded':String(!dt.hidden),'aria-controls':dt.id},f.title);button.appendChild(el('span',{'class':'toggle-label'},dt.hidden?L.expand:L.collapse));cell.appendChild(button);cell.appendChild(el('code',{'class':'location'},f.location));cell.appendChild(el('span',{'class':'verification-level'},D.verification_views[f.id].level));if(D.workflow_views[f.id]){cell.appendChild(el('span',{'class':'workflow-status'},D.workflow_views[f.id].status));cell.appendChild(el('span',{'class':'workflow-next'},L.w_next+': '+D.workflow_views[f.id].next_stage));}}tr.appendChild(cell);});
 function toggle(){dt.hidden=!dt.hidden;if(dt.hidden)expanded.delete(anchor);else expanded.add(anchor);button.setAttribute('aria-expanded',String(!dt.hidden));button.querySelector('.toggle-label').textContent=dt.hidden?L.expand:L.collapse;}
 button.onclick=function(e){e.stopPropagation();toggle();};tr.onclick=function(e){if(!e.target.closest('a,button'))toggle();};tb.appendChild(tr);tb.appendChild(dt);});}
 function openHash(){var anchor=window.location.hash.slice(1),f=ALL.find(function(x){return D.anchors[x.id]===anchor;});if(!f)return;reset();if(excluded(f))byId('f-scope').value='all';expanded.add(anchor);draw();var row=byId(anchor);row.scrollIntoView({block:'start'});row.querySelector('button').focus({preventScroll:true});}
@@ -1298,8 +1476,11 @@ def render_dashboard(data, L, lang):
             http_url(ref["url"], "references.url")
     model = report_model(data)
     verification_states = derive_verification(data, SchemaError)
+    workflows = workflow_states(data)
     payload = {
         "meta": data["meta"],
+        "workflow_views": {f["id"]: workflow_view(data, f, workflows[f["id"]], lang)
+                           for f in data["findings"] if f["id"] in workflows},
         "findings": [display_finding(f, model["verification"][f["id"]]) for f in data["findings"]],
         "labels": L, "open_hm": stats(data)["open_hm"], "report": model,
         "verification_views": {f["id"]: verification_view(data, f, verification_states[f["id"]], lang)
