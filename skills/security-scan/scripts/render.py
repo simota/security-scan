@@ -910,13 +910,15 @@ def verification_view(data, finding, state, lang):
     run_items = []
     for run_id in state.get("run_ids", []):
         run = run_index[run_id]
-        context = ", ".join(key + "=" + text(run.get("context", {}).get(key, ""))
+        # Separate context fields keep version identifiers off a long wrapped
+        # sentence, where PDF text extractors can remove a line-ending hyphen.
+        context = "\n".join(key + "=" + text(run.get("context", {}).get(key, ""))
                             for key in ("environment", "configuration", "fixture", "test_version", "boundary"))
         run_items.append(join(text(run_id) + " · " + label(run["role"]) + " · " + label(run["result"]),
                               L["v_case"] + ": " + text(run["case_id"]),
                               L["v_commit"] + ": " + text(run["commit"]),
                               "diff_sha256: " + text(run["diff_sha256"]) if run.get("diff_sha256") else "",
-                              L["v_context"] + ": " + context,
+                              L["v_context"] + ":\n" + context,
                               L["v_expected"] + ": " + text(run.get("expected")),
                               L["v_observed"] + ": " + text(run.get("observed")),
                               L["v_failure"] + ": " + text(run.get("failure_kind")),

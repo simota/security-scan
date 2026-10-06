@@ -161,6 +161,20 @@ class VerificationReportTests(unittest.TestCase):
         self.assertNotEqual(localized["en"]["level"], localized["ja"]["level"])
         self.assertNotEqual(localized["en"]["retest"], localized["ja"]["retest"])
 
+    def test_execution_context_fields_keep_individual_lines_for_pdf_extraction(self):
+        source = fixture()
+        data = self.load_data(source)
+        for lang in ("en", "ja"):
+            dashboard, _ = self.output(data, lang)
+            view = self.payload(dashboard)["verification_views"]["F-001"]
+            runs = next(section for section in view["sections"]
+                        if section["title"] == self.renderer.LABELS[lang]["v_runs"])
+            for item in runs["items"]:
+                lines = item.splitlines()
+                self.assertIn("test_version=security-tests-v1", lines)
+                self.assertIn("configuration=synthetic-in-memory-v1", lines)
+                self.assertIn("fixture=two-fake-tenants-v1", lines)
+
     def test_fixed_status_and_incomplete_controls_never_count_as_verified_retests(self):
         for missing, expected_retest, gap in (
             ("remediation", "fix_claimed", "retest_missing"),
