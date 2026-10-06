@@ -77,3 +77,13 @@ assessment of the target application.
 Describe weaknesses and parameters, not working payloads. Never print secret
 values: use location and kind only. Evidence summaries and commands must be
 sanitized before entry; heuristic output redaction is not a sharing guarantee.
+
+## Ordered workflow visibility
+
+When a finding opts into sequential verification, show its current stage,
+next handoff, hold or stale reason and submitted evidence lineage in both
+languages and report formats. A completed workflow is an additional readiness
+gate, not a replacement for the verification evidence rules. Keep recorded
+verdicts and incomplete historical rounds visible. State that reviewers submit
+the results and that the CLI does not run AI reviewers or verify artifact
+truthfulness.

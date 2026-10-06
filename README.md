@@ -121,6 +121,22 @@ nonblank strings; malformed types are rejected before output, rather than
 coerced into text or allowed to cause a traceback. Optional text can be omitted
 or empty. See the schema for object/list fields and the absent source-URL case.
 
+### Ordered verification handoffs
+
+The optional local workflow splits verification into **conditions → independent
+falsification → evidence-based decision**. Reviewers receive a structured
+handoff and submit their observations; the CLI validates the result and advances
+only the permitted next stage. It records progress and input/output lineage,
+holds unresolved work, and makes an old review stale when its inputs change.
+
+This coordinates submitted review work. It does not launch AI reviewers, require
+an API key, execute evidence commands or run tests against an application.
+Different reviewer labels separate responsibilities but do not authenticate
+people. The existing evidence rules still decide whether a result is sufficient;
+a completed stage or several agreeing reviewers cannot certify it by themselves.
+See `skills/security-scan/reference/verification-workflow.md` for the commands,
+stage contract and resuming interrupted work.
+
 ### Structured verification records
 
 New evidence-backed assessments use `schema_version: 2`, a pinned `assessment`,
@@ -242,12 +258,14 @@ skills/security-scan/
   reference/perspectives.md    the review perspectives
   reference/dependencies.md    dependency, vulnerability and supply-chain review
   reference/validation.md      verdicts and how each finding is validated
+  reference/verification-workflow.md conditions, falsification and decision handoffs
   reference/fix-verification.md local regression tests that lock a fix in
   reference/report.md          checklist and findings report formats
   reference/findings-schema.md findings.json and the render command
   scripts/deps_scan.py         dependency inventory, supply-chain checks, audits (stdlib only)
   scripts/render.py            findings.json -> dashboard / assessment PDF (stdlib only)
   scripts/verification.py      evidence consistency and derived verification/retest states
+  scripts/verification_workflow.py ordered local review handoffs, progress and lineage
 examples/findings.sample.json  fictional legacy sample for make demo / make check
 examples/findings.verification.sample.json  synthetic structured-verification example
 ```

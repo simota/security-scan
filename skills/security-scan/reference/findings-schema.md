@@ -285,6 +285,36 @@ that every relevant route was examined. The records grant no authorization to
 run commands or use credentials. Runtime work remains explicitly authorized,
 owned local/throwaway testing under `reference/fix-verification.md`.
 
+## Optional sequential verification workflow
+
+A schema-version-2 finding can carry `verification_workflow`, managed by
+`scripts/verification_workflow.py`. Use `reference/verification-workflow.md` for
+the commands and submission schema. Its explicit workflow version, current
+input digest and event history bind ordered conditions, independent
+falsification and decision submissions to the assessment records they reviewed.
+
+The CLI produces new handoffs, validates submitted stage results, applies the
+permitted stage-owned fields and records the input/output digest transition.
+A candidate may start `Unverified`. Conditions records the four claims and
+environment; falsification records counterchecks and review; decision proposes
+an explicit verdict that must pass the existing evidence rules. This never
+silently promotes the separate confidence field. Remediation records are not
+changed by this workflow.
+
+The derived workflow state and next stage are recomputed. Supplied derived flags
+are not authority. Relevant external changes make the workflow stale; resume
+requires a new round while preserving prior submissions. Held, error, unknown,
+conflicting, stale or incomplete workflows cannot make an opted-in finding
+ready to fix. Completion is an additional gate, not proof of artifact
+truthfulness, actual execution or reviewer identity. The dashboard and PDF
+show the progress, lineage and limitations. Only curated, sanitized workflow
+text is embedded in the report payload.
+
+Versionless/version-1 extension fields remain historical and do not activate
+this workflow. Schema-version-2 findings without a workflow keep the existing
+verification behavior. The optional workflow does not add an AI provider,
+scanner, application-test executor or authorization to perform a live test.
+
 ## Reading the outputs
 
 - Both summaries state recorded `Unverified`, insufficient-verification and

@@ -1,0 +1,43 @@
+{
+  "schema_version": 2,
+  "meta": {
+    "project": "Synthetic ordered-review fixture",
+    "date": "2026-10-06",
+    "commit": "1111111111111111111111111111111111111111",
+    "scope": "Fictional input for a local manual-review workflow. No application was assessed and no application test was executed."
+  },
+  "assessment": {
+    "repository": "synthetic/sample-app",
+    "commit": "1111111111111111111111111111111111111111",
+    "worktree": "clean"
+  },
+  "evidence": [
+    {
+      "id": "source-before",
+      "kind": "source",
+      "commit": "1111111111111111111111111111111111111111",
+      "location": "src/orders.py:12-24",
+      "summary": "Synthetic example: registered customer route reads an order without owner scope.",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ],
+  "findings": [
+    {
+      "id": "F-001",
+      "title": "Synthetic order detail lacks owner scoping",
+      "severity": "High",
+      "confidence": "Suspected",
+      "location": "src/orders.py:18",
+      "status": "Open",
+      "validation": {
+        "verdict": "Unverified",
+        "method": "Manual staged review pending",
+        "evidence": "Synthetic candidate; no real security assessment."
+      }
+    }
+  ],
+  "limitations": [
+    "All evidence, commit IDs, hashes, reviewers and run results in this file are invented test fixtures, not actual security findings or executed tests.",
+    "Structural validation cannot verify that an artifact exists or that its contents prove the claim."
+  ]
+}
