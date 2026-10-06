@@ -1,0 +1,274 @@
+{
+  "version": 1,
+  "description": "Synthetic gate regression cases, not detector evaluation. All observations are manually constructed; no models, applications, recorded commands, or vulnerability scans run.",
+  "categories": {
+    "TP": "A supported synthetic vulnerability stays in the accepted findings.",
+    "FP": "A synthetic false alarm is excluded only with positive counterevidence.",
+    "TN": "A benign or inapplicable scope cell receives independent review.",
+    "FN": "An omitted candidate or coverage gap cannot yield a clean completed audit.",
+    "guardrail": "Uncertainty, dissent, incomplete review, and stale inputs block completion.",
+    "malformed": "Invalid identifiers or references are rejected."
+  },
+  "cases": [
+    {
+      "id": "backed-finding-kept",
+      "category": "TP",
+      "scenario": "supported",
+      "description": "Four source-backed claims, claim-specific negative checks and complete independent coverage retain the candidate.",
+      "expected": {
+        "audit": "complete",
+        "disposition": "kept"
+      }
+    },
+    {
+      "id": "evidence-backed-false-positive-excluded",
+      "category": "FP",
+      "scenario": "false_positive",
+      "description": "A contradicted precondition and explicit source-backed exclusion remove a false alarm.",
+      "expected": {
+        "audit": "complete",
+        "disposition": "excluded"
+      }
+    },
+    {
+      "id": "evidence-backed-inapplicable-excluded",
+      "category": "FP",
+      "scenario": "not_applicable",
+      "description": "An inapplicable candidate still completes all passes and records an exclusion basis.",
+      "expected": {
+        "audit": "complete",
+        "disposition": "excluded"
+      }
+    },
+    {
+      "id": "benign-empty-scope-reviewed",
+      "category": "TN",
+      "scenario": "supported",
+      "description": "The benign list route and absent admin route are independently challenged despite producing no candidates.",
+      "expected": {
+        "audit": "complete",
+        "disposition": "kept"
+      }
+    },
+    {
+      "id": "untracked-candidate-blocked",
+      "category": "FN",
+      "scenario": "untracked_candidate",
+      "description": "A second candidate omitted from discovery coverage prevents completion.",
+      "expected": {
+        "audit": "held",
+        "disposition": "held"
+      }
+    },
+    {
+      "id": "dropped-candidate-record-rejected",
+      "category": "FN",
+      "scenario": "dropped_candidate",
+      "description": "Deleting a candidate while discovery still references it is malformed, not a clean scan.",
+      "expected": {
+        "audit": "rejected",
+        "disposition": "rejected"
+      }
+    },
+    {
+      "id": "unchecked-route-blocked",
+      "category": "FN",
+      "scenario": "unchecked_route",
+      "description": "A planned route explicitly marked not_checked cannot complete discovery.",
+      "expected": {
+        "audit": "held",
+        "disposition": "held"
+      }
+    },
+    {
+      "id": "missing-discovery-cell-blocked",
+      "category": "FN",
+      "scenario": "missing_discovery",
+      "description": "A coverage cell without any discovery record is held.",
+      "expected": {
+        "audit": "held",
+        "disposition": "held"
+      }
+    },
+    {
+      "id": "unchallenged-benign-route-blocked",
+      "category": "FN",
+      "scenario": "unchallenged_benign",
+      "description": "Completing the finding alone is insufficient when a no-candidate route was never challenged.",
+      "expected": {
+        "audit": "held",
+        "disposition": "held"
+      }
+    },
+    {
+      "id": "unchallenged-inapplicable-route-blocked",
+      "category": "FN",
+      "scenario": "unchallenged_na",
+      "description": "First-pass N/A is not an exemption from independent scope challenge.",
+      "expected": {
+        "audit": "held",
+        "disposition": "held"
+      }
+    },
+    {
+      "id": "zero-findings-not-complete",
+      "category": "FN",
+      "scenario": "zero_findings",
+      "description": "An empty finding set cannot silently satisfy all three passes.",
+      "expected": {
+        "audit": "held",
+        "disposition": "held"
+      }
+    },
+    {
+      "id": "associated-scope-unchallenged",
+      "category": "guardrail",
+      "scenario": "unchallenged_candidate",
+      "description": "A candidate requires its associated scope challenge.",
+      "expected": {
+        "audit": "held",
+        "disposition": "held"
+      }
+    },
+    {
+      "id": "scope-contradiction-blocked",
+      "category": "guardrail",
+      "scenario": "scope_contradiction",
+      "description": "Contradictory scope evidence blocks a clean outcome.",
+      "expected": {
+        "audit": "held",
+        "disposition": "held"
+      }
+    },
+    {
+      "id": "scope-unknown-blocked",
+      "category": "guardrail",
+      "scenario": "scope_unresolved",
+      "description": "An unresolved challenge is not counted as coverage.",
+      "expected": {
+        "audit": "held",
+        "disposition": "held"
+      }
+    },
+    {
+      "id": "unknown-environment-blocked",
+      "category": "guardrail",
+      "scenario": "unknown_environment",
+      "description": "Unknown environment applicability cannot promote the candidate.",
+      "expected": {
+        "audit": "held",
+        "disposition": "held"
+      }
+    },
+    {
+      "id": "unsupported-runtime-blocked",
+      "category": "guardrail",
+      "scenario": "unsupported_runtime",
+      "description": "A synthetic unsupported run record is not a successful reproduction.",
+      "expected": {
+        "audit": "held",
+        "disposition": "held"
+      }
+    },
+    {
+      "id": "dissent-outweighs-majority",
+      "category": "guardrail",
+      "scenario": "dissent",
+      "description": "One unresolved dissent blocks completion despite five agreeing reviews.",
+      "expected": {
+        "audit": "held",
+        "disposition": "held"
+      }
+    },
+    {
+      "id": "actor-own-coverage-required",
+      "category": "guardrail",
+      "scenario": "missing_own_coverage",
+      "description": "Another reviewer's complete coverage does not repair the submitting actor's incomplete review.",
+      "expected": {
+        "audit": "held",
+        "disposition": "held"
+      }
+    },
+    {
+      "id": "four-claim-negative-matrix-required",
+      "category": "guardrail",
+      "scenario": "missing_negative_claim",
+      "description": "Three negative checks cannot substitute for checking all four claims.",
+      "expected": {
+        "audit": "held",
+        "disposition": "held"
+      }
+    },
+    {
+      "id": "unresolved-negative-check-blocked",
+      "category": "guardrail",
+      "scenario": "unresolved_negative",
+      "description": "An unresolved negative check is not a passed check.",
+      "expected": {
+        "audit": "held",
+        "disposition": "held"
+      }
+    },
+    {
+      "id": "evidence-change-invalidates-round",
+      "category": "guardrail",
+      "scenario": "stale_evidence",
+      "description": "Changing a referenced source after completion invalidates the reviewed round.",
+      "expected": {
+        "audit": "held",
+        "disposition": "held"
+      }
+    },
+    {
+      "id": "discovery-change-invalidates-round",
+      "category": "guardrail",
+      "scenario": "stale_discovery",
+      "description": "Changing discovery after completion invalidates downstream review.",
+      "expected": {
+        "audit": "held",
+        "disposition": "held"
+      }
+    },
+    {
+      "id": "unknown-coverage-id-rejected",
+      "category": "malformed",
+      "scenario": "unknown_coverage",
+      "description": "A scope challenge must reference a planned coverage ID.",
+      "expected": {
+        "audit": "rejected",
+        "disposition": "rejected"
+      }
+    },
+    {
+      "id": "duplicate-coverage-id-rejected",
+      "category": "malformed",
+      "scenario": "duplicate_coverage",
+      "description": "Duplicate scope challenge references are rejected.",
+      "expected": {
+        "audit": "rejected",
+        "disposition": "rejected"
+      }
+    },
+    {
+      "id": "unknown-evidence-id-rejected",
+      "category": "malformed",
+      "scenario": "unknown_evidence",
+      "description": "A negative check cannot cite an unregistered evidence ID.",
+      "expected": {
+        "audit": "rejected",
+        "disposition": "rejected"
+      }
+    },
+    {
+      "id": "duplicate-evidence-ref-rejected",
+      "category": "malformed",
+      "scenario": "duplicate_evidence",
+      "description": "Repeated evidence references are malformed, not additional corroboration.",
+      "expected": {
+        "audit": "rejected",
+        "disposition": "rejected"
+      }
+    }
+  ]
+}

@@ -25,6 +25,7 @@ from url_redaction import redact_urls
 from verification import CLAIMS, derive_verification, validate_verification
 from verification_workflow import derive_workflow, validate_workflows
 from evidence_integrity import verify_evidence
+from three_pass import derive_three_pass
 
 SEVERITIES = ["High", "Medium", "Low", "Info"]
 CONFIDENCES = ["Confirmed", "Environment-dependent", "Suspected"]
@@ -446,6 +447,86 @@ LABELS["ja"].update(w_init="開始", w_scope="引き継ぎ時に固定した範�
                     w_restart="成立条件の確認から再開。以前の段階は履歴として保持",
                     w_continue="入力を変更せず、保留した段階を再開")
 
+
+THREE_PASS_LABELS = {
+    "en": {
+        "p_history": "Historical discovery (not current proof)",
+        "p_claim": "Claim challenged", "p_scope_checks": "Recorded scope challenges",
+        "p_title": "Three-pass assurance review", "p_status": "Assessment state",
+        "p_complete": "Three passes complete (declared scope and records only)",
+        "p_held": "Held: review gaps remain", "p_not_started": "Not started",
+        "p_discovery": "1. Discovery and scope coverage",
+        "p_conditions": "2. Finding conditions",
+        "p_challenge": "3. Independent challenge and decision",
+        "p_pass_complete": "Complete (record checks only)",
+        "p_count_cells": "{completed}/{total} planned scope cells accounted for",
+        "p_count_findings": "{completed}/{total} findings complete",
+        "p_challenge_count": "Scope challenge: {completed}/{total} planned cells reviewed",
+        "p_note": "Three ordered passes: record discovery across the planned scope, verify each finding's conditions, then independently challenge the evidence and record a decision. Actor labels are declarations, not authenticated identities.",
+        "p_safety": "Completeness covers the declared scope and supplied records only. It is not an accuracy percentage, proof that all vulnerabilities were found, a security guarantee, or verification of a fix. No AI provider or application test is run by this report.",
+        "p_gaps": "Outstanding gaps", "p_discovery_record": "Recorded discovery coverage",
+        "p_finding_states": "Current finding handoffs", "p_missing_coverage": "Missing discovery coverage IDs",
+        "p_missing_challenge": "Missing scope-challenge IDs", "p_untracked_findings": "Findings missing discovery mapping",
+        "p_checked": "Checked", "p_not_applicable": "Not applicable (evidence required)",
+        "p_not_checked": "Not checked", "p_target": "Target", "p_coverage_id": "Coverage ID",
+        "p_finding_ids": "Finding IDs", "p_summary": "Discovery summary",
+        "p_gap_unknown": "Required review records are incomplete; inspect the current handoff.",
+    },
+    "ja": {
+        "p_history": "過去の発見記録（現在の根拠ではありません）",
+        "p_claim": "反証した成立条件", "p_scope_checks": "対象範囲の反証記録",
+        "p_title": "3パスの確認", "p_status": "診断全体の状態",
+        "p_complete": "3パス完了（申告された範囲と記録のみ）",
+        "p_held": "保留：確認の不足あり", "p_not_started": "未開始",
+        "p_discovery": "1. 候補の発見と対象範囲の確認", "p_conditions": "2. 指摘の成立条件の確認",
+        "p_challenge": "3. 独立した反証と判定", "p_pass_complete": "完了（記録の確認のみ）",
+        "p_count_cells": "計画した対象 {total} 件中 {completed} 件を確認",
+        "p_count_findings": "指摘 {total} 件中 {completed} 件が完了",
+        "p_challenge_count": "対象範囲の再確認：計画した対象 {total} 件中 {completed} 件",
+        "p_note": "計画した対象範囲の発見記録、各指摘の成立条件、独立した反証と判定の順に進めます。実施者の名前は申告であり、本人確認済みの身元ではありません。",
+        "p_safety": "完了は申告された範囲と提出された記録のみを対象とします。精度の割合、すべての脆弱性の発見、安全性の保証、修正結果の検証を意味しません。このレポートは AI サービスやアプリのテストを実行しません。",
+        "p_gaps": "未完了の確認事項", "p_discovery_record": "対象範囲ごとの発見記録",
+        "p_finding_states": "各指摘の現在の引き継ぎ", "p_missing_coverage": "発見記録が不足する対象 ID",
+        "p_missing_challenge": "反証の確認が不足する対象 ID", "p_untracked_findings": "発見記録と対応していない指摘",
+        "p_checked": "確認済み", "p_not_applicable": "対象外（根拠が必要）", "p_not_checked": "未確認",
+        "p_target": "対象", "p_coverage_id": "対象 ID", "p_finding_ids": "指摘 ID",
+        "p_summary": "発見の要約", "p_gap_unknown": "必要な確認記録が不足しています。現在の引き継ぎを確認してください。",
+    },
+}
+for _lang, _labels in THREE_PASS_LABELS.items():
+    LABELS[_lang].update(_labels)
+
+_THREE_PASS_GAPS = {
+    "coverage_incomplete": ("Discovery has not accounted for every planned cell.", "計画したすべての対象について、発見時の確認記録がそろっていません。"),
+    "findings_untracked": ("Some findings are not mapped to discovery coverage.", "発見時の確認対象に対応していない指摘があります。"),
+    "discovery_incomplete": ("Complete the discovery records before advancing.", "先へ進む前に発見時の記録を完成させてください。"),
+    "workflows_incomplete": ("Some findings still need current, complete handoffs.", "現在の入力に対応した引き継ぎが未完了の指摘があります。"),
+    "no_findings": ("No candidates are recorded. Zero findings does not establish security or complete this assurance profile.", "指摘候補が記録されていません。指摘がゼロでも、安全性の確認やこの確認手順の完了にはなりません。"),
+    "coverage_challenge_incomplete": ("Independent challenge does not cover the full declared scope.", "独立した反証が申告された対象範囲全体をカバーしていません。"),
+    "coverage_challenge_unresolved": ("Scope challenge contains unresolved or contradictory evidence.", "対象範囲の再確認に未解決または矛盾する根拠があります。"),
+    "actors_not_independent": ("Discovery, conditions and challenge require distinct declared actors.", "発見・成立条件・反証には、それぞれ異なる実施者の申告が必要です。"),
+    "falsification_claims_incomplete": ("Independent negative checks must address all four claims.", "独立した反証では、4つの成立条件すべての確認が必要です。"),
+    "review_incomplete": ("An independent reviewer must cover all claim evidence at every severity.", "すべての重大度で、成立条件の全根拠を独立した確認者が再読する必要があります。"),
+}
+for _code, (_en, _ja) in _THREE_PASS_GAPS.items():
+    LABELS["en"]["p_gap_" + _code] = _en
+    LABELS["ja"]["p_gap_" + _code] = _ja
+for _code, _source in {
+    "three_pass_discovery_incomplete": "coverage_incomplete",
+    "three_pass_candidates_untracked": "findings_untracked",
+    "three_pass_independence_missing": "actors_not_independent",
+    "three_pass_negative_checks_incomplete": "falsification_claims_incomplete",
+    "three_pass_review_coverage_incomplete": "review_incomplete",
+    "three_pass_scope_challenge_incomplete": "coverage_challenge_incomplete",
+    "three_pass_scope_contradiction": "coverage_challenge_unresolved",
+    "three_pass_workflow_missing": "workflows_incomplete",
+    "three_pass_no_candidates": "no_findings",
+    "three_pass_workflows_incomplete": "workflows_incomplete",
+}.items():
+    for _lang in ("en", "ja"):
+        LABELS[_lang]["p_gap_" + _code] = LABELS[_lang]["p_gap_" + _source]
+        LABELS[_lang]["w_gap_" + _code] = LABELS[_lang]["p_gap_" + _source]
+
 _GAP_LABELS = {
     "legacy_details_missing": ("Detailed verification evidence was not recorded.", "詳細な検証根拠が記録されていません。"),
     "verdict_unresolved": ("The finding verdict has not been settled.", "指摘の妥当性判定がまだ確定していません。"),
@@ -686,7 +767,8 @@ def action_kind(finding, verification=None, workflow=None):
     return ("fix_now" if finding["status"] == "Open" and finding["verdict"] == "Valid"
             and finding["confidence"] == "Confirmed"
             and (verification or {}).get("level") in ("static_supported", "runtime_supported")
-            and ("verification_workflow" not in finding or (workflow or {}).get("status") == "complete")
+            and (("verification_workflow" not in finding and workflow is None)
+                 or (workflow or {}).get("status") == "complete")
             else "verify_first")
 
 
@@ -708,7 +790,7 @@ def display_finding(finding, state):
 def workflow_states(data, integrity=None):
     """Only schema-2 opt-in records affect the staged workflow display."""
     return {f["id"]: derive_workflow(data, f, SchemaError, integrity=integrity) for f in data["findings"]
-            if data.get("schema_version") == 2 and "verification_workflow" in f}
+            if data.get("schema_version") == 2 and ("verification_workflow" in f or "three_pass" in data)}
 
 
 def report_model(data, integrity=None):
@@ -716,12 +798,16 @@ def report_model(data, integrity=None):
     fs = active(data)
     verification = derive_verification(data, SchemaError, integrity=integrity)
     workflows = workflow_states(data, integrity=integrity)
+    profile = derive_three_pass(data, SchemaError, integrity=integrity)
     queue = [{"finding": display_finding(f, verification[f["id"]]),
               "action": action_kind(f, verification[f["id"]], workflows.get(f["id"])), "anchor": finding_anchor(data, f)}
              for f in fs if f["status"] == "Open"]
     queue.sort(key=lambda item: (SEVERITIES.index(item["finding"]["severity"]),
                                 item["action"] != "fix_now", str(item["finding"]["id"])))
     return {
+        **({"three_pass": {"status": profile["status"],
+                          "passes": [{key: item[key] for key in ("id", "status", "completed", "total")}
+                                     for item in profile["passes"]]}} if profile["opted_in"] else {}),
         **({"workflows": {key: {"status": state["status"], "next_stage": state["next_stage"]}
                            for key, state in workflows.items()}} if workflows else {}),
         "open_count": len(queue),
@@ -890,7 +976,7 @@ tr{break-inside:avoid;page-break-inside:avoid}
 .evidence-cell span{color:#566977}
 .finding{margin:6mm 0 0;padding:4mm 0 0;border-top:1px solid #bac6d1;break-inside:auto;page-break-inside:auto}
 .finding.compact{break-inside:avoid;page-break-inside:avoid}
-.verification-record,.workflow-record{margin:3mm 0;padding:3mm;border:1px solid #d9dfe5;break-inside:auto;page-break-inside:auto}.verification-record h5,.workflow-record h5{font-size:9pt;margin:3mm 0 1mm;break-after:avoid}.verification-record p,.workflow-record p{font-size:8.3pt;overflow-wrap:anywhere}.verification-level{font-weight:600}.verification-record section,.workflow-record section{break-inside:auto;page-break-inside:auto}
+.three-pass-summary{margin:16px 0;overflow-wrap:anywhere;break-inside:auto!important;page-break-inside:auto}.three-pass-summary .prose{white-space:pre-wrap;overflow-wrap:anywhere}.three-pass-summary h4{margin:12px 0 4px}.three-pass-stage{break-inside:avoid}.verification-record,.workflow-record{margin:3mm 0;padding:3mm;border:1px solid #d9dfe5;break-inside:auto;page-break-inside:auto}.verification-record h5,.workflow-record h5{font-size:9pt;margin:3mm 0 1mm;break-after:avoid}.verification-record p,.workflow-record p{font-size:8.3pt;overflow-wrap:anywhere}.verification-level{font-weight:600}.verification-record section,.workflow-record section{break-inside:auto;page-break-inside:auto}
 .validation-method{break-before:avoid;page-break-before:avoid}
 .finding-header{break-inside:avoid;page-break-inside:avoid;break-after:avoid;page-break-after:avoid}
 .finding h3{font-size:13pt;margin:0 0 2.5mm}
@@ -1087,6 +1173,8 @@ def verification_view(data, finding, state, lang):
                                   text(record.get("reason")), refs(record))
                               for key in CLAIMS for record in (verification["claims"][key],)])
         section("v_falsification", [join(text(record.get("check")), label(record.get("result")),
+                                         L["p_claim"] + ": " + label(record["claim"])
+                                         if "three_pass" in data and record.get("claim") in CLAIMS else "",
                                          text(record.get("reason")), refs(record))
                                     for record in verification.get("falsification", [])])
         section("v_reviews", [join(text(record.get("reviewer")), label(record.get("conclusion")),
@@ -1214,7 +1302,7 @@ def workflow_view(data, finding, state, lang):
                          "items": [record_text(record) for record in records] or [L["w_pending"]]})
     if state.get("input_digest"):
         sections.append({"title": L["w_lineage"], "items": [L["w_current_digest"] + ": " + text(state["input_digest"]),
-                                                                          L["w_recorded_digest"] + ": " + text(finding["verification_workflow"]["input_digest"])]})
+                                                                          L["w_recorded_digest"] + ": " + text(finding.get("verification_workflow", {}).get("input_digest", L["not_recorded"]))]})
     history = [record_text(record) for record in state.get("history", []) if isinstance(record, dict)]
     sections.append({"title": L["w_history"], "items": [entry for entry in history if entry] or [L["w_no_history"]]})
     gaps = [reason(item) for item in state.get("reasons", []) if isinstance(item, str)] if state["status"] != "complete" else []
@@ -1222,6 +1310,144 @@ def workflow_view(data, finding, state, lang):
         gaps = [reason(state["reason"])]
     return {"status": label(state["status"]), "next_stage": label(state["next_stage"]) if state.get("next_stage") else L["w_none"],
             "gaps": gaps, "sections": sections}
+
+
+def three_pass_view(data, lang, integrity=None):
+    """Curated profile projection; arbitrary extensions and raw records stay private."""
+    state = derive_three_pass(data, SchemaError, integrity=integrity)
+    if not state["opted_in"]:
+        return None
+    L = LABELS[lang]
+
+    def text(value):
+        value = str(value if value is not None else "")
+        return L["v_withheld"] if PRIVATE_KEY_RE.search(value) else redact(value)
+
+    def gap(code):
+        # Reason codes are derived, but keep a safe localized fallback, never raw data.
+        return L.get("p_gap_" + str(code), L.get("w_gap_" + str(code),
+                     L.get("v_gap_" + str(code), L["p_gap_unknown"])))
+
+    def gaps(codes):
+        return list(dict.fromkeys(gap(code) for code in codes))
+
+    discovery = state.get("discovery", {})
+    challenge = state.get("coverage_challenge", {})
+    overall_gaps = gaps(state.get("reasons", []))
+    sections = []
+
+    def discovery_items(profile):
+        # Historical snapshots are untrusted journal bodies, not current schema.
+        record = profile.get("discovery", {})
+        record = record if isinstance(record, dict) else {}
+        overview = [L[label] + ": " + text(record[key]) for key, label in
+                    (("actor", "w_actor"), ("summary", "p_summary")) if isinstance(record.get(key), str)]
+        rows = record.get("checks", [])
+        rows = rows if isinstance(rows, list) else []
+        checks = {item["coverage_id"]: item for item in rows
+                  if isinstance(item, dict) and isinstance(item.get("coverage_id"), str)}
+        cells = profile.get("coverage", [])
+        for cell in cells if isinstance(cells, list) else []:
+            if not isinstance(cell, dict) or not all(isinstance(cell.get(key), str) for key in ("id", "perspective", "target")):
+                continue
+            check = checks.get(cell["id"], {})
+            status = check.get("status")
+            status = status if status in ("checked", "not_applicable", "not_checked") else "not_checked"
+            lines = [L["p_coverage_id"] + ": " + text(cell["id"]),
+                     L["perspective"] + ": " + text(cell["perspective"]),
+                     L["p_target"] + ": " + text(cell["target"]),
+                     L["status"] + ": " + L["p_" + status]]
+            if isinstance(check.get("reason"), str):
+                lines.append(L["w_reason"] + ": " + text(check["reason"]))
+            for key, label in (("evidence_ids", "w_evidence_ids"), ("finding_ids", "p_finding_ids")):
+                if isinstance(check.get(key), list):
+                    refs = [text(value) for value in check[key] if isinstance(value, str)]
+                    if refs:
+                        lines.append(L[label] + ": " + ", ".join(refs))
+            overview.append("\n".join(lines))
+        return overview
+
+    overview = discovery_items(data["three_pass"])
+    sections.append({"title": L["p_discovery_record"], "items": overview})
+    seen_discoveries = {tuple(overview)}
+    for workflow in state.get("findings", {}).values():
+        for event in workflow.get("history", []):
+            snapshot = event.get("three_pass_snapshot")
+            if not isinstance(snapshot, dict):
+                continue
+            items = discovery_items(snapshot)
+            if items and tuple(items) not in seen_discoveries:
+                seen_discoveries.add(tuple(items))
+                sections.append({"title": L["p_history"], "items": items})
+    pass_views = []
+    findings = state.get("findings", {})
+    for item in state["passes"]:
+        pass_gaps = []
+        if item["id"] == "discovery":
+            pass_gaps = gaps(discovery.get("reasons", []))
+            for key, label in (("missing_coverage_ids", "p_missing_coverage"), ("untracked_finding_ids", "p_untracked_findings")):
+                if discovery.get(key):
+                    pass_gaps.append(L[label] + ": " + ", ".join(text(value) for value in discovery[key]))
+        else:
+            for finding_id, workflow in findings.items():
+                conditions_done = workflow.get("status") != "stale" and any(
+                    stage.get("stage") == "conditions" and stage.get("status") == "complete"
+                    for stage in workflow.get("stages", []))
+                pending = (not conditions_done if item["id"] == "conditions" else workflow.get("status") != "complete")
+                if pending:
+                    # Name each incomplete finding without serializing workflow internals.
+                    pass_gaps.append(text(finding_id) + ": " + L.get("w_" + str(workflow.get("status")), L["p_not_started"]))
+            if item["id"] == "challenge":
+                pass_gaps.extend(gaps(challenge.get("reasons", [])))
+                if challenge.get("missing_coverage_ids"):
+                    pass_gaps.append(L["p_missing_challenge"] + ": " + ", ".join(text(value) for value in challenge["missing_coverage_ids"]))
+        # A completed pass must not show later-stage gaps.
+        if item["status"] == "complete":
+            pass_gaps = []
+        pass_views.append({"id": item["id"], "title": L["p_" + item["id"]],
+                           "status": L["p_pass_complete"] if item["status"] == "complete" else L.get("p_" + item["status"], L["p_held"]),
+                           "count": L["p_count_cells" if item["id"] == "discovery" else "p_count_findings"].format(**item),
+                           "gaps": list(dict.fromkeys(pass_gaps))})
+    if challenge:
+        sections.append({"title": L["p_challenge"], "items": [L["p_challenge_count"].format(**challenge)]})
+    for finding in data["findings"]:
+        proof = finding.get("verification")
+        scope_checks = proof.get("coverage_checks", []) if isinstance(proof, dict) else []
+        items = []
+        for check in scope_checks:
+            items.append("\n".join([
+                L["p_coverage_id"] + ": " + text(check["coverage_id"]),
+                L["w_result"] + ": " + L.get("v_" + check["result"], text(check["result"])),
+                L["w_reason"] + ": " + text(check["reason"]),
+                L["w_evidence_ids"] + ": " + ", ".join(text(value) for value in check["evidence_ids"]),
+            ]))
+        if items:
+            workflow_status = findings.get(finding["id"], {}).get("status", "not_started")
+            sections.append({"title": L["p_scope_checks"] + " · " + text(finding["id"]) + " · " +
+                                      L.get("w_" + workflow_status, L["p_not_started"]), "items": items})
+    return {"status": L["p_" + state["status"]], "note": L["p_note"], "safety": L["p_safety"],
+            "gaps": overall_gaps, "passes": pass_views, "sections": sections}
+
+
+def three_pass_html(view, L):
+    """One escaped HTML summary shared by the interactive and printable reports."""
+    if view is None:
+        return ""
+
+    def gaps(items):
+        return ("<ul class='three-pass-gaps'>" + "".join(f"<li>{esc(item)}</li>" for item in items) + "</ul>") if items else ""
+
+    passes = "".join(f"<section class='three-pass-stage' data-three-pass='{esc(item['id'])}'>"
+                     f"<h4>{esc(item['title'])}</h4><p>{esc(item['status'])} · {esc(item['count'])}</p>"
+                     + gaps(item["gaps"]) + "</section>" for item in view["passes"])
+    details = "".join(f"<section><h4>{esc(section['title'])}</h4>" +
+                      "".join(f"<p class='prose'>{esc(item)}</p>" for item in section["items"]) + "</section>"
+                      for section in view["sections"])
+    return (f"<section class='three-pass-summary panel' id='three-pass-summary'>"
+            f"<h3>{esc(L['p_title'])}</h3><p class='three-pass-status'><strong>{esc(L['p_status'])}:</strong> {esc(view['status'])}</p>"
+            f"<p>{esc(view['note'])}</p>{passes}"
+            + (f"<h4>{esc(L['p_gaps'])}</h4>" + gaps(view["gaps"]) if view["gaps"] else "")
+            + details + f"<p class='small'>{esc(view['safety'])}</p></section>")
 
 
 def workflow_html(view, L):
@@ -1429,6 +1655,7 @@ def render_assessment_html(data, L, lang, integrity=None):
 <p class="lead">{esc(summary)}</p>{metrics_html}<p class="small">{esc(accounting)}</p>
 <p class="small">{esc(L['a_status_note'])}</p>
 {verification_summary_html(model, L, integrity_summary_view(verification_states, fs, L))}
+{three_pass_html(three_pass_view(data, lang, integrity=integrity), L)}
 <h3 class="limit-heading">{esc(L['a_limits'])}</h3><p class="small">{esc(L['a_uncertainty'])}</p>
 <div class="limits">{bullets(data.get('limitations', []), 'a_limits_empty')}</div></section>
 <section id="priority-queue"><h2>{esc(L['a_queue'])}</h2><p class="section-note">{esc(L['a_queue_note'])}</p>{queue_html}</section>
@@ -1502,7 +1729,7 @@ DASHBOARD = r"""<!doctype html>
 :root{color-scheme:light;--bg:#f3f5f7;--panel:#fff;--text:#172333;--muted:#526376;--line:#dce3eb;--soft:#eaf0f6;--high:#ae2530;--medium:#945005;--low:#1b5daf;--info:#536378;--accent:#194f90;--tint:#edf4fc;--warn:#fff6e8;--warn-line:#e9c58e}
 @media(prefers-color-scheme:dark){:root:not([data-theme="light"]){color-scheme:dark;--bg:#111923;--panel:#192532;--text:#e8eef5;--muted:#acbacb;--line:#344456;--soft:#233445;--high:#ffaaa7;--medium:#f2c177;--low:#9dc6ff;--info:#b4c4d5;--accent:#a0c7ff;--tint:#20364c;--warn:#332b20;--warn-line:#76623e}}
 :root[data-theme="dark"]{color-scheme:dark;--bg:#111923;--panel:#192532;--text:#e8eef5;--muted:#acbacb;--line:#344456;--soft:#233445;--high:#ffaaa7;--medium:#f2c177;--low:#9dc6ff;--info:#b4c4d5;--accent:#a0c7ff;--tint:#20364c;--warn:#332b20;--warn-line:#76623e}
-*{box-sizing:border-box}[hidden]{display:none!important}html{scroll-behavior:smooth;scroll-padding-top:20px}body{margin:0;overflow-wrap:anywhere;background:var(--bg);color:var(--text);font:14px/1.65 system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif}main{max-width:1320px;margin:auto;padding:32px 28px 48px}a{color:var(--accent);text-underline-offset:3px}button,input,select{font:inherit}button,a,input,select,summary{-webkit-tap-highlight-color:transparent}:focus-visible{outline:3px solid var(--accent);outline-offset:3px}button{cursor:pointer}button,.button{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:8px 12px;text-decoration:none}button:hover,.button:hover{background:var(--soft)}.skip{position:absolute;left:20px;top:-100px}.skip:focus{top:8px;z-index:2}.masthead{display:flex;justify-content:space-between;align-items:center;gap:12px;border-bottom:1px solid var(--line);padding-bottom:18px;margin-bottom:26px}.brand{font-size:12px;font-weight:750;letter-spacing:.15em;color:var(--accent)}.tools{display:flex;gap:8px;flex-wrap:wrap}.hero{display:flex;justify-content:space-between;gap:24px;margin-bottom:20px}.hero h1{font-size:clamp(25px,3.5vw,38px);line-height:1.25;letter-spacing:-.04em;margin:3px 0 9px;overflow-wrap:anywhere}.eyebrow,.meta,.muted{color:var(--muted)}.eyebrow{font-size:13px}.meta{max-width:820px;overflow-wrap:anywhere}.hero-aside{align-self:flex-end;font-size:12px;text-align:right;max-width:280px}.summary-banner{padding:16px 20px;background:var(--tint);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;margin-bottom:16px}.summary-banner strong{display:block;font-size:18px}.summary-banner p{margin:5px 0 0}.cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:16px 0}.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px 20px;text-align:left}.card .n{font-size:32px;line-height:1.25;font-weight:750;letter-spacing:-.03em}.card .l{font-size:12px;color:var(--muted);display:block;margin-bottom:8px}.card .sub{font-size:12px;color:var(--muted);margin-top:6px}.card.urgent .n{color:var(--high)}.card.review .n{color:var(--medium)}.report-note{font-size:12px;color:var(--muted);margin:8px 0 22px}.section-head{display:flex;justify-content:space-between;gap:16px;align-items:baseline;margin:26px 0 12px}h2{font-size:19px;letter-spacing:-.02em;margin:0}h3{font-size:15px;margin:0 0 6px}.section-head p{margin:4px 0 0;color:var(--muted)}.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:20px}.priority-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,330px),1fr));gap:12px}.hero>div,.priority-item,.panel{min-width:0}.priority-item h3{overflow-wrap:anywhere}.priority-item{border-top:3px solid var(--line)}.priority-item.sev-High{border-top-color:var(--high)}.priority-item.sev-Medium{border-top-color:var(--medium)}.priority-top{display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:10px}.priority-item h3 a{text-decoration:none;color:var(--text)}.priority-item h3 a:hover{text-decoration:underline}.priority-item p{margin:8px 0;overflow-wrap:anywhere}.priority-item .action-label{font-size:12px;font-weight:700;color:var(--accent)}.priority-item .impact{color:var(--muted)}.priority-item .action{padding-top:10px;border-top:1px solid var(--line)}.priority-item .location{font-size:12px;color:var(--muted)}.badge{display:inline-block;border:1px solid currentColor;border-radius:5px;padding:1px 7px;font-size:11px;line-height:1.7;font-weight:750;white-space:nowrap}.High{color:var(--high)}.Medium{color:var(--medium)}.Low{color:var(--low)}.Info{color:var(--info)}.verdict{font-size:12px;color:var(--muted)}.section-note{font-size:12px;color:var(--muted);margin:10px 0}.coverage{margin:20px 0;background:var(--warn);border-color:var(--warn-line)}summary{cursor:pointer;font-weight:700}summary .small{font-weight:400;color:var(--muted);margin-left:10px}.coverage p{margin:10px 0}.scope-meta{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:5px 16px;margin:16px 0}.scope-meta dt{font-size:12px;color:var(--muted)}.scope-meta dd{margin:0;overflow-wrap:anywhere}.coverage-columns{display:grid;grid-template-columns:1fr 1fr;gap:24px}.coverage ul{margin:6px 0;padding-left:20px}.perspective{border-bottom:1px solid var(--warn-line);padding:9px 0}.perspective:last-child{border:0}.perspective strong{display:block}.perspective p{margin:3px 0;font-size:13px}.chart-section{margin:20px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:16px}.grid .panel{padding:16px}.grid h3{font-size:13px}.bar{display:grid;grid-template-columns:minmax(85px,46%) 1fr 26px;gap:8px;align-items:center;margin:7px 0;font-size:12px}.bar .t{overflow-wrap:anywhere}.bar .track{height:7px;background:var(--soft);border-radius:4px;overflow:hidden}.bar .fill{height:100%;background:var(--accent)}.bar .v{text-align:right;font-variant-numeric:tabular-nums}.filters{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.filters label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}.filters select,.filters input{width:100%;min-width:0;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:9px;font-size:13px}.filters .search{grid-column:span 2}.filter-bottom{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:14px}.result-count{font-size:12px;color:var(--muted);margin:0}.tablewrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;margin-top:12px}table{border-collapse:collapse;width:100%;table-layout:fixed}th,td{text-align:left;padding:12px;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}th{font-size:11px;color:var(--muted);font-weight:700;background:var(--soft)}th:nth-child(1){width:9%}th:nth-child(2){width:9%}th:nth-child(3){width:14%}th:nth-child(4){width:9%}th:nth-child(5){width:11%}th:nth-child(6){width:30%}th:nth-child(7){width:18%}tr.row{cursor:pointer}tr.row:hover{background:var(--tint)}.finding-toggle{border:0;border-radius:3px;padding:0;background:transparent;text-align:left;font-weight:650;color:var(--text);width:100%}.finding-toggle:hover{background:transparent;color:var(--accent)}.finding-toggle .toggle-label{font-size:11px;display:block;font-weight:400;color:var(--accent);margin-top:4px}.location{display:block;overflow-wrap:anywhere;margin-top:4px;font-size:11px;color:var(--muted)}tr.detail>td{background:var(--tint);padding:18px 24px}tr.detail dl{display:grid;grid-template-columns:150px minmax(0,1fr);gap:8px 18px;margin:12px 0}tr.detail dt{font-size:12px;color:var(--muted)}tr.detail dd{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}.detail-actions{display:flex;justify-content:space-between;gap:12px;align-items:center}.action-guidance{border-left:3px solid var(--accent);padding:8px 12px;background:var(--panel)}.action-guidance strong{display:block}.action-guidance p{margin:4px 0}.verification-record,.workflow-record{margin:16px 0;padding:16px;border:1px solid var(--line);border-radius:6px;min-width:0}.verification-record h4,.workflow-record h4{font-size:15px;margin:0 0 8px}.verification-record h5,.workflow-record h5{font-size:13px;margin:18px 0 6px}.verification-record .prose,.workflow-record .prose{white-space:pre-wrap;overflow-wrap:anywhere}.verification-level,.workflow-status,.workflow-next{display:block;font-size:12px;font-weight:600;margin-top:7px}.history{border:1px dashed var(--line);padding:12px;margin-top:16px}.history p{margin:5px 0;white-space:pre-wrap}.lists{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:12px;margin-top:24px}.lists h2{font-size:16px}.lists ul{margin:10px 0 0;padding-left:18px}.empty{color:var(--muted);padding:20px}.snippet{margin:0;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);overflow-x:auto;font:12px/1.6 ui-monospace,Menlo,monospace;white-space:pre}.snippet span{display:block}.snippet .hit{background:var(--warn)}.snippet b{color:var(--muted);font-weight:400}.refs{margin:0;padding-left:18px}.refs li{overflow-wrap:anywhere}.rt{display:inline-block;min-width:60px;color:var(--muted);font-size:12px}.footer{font-size:12px;color:var(--muted);border-top:1px solid var(--line);margin-top:32px;padding-top:16px}code{font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
+*{box-sizing:border-box}[hidden]{display:none!important}html{scroll-behavior:smooth;scroll-padding-top:20px}body{margin:0;overflow-wrap:anywhere;background:var(--bg);color:var(--text);font:14px/1.65 system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif}main{max-width:1320px;margin:auto;padding:32px 28px 48px}a{color:var(--accent);text-underline-offset:3px}button,input,select{font:inherit}button,a,input,select,summary{-webkit-tap-highlight-color:transparent}:focus-visible{outline:3px solid var(--accent);outline-offset:3px}button{cursor:pointer}button,.button{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:8px 12px;text-decoration:none}button:hover,.button:hover{background:var(--soft)}.skip{position:absolute;left:20px;top:-100px}.skip:focus{top:8px;z-index:2}.masthead{display:flex;justify-content:space-between;align-items:center;gap:12px;border-bottom:1px solid var(--line);padding-bottom:18px;margin-bottom:26px}.brand{font-size:12px;font-weight:750;letter-spacing:.15em;color:var(--accent)}.tools{display:flex;gap:8px;flex-wrap:wrap}.hero{display:flex;justify-content:space-between;gap:24px;margin-bottom:20px}.hero h1{font-size:clamp(25px,3.5vw,38px);line-height:1.25;letter-spacing:-.04em;margin:3px 0 9px;overflow-wrap:anywhere}.eyebrow,.meta,.muted{color:var(--muted)}.eyebrow{font-size:13px}.meta{max-width:820px;overflow-wrap:anywhere}.hero-aside{align-self:flex-end;font-size:12px;text-align:right;max-width:280px}.summary-banner{padding:16px 20px;background:var(--tint);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;margin-bottom:16px}.summary-banner strong{display:block;font-size:18px}.summary-banner p{margin:5px 0 0}.cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:16px 0}.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px 20px;text-align:left}.card .n{font-size:32px;line-height:1.25;font-weight:750;letter-spacing:-.03em}.card .l{font-size:12px;color:var(--muted);display:block;margin-bottom:8px}.card .sub{font-size:12px;color:var(--muted);margin-top:6px}.card.urgent .n{color:var(--high)}.card.review .n{color:var(--medium)}.report-note{font-size:12px;color:var(--muted);margin:8px 0 22px}.section-head{display:flex;justify-content:space-between;gap:16px;align-items:baseline;margin:26px 0 12px}h2{font-size:19px;letter-spacing:-.02em;margin:0}h3{font-size:15px;margin:0 0 6px}.section-head p{margin:4px 0 0;color:var(--muted)}.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:20px}.priority-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,330px),1fr));gap:12px}.hero>div,.priority-item,.panel{min-width:0}.priority-item h3{overflow-wrap:anywhere}.priority-item{border-top:3px solid var(--line)}.priority-item.sev-High{border-top-color:var(--high)}.priority-item.sev-Medium{border-top-color:var(--medium)}.priority-top{display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:10px}.priority-item h3 a{text-decoration:none;color:var(--text)}.priority-item h3 a:hover{text-decoration:underline}.priority-item p{margin:8px 0;overflow-wrap:anywhere}.priority-item .action-label{font-size:12px;font-weight:700;color:var(--accent)}.priority-item .impact{color:var(--muted)}.priority-item .action{padding-top:10px;border-top:1px solid var(--line)}.priority-item .location{font-size:12px;color:var(--muted)}.badge{display:inline-block;border:1px solid currentColor;border-radius:5px;padding:1px 7px;font-size:11px;line-height:1.7;font-weight:750;white-space:nowrap}.High{color:var(--high)}.Medium{color:var(--medium)}.Low{color:var(--low)}.Info{color:var(--info)}.verdict{font-size:12px;color:var(--muted)}.section-note{font-size:12px;color:var(--muted);margin:10px 0}.coverage{margin:20px 0;background:var(--warn);border-color:var(--warn-line)}summary{cursor:pointer;font-weight:700}summary .small{font-weight:400;color:var(--muted);margin-left:10px}.coverage p{margin:10px 0}.scope-meta{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:5px 16px;margin:16px 0}.scope-meta dt{font-size:12px;color:var(--muted)}.scope-meta dd{margin:0;overflow-wrap:anywhere}.coverage-columns{display:grid;grid-template-columns:1fr 1fr;gap:24px}.coverage ul{margin:6px 0;padding-left:20px}.perspective{border-bottom:1px solid var(--warn-line);padding:9px 0}.perspective:last-child{border:0}.perspective strong{display:block}.perspective p{margin:3px 0;font-size:13px}.chart-section{margin:20px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:16px}.grid .panel{padding:16px}.grid h3{font-size:13px}.bar{display:grid;grid-template-columns:minmax(85px,46%) 1fr 26px;gap:8px;align-items:center;margin:7px 0;font-size:12px}.bar .t{overflow-wrap:anywhere}.bar .track{height:7px;background:var(--soft);border-radius:4px;overflow:hidden}.bar .fill{height:100%;background:var(--accent)}.bar .v{text-align:right;font-variant-numeric:tabular-nums}.filters{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.filters label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}.filters select,.filters input{width:100%;min-width:0;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:9px;font-size:13px}.filters .search{grid-column:span 2}.filter-bottom{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:14px}.result-count{font-size:12px;color:var(--muted);margin:0}.tablewrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;margin-top:12px}table{border-collapse:collapse;width:100%;table-layout:fixed}th,td{text-align:left;padding:12px;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}th{font-size:11px;color:var(--muted);font-weight:700;background:var(--soft)}th:nth-child(1){width:9%}th:nth-child(2){width:9%}th:nth-child(3){width:14%}th:nth-child(4){width:9%}th:nth-child(5){width:11%}th:nth-child(6){width:30%}th:nth-child(7){width:18%}tr.row{cursor:pointer}tr.row:hover{background:var(--tint)}.finding-toggle{border:0;border-radius:3px;padding:0;background:transparent;text-align:left;font-weight:650;color:var(--text);width:100%}.finding-toggle:hover{background:transparent;color:var(--accent)}.finding-toggle .toggle-label{font-size:11px;display:block;font-weight:400;color:var(--accent);margin-top:4px}.location{display:block;overflow-wrap:anywhere;margin-top:4px;font-size:11px;color:var(--muted)}tr.detail>td{background:var(--tint);padding:18px 24px}tr.detail dl{display:grid;grid-template-columns:150px minmax(0,1fr);gap:8px 18px;margin:12px 0}tr.detail dt{font-size:12px;color:var(--muted)}tr.detail dd{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}.detail-actions{display:flex;justify-content:space-between;gap:12px;align-items:center}.action-guidance{border-left:3px solid var(--accent);padding:8px 12px;background:var(--panel)}.action-guidance strong{display:block}.action-guidance p{margin:4px 0}.three-pass-summary{margin:16px 0;overflow-wrap:anywhere;break-inside:auto!important;page-break-inside:auto}.three-pass-summary .prose{white-space:pre-wrap;overflow-wrap:anywhere}.three-pass-summary h4{margin:12px 0 4px}.three-pass-stage{break-inside:avoid}.verification-record,.workflow-record{margin:16px 0;padding:16px;border:1px solid var(--line);border-radius:6px;min-width:0}.verification-record h4,.workflow-record h4{font-size:15px;margin:0 0 8px}.verification-record h5,.workflow-record h5{font-size:13px;margin:18px 0 6px}.verification-record .prose,.workflow-record .prose{white-space:pre-wrap;overflow-wrap:anywhere}.verification-level,.workflow-status,.workflow-next{display:block;font-size:12px;font-weight:600;margin-top:7px}.history{border:1px dashed var(--line);padding:12px;margin-top:16px}.history p{margin:5px 0;white-space:pre-wrap}.lists{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:12px;margin-top:24px}.lists h2{font-size:16px}.lists ul{margin:10px 0 0;padding-left:18px}.empty{color:var(--muted);padding:20px}.snippet{margin:0;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);overflow-x:auto;font:12px/1.6 ui-monospace,Menlo,monospace;white-space:pre}.snippet span{display:block}.snippet .hit{background:var(--warn)}.snippet b{color:var(--muted);font-weight:400}.refs{margin:0;padding-left:18px}.refs li{overflow-wrap:anywhere}.rt{display:inline-block;min-width:60px;color:var(--muted);font-size:12px}.footer{font-size:12px;color:var(--muted);border-top:1px solid var(--line);margin-top:32px;padding-top:16px}code{font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
 @media(max-width:850px){main{padding:22px 18px}.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.hero{display:block}.hero-aside{text-align:left;max-width:none;margin-top:12px}.coverage-columns{grid-template-columns:1fr}.filters{grid-template-columns:repeat(2,minmax(0,1fr))}table,tbody,tr,td{display:block}thead{display:none}tr.row{padding:14px;border-bottom:1px solid var(--line);display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}tr.row td{border:0;padding:0;font-size:12px}tr.row td:before{content:attr(data-label);display:block;color:var(--muted);font-size:10px;margin-bottom:3px}tr.row td:nth-child(6){grid-column:1/-1;grid-row:1}.finding-toggle{font-size:15px}tr.row td:nth-child(7){grid-column:span 2}.detail-actions{align-items:flex-start}tr.detail>td{padding:16px}tr.detail dl{grid-template-columns:1fr;gap:3px}tr.detail dd{margin-bottom:10px}}
 @media(max-width:480px){main{padding:16px 12px}.masthead{align-items:flex-start;flex-direction:column;gap:12px}.tools{width:100%}.tools .button{flex:1}.card{padding:14px}.card .n{font-size:28px}.panel{padding:16px}.section-head{display:block}.filters{grid-template-columns:1fr 1fr;gap:10px}.filters label:first-child,.filters .search{grid-column:1/-1}.filter-bottom{align-items:flex-start;flex-direction:column}.scope-meta{grid-template-columns:1fr;gap:2px}.scope-meta dd{margin-bottom:8px}.priority-top{flex-wrap:wrap}}
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
@@ -1518,6 +1745,7 @@ DASHBOARD = r"""<!doctype html>
 <div class="cards" id="cards"></div><p class="report-note" data-l="counts_note"></p>
 <section aria-labelledby="priority-heading"><div class="section-head"><div><h2 id="priority-heading" data-l="priority"></h2><p data-l="priority_note"></p></div><a href="#findings" data-l="view_all"></a></div><div class="priority-list" id="priority"></div><p class="section-note" id="queue-note"></p></section>
 <section class="panel" id="verification-summary" aria-label="Verification summary"></section>
+__THREE_PASS__
 <details class="panel coverage" id="coverage" open><summary><span data-l="coverage_heading"></span><span class="small" id="coverage-count"></span></summary><p data-l="coverage_note"></p><dl class="scope-meta" id="scope-meta"></dl><div class="coverage-columns"><section><h3 data-l="limitations"></h3><div id="limitations"></div></section><section><h3 data-l="perspectives"></h3><div id="perspectives"></div></section></div></details>
 <details class="chart-section"><summary data-l="overview"></summary><p class="section-note" data-l="count_basis"></p><div class="grid"><div class="panel"><h3 data-l="by_sev"></h3><div id="c-sev"></div></div><div class="panel"><h3 data-l="by_conf"></h3><div id="c-conf"></div></div><div class="panel"><h3 data-l="by_cat"></h3><div id="c-cat"></div></div><div class="panel"><h3 data-l="by_status"></h3><div id="c-status"></div></div><div class="panel"><h3 data-l="by_verdict"></h3><div id="c-verdict"></div><p class="section-note" data-l="excluded_note"></p></div></div></details>
 <section id="findings" aria-labelledby="findings-heading"><div class="section-head"><div><h2 id="findings-heading" data-l="findings_register"></h2><p data-l="findings_note"></p></div></div>
@@ -1610,6 +1838,7 @@ def render_dashboard(data, L, lang, integrity=None):
     payload = {
         "meta": {key: data["meta"][key] for key in ("project", "date", "assessor", "scope", "method", "commit", "source_url")
                  if key in data["meta"]},
+        **({"three_pass_view": three_pass_view(data, lang, integrity=integrity)} if "three_pass" in model else {}),
         "workflow_views": {f["id"]: workflow_view(data, f, workflows[f["id"]], lang)
                            for f in data["findings"] if f["id"] in workflows},
         "findings": [display_finding(f, model["verification"][f["id"]]) for f in data["findings"]],
@@ -1627,9 +1856,10 @@ def render_dashboard(data, L, lang, integrity=None):
     blob = json.dumps(payload, ensure_ascii=False).replace("<", "\\u003c")
     title = html.escape(f"{L['dash_title']} - {data['meta']['project']}")
     replacements = {"__LANG__": lang, "__TITLE__": title, "__NOSCRIPT__": esc(L["no_script"]),
-                    "__ASSESSMENT__": esc(L["assessment_link"]), "__DATA__": blob}
+                    "__ASSESSMENT__": esc(L["assessment_link"]), "__DATA__": blob,
+                    "__THREE_PASS__": three_pass_html(payload.get("three_pass_view"), L)}
     # Substitute only template tokens, not token-like strings inside report data.
-    return re.sub(r"__(?:LANG|TITLE|NOSCRIPT|ASSESSMENT|DATA)__",
+    return re.sub(r"__(?:LANG|TITLE|NOSCRIPT|ASSESSMENT|DATA|THREE_PASS)__",
                   lambda match: replacements[match.group(0)], DASHBOARD)
 
 

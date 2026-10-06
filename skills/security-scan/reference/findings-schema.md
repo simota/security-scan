@@ -120,7 +120,8 @@ The full, explicitly synthetic example is
 `examples/findings.verification.sample.json` at the repository root. Its source,
 commits, hashes, reviewers and test outcomes are invented fixtures, not evidence
 of an executed assessment. The following describes the implemented fields;
-there is no asset inventory, coverage matrix or automatic test runner.
+there is no automatic asset discovery or test runner. The optional three-pass
+profile below adds an explicitly declared perspective/target coverage plan.
 
 ### Assessment pin and evidence registry
 
@@ -382,3 +383,54 @@ IDs starting with `D-` belong to `scripts/deps_scan.py`: `--into findings.json`
 replaces them on each run, so do not hand-write findings with that prefix.
 
 Same rules as the report: no working payloads, no secret values.
+
+
+## Optional three-pass assurance profile
+
+Only explicit `schema_version: 2` with top-level `three_pass` opts in. Omitted
+profiles retain existing behavior; versionless/version-1 fields with that name
+remain uninterpreted legacy extensions. See
+[three-pass-check.md](three-pass-check.md) for examples and the manual workflow.
+
+The exact top-level profile shape is:
+
+- `version`: integer `1`
+- `coverage`: nonempty list of `{id, perspective, target}`, all nonblank strings;
+  IDs are unique
+- `discovery`: `{actor, summary, checks}` with nonblank actor and summary
+- Each discovery check is `{coverage_id, status, reason, evidence_ids, finding_ids}`
+  - `coverage_id`: unique reference to a planned cell
+  - `status`: `checked`, `not_applicable` or `not_checked`
+  - `reason`: nonblank explanation, including for unknown/unread cells
+  - `evidence_ids`: references to current evidence; checked and N/A cells require
+    current source evidence
+  - `finding_ids`: existing candidate IDs, with no duplicates; N/A cannot contain
+    candidates. All findings must map to checked discovery cells
+
+Unknown fields in these profile objects are rejected. Missing discovery checks
+or `not_checked` outcomes produce gaps rather than completion. Every planned
+cell, including those with no findings, remains part of aggregate accounting.
+
+The existing `verification_workflow` journal handles conditions, falsification
+and decision. Discovery, conditions and falsification actors must be distinct
+normalized declarations. Missing journals are not-started workflows and block fix
+readiness under the profile, even if an old structured proof is sufficient.
+
+Completed falsification submissions additionally carry `claim` on each `checks`
+entry, covering all four claim names, plus `coverage_checks` entries of exactly
+`{coverage_id, result, reason, evidence_ids}`. Their results are `clear`,
+`contradiction` or `unresolved`; current source evidence is required for clear or
+contradictory results. These checks are retained under per-finding `verification`.
+Every finding's own discovery cells need challenge coverage. Across current
+workflows the union must cover all planned cells, and any unresolved or
+contradictory duplicate blocks the affected scope cell. All severities need the
+independent falsification actor's review to cover every claim evidence ID.
+
+`verification_workflow.py audit --require-complete` requires complete discovery,
+a nonempty candidate set, complete current workflows and full scope challenge.
+Zero candidates stays held. A global scope gap does not undo an already-complete
+individual workflow's fix readiness. Profile input changes invalidate current
+handoffs through the existing digest binding; prior history is not current proof.
+The dashboard and assessment project redacted known fields and per-pass counts,
+never raw profile extensions. Scope completeness and actor labels remain
+unverified declarations, not guaranteed security or measured accuracy.

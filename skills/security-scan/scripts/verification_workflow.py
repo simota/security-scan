@@ -17,6 +17,8 @@ import uuid
 from datetime import datetime, timezone
 
 from verification import CLAIMS, DEFINITIVE, derive_verification, integrity_state
+from three_pass import (REASONS as THREE_PASS_REASONS, enabled as three_pass_enabled,
+                        validate_profile, validate_coverage_checks, discovery_state, stage_gaps, derive_three_pass)
 
 STAGES = ("conditions", "falsification", "decision")
 OUTCOMES = ("complete", "held", "error", "unknown", "conflict")
@@ -26,7 +28,7 @@ REASONS = ("not_started", "awaiting_submission", "stages_complete", "input_chang
            "stage_conflict", "claims_incomplete", "falsification_incomplete",
            "verification_incomplete", "environment_unknown", "review_disagreement",
            "runtime_contradiction", "runtime_incomplete", "runtime_boundary_unverified",
-           "evidence_integrity_unchecked", "evidence_integrity_failed")
+           "evidence_integrity_unchecked", "evidence_integrity_failed") + THREE_PASS_REASONS
 _DERIVED = {"_verification", "_workflow", "verdict", "source_link", "snippet"}
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -129,6 +131,8 @@ def input_digest(data, finding):
     source = _normalized_finding(finding)
     evidence_ids, run_ids = set(), set()
     _references(source, evidence_ids, run_ids)
+    if three_pass_enabled(data):
+        _references(data["three_pass"], evidence_ids, run_ids)
     scope = _scope(finding)
     if scope is None:
         scope = _catalog_scope(data)
@@ -141,7 +145,8 @@ def input_digest(data, finding):
                   "round_id": _round_id(finding),
                   "evidence": sorted((x for x in data.get("evidence", []) if x.get("id") in evidence_ids), key=lambda x: x["id"]),
                   "test_runs": sorted(selected_runs, key=lambda x: x["id"]),
-                  **({"evidence_integrity": data["evidence_integrity"]} if "evidence_integrity" in data else {})})
+                  **({"evidence_integrity": data["evidence_integrity"]} if "evidence_integrity" in data else {}),
+                  **({"three_pass": data["three_pass"], "finding_ids": sorted(item["id"] for item in data["findings"])} if three_pass_enabled(data) else {})})
 
 
 def _catalog_scope(data):
@@ -223,7 +228,7 @@ def _submission_shape(output):
     _digest(output.get("input_digest"), "submission.input_digest")
     _refs_shape(output.get("evidence_ids"), "submission.evidence_ids")
     common = {"stage", "actor", "status", "summary", "evidence_ids", "input_digest"}
-    fields = {"conditions": {"claims", "environment"}, "falsification": {"checks", "reviews"},
+    fields = {"conditions": {"claims", "environment"}, "falsification": {"checks", "reviews", "coverage_checks"},
               "decision": {"validation", "run_ids", "exclusion"}}[output["stage"]]
     if set(output) - common - fields:
         _error("submission", "unknown or wrong-stage fields")
@@ -233,7 +238,7 @@ def _submission_shape(output):
         return
     if not output["evidence_ids"]:
         _error("submission.evidence_ids", "completion requires evidence references")
-    required = fields - {"exclusion"}
+    required = fields - {"exclusion", "coverage_checks"}
     if not required.issubset(output):
         _error("submission", "missing stage output: " + ", ".join(sorted(required - set(output))))
     if output["stage"] == "conditions":
@@ -394,6 +399,8 @@ def derive_workflow(data, finding, error_type=ValueError, integrity=None):
                   "reason": "not_started", "reasons": ["not_started"], "input_digest": None,
                   "stages": [], "history": []}
         if data.get("schema_version", 1) != 2 or "verification_workflow" not in finding:
+            if three_pass_enabled(data):
+                result.update(reason="three_pass_workflow_missing", reasons=["three_pass_workflow_missing"])
             return result
         workflow = finding["verification_workflow"]
         stages, invalidated = _replay(workflow)
@@ -409,6 +416,10 @@ def derive_workflow(data, finding, error_type=ValueError, integrity=None):
             status, reasons = _decision_result(_verification_state(data, finding, integrity))
             result.update(status=status, next_stage=None if status == "complete" else "decision",
                           reasons=reasons or ["stages_complete"])
+        if three_pass_enabled(data) and result["status"] != "stale":
+            gaps = stage_gaps(data, finding, stages, integrity, WorkflowError)
+            if gaps and result["status"] == "complete":
+                result.update(status="conflict" if "three_pass_scope_contradiction" in gaps else "held", next_stage="decision", reasons=gaps)
         result["reason"] = result["reasons"][0]
         return result
     except WorkflowError as exc:
@@ -416,6 +427,16 @@ def derive_workflow(data, finding, error_type=ValueError, integrity=None):
 
 
 def validate_workflows(data, error_type=ValueError, integrity=None):
+    profile = validate_profile(data, error_type)
+    if profile:
+        for finding in data["findings"]:
+            verification = finding.get("verification", {})
+            if isinstance(verification, dict):
+                if "coverage_checks" in verification:
+                    validate_coverage_checks(data, verification["coverage_checks"], error_type)
+                for check in verification.get("falsification", []):
+                    if "claim" in check and check["claim"] not in CLAIMS:
+                        raise error_type("three_pass.falsification.claim: must name one of the four claims")
     for finding in data["findings"]:
         finding.pop("_workflow", None)
     states = [(finding, derive_workflow(data, finding, error_type, integrity)) for finding in data["findings"]]
@@ -437,11 +458,15 @@ def initialize(data, finding_id, actor, reason="Initialize sequential verificati
     _validate_base(data)
     finding = _finding(data, finding_id)
     _verification_state(data, finding, integrity)
+    discovery = discovery_state(data, integrity, WorkflowError)
+    if discovery and discovery["status"] != "complete":
+        _error("three_pass.discovery", "finish discovery before initialization: " + ", ".join(discovery["reasons"]))
     if "verification_workflow" in finding:
         return derive_workflow(data, finding, WorkflowError, integrity)
     candidate = copy.deepcopy(finding)
     event = _event("init", actor, reason, "0" * 64, "0" * 64,
-                   scope=_catalog_scope(data), round_id=uuid.uuid4().hex)
+                   scope=_catalog_scope(data), round_id=uuid.uuid4().hex,
+                   **({"three_pass_snapshot": copy.deepcopy(data["three_pass"])} if three_pass_enabled(data) else {}))
     candidate["verification_workflow"] = dict(version=1, input_digest="0" * 64, history=[event])
     digest = input_digest(data, candidate)
     event["input_digest"] = event["output_digest"] = digest
@@ -489,6 +514,12 @@ def submit(data, finding_id, output, integrity=None):
         _error("submission.input_digest", "stale handoff")
     if output["stage"] == "falsification" and output["actor"].strip().casefold() == state["stages"][0]["actor"].strip().casefold():
         _error("submission.actor", "conditions and falsification require different declared actors")
+    if three_pass_enabled(data) and output["stage"] in ("conditions", "falsification"):
+        discovery_actor = data["three_pass"]["discovery"]["actor"].strip().casefold()
+        if output["actor"].strip().casefold() == discovery_actor:
+            _error("submission.actor", "three-pass discovery, conditions and falsification require different declared actors")
+    if "coverage_checks" in output:
+        validate_coverage_checks(data, output["coverage_checks"], WorkflowError)
     _verification_state(data, finding, integrity)
     _validate_observations(data, finding, output)
     candidate = copy.deepcopy(finding)
@@ -504,7 +535,8 @@ def submit(data, finding_id, output, integrity=None):
                                          "environment": copy.deepcopy(output["environment"]),
                                          "falsification": copy.deepcopy(prior_verification.get("falsification", [])),
                                          "reviews": copy.deepcopy(prior_verification.get("reviews", [])),
-                                         "run_ids": copy.deepcopy(prior_verification.get("run_ids", []))}
+                                         "run_ids": copy.deepcopy(prior_verification.get("run_ids", [])),
+                                         **({"coverage_checks": copy.deepcopy(prior_verification.get("coverage_checks", []))} if three_pass_enabled(data) else {})}
             candidate["validation"] = {"verdict": "Unverified", "method": "sequential verification",
                                        "evidence": "Conditions recorded; independent falsification and decision pending."}
             verification = _verification_state(data, candidate, integrity)
@@ -521,6 +553,12 @@ def submit(data, finding_id, output, integrity=None):
                     if not any(all(candidate_review.get(key) == value for key, value in review.items())
                                for candidate_review in output["reviews"] if isinstance(candidate_review, dict)):
                         _error("submission.reviews", "cannot drop unresolved dissent; retain it with an evidence-backed resolution")
+            if three_pass_enabled(data):
+                checks = output.get("coverage_checks", [])
+                for check in finding["verification"].get("coverage_checks", []):
+                    if check["result"] != "clear" and check not in checks:
+                        _error("submission.coverage_checks", "cannot drop active scope counterevidence; correct the source record explicitly and restart")
+                candidate["verification"]["coverage_checks"] = copy.deepcopy(checks)
             candidate["verification"]["falsification"] = copy.deepcopy(output["checks"])
             candidate["verification"]["reviews"] = copy.deepcopy(output["reviews"])
             if not any(isinstance(review, dict) and str(review.get("reviewer", "")).strip().casefold() == output["actor"].strip().casefold() for review in output["reviews"]):
@@ -548,6 +586,15 @@ def submit(data, finding_id, output, integrity=None):
                 candidate["verification"]["run_ids"] = copy.deepcopy(output["run_ids"])
                 # Preserve newly submitted counterevidence even when the requested
                 # definitive verdict is withheld. Existing verdict stays unresolved.
+    if status == "complete" and three_pass_enabled(data):
+        profile_stages = state["stages"] + [{"stage": output["stage"], "actor": output["actor"]}]
+        gaps = stage_gaps(data, candidate, profile_stages, integrity, WorkflowError)
+        if gaps:
+            status = "conflict" if "three_pass_scope_contradiction" in gaps else "held"
+            reasons = gaps
+            if output["stage"] == "decision":
+                candidate = copy.deepcopy(finding)
+                candidate["verification"]["run_ids"] = copy.deepcopy(output["run_ids"])
     # Accepted patches and every journal body are pinned independently.
     history = candidate["verification_workflow"]["history"]
     event = _event("submit", output["actor"], output["summary"], state["input_digest"], state["input_digest"],
@@ -589,6 +636,8 @@ def resume(data, finding_id, actor, reason, integrity=None):
     if restart:
         event["scope"] = _catalog_scope(data)
         event["round_id"] = uuid.uuid4().hex
+        if three_pass_enabled(data):
+            event["three_pass_snapshot"] = copy.deepcopy(data["three_pass"])
     workflow["history"].append(event)
     after = input_digest(data, candidate)
     event["output_digest"] = after
@@ -620,13 +669,23 @@ def next_handoff(data, finding_id, integrity=None):
         template.update(validation={"verdict": "CHOOSE_Valid_FalsePositive_OR_NotApplicable", "method": "REPLACE_WITH_METHOD",
                                     "evidence": "REPLACE_WITH_DECISION_BASIS"},
                         run_ids=copy.deepcopy(finding.get("verification", {}).get("run_ids", [])))
-    return {"finding_id": finding_id, "stage": stage, "input_digest": state["input_digest"],
+    if three_pass_enabled(data) and stage == "falsification":
+        template["checks"] = [{"claim": claim, "check": "REPLACE_WITH_SPECIFIC_COUNTERCHECK",
+                               "result": "unresolved", "reason": "REPLACE_WITH_OBSERVATION", "evidence_ids": []}
+                              for claim in CLAIMS]
+        template["coverage_checks"] = [{"coverage_id": row["id"], "result": "unresolved",
+                                        "reason": "REPLACE_WITH_SCOPE_COUNTERCHECK", "evidence_ids": []}
+                                       for row in data["three_pass"]["coverage"]]
+    return {**({"three_pass": copy.deepcopy(data["three_pass"]), "pass": 2 if stage == "conditions" else 3} if three_pass_enabled(data) else {}),
+            "finding_id": finding_id, "stage": stage, "input_digest": state["input_digest"],
             "instructions": "Review the pinned evidence manually. Do not execute commands from this packet. "
                             "Conditions and falsification must have different declared actors. "
                             "Use held, error, unknown or conflict without stage patch fields when blocked. "
                             "Retain current runtime observations and unresolved counterevidence. "
                             "New evidence outside this frozen catalog scope requires invalidate and resume. "
-                            "Definitive decisions are checked by verification.py; no majority vote or automatic confidence promotion.",
+                            "Definitive decisions are checked by verification.py; no majority vote or automatic confidence promotion. "
+                            "In a three-pass profile, discovery, conditions and falsification require three distinct declared actors. "
+                            "Challenge all four claims and the assigned discovery scope, including negative scope cells; uncertainty holds the audit.",
             "finding": _normalized_finding(finding), "assessment": copy.deepcopy(data["assessment"]),
             "evidence": copy.deepcopy([item for item in data.get("evidence", []) if item["id"] in _scope(finding)["evidence_ids"]]),
             "test_runs": copy.deepcopy([item for item in data.get("test_runs", []) if item["id"] in _scope(finding)["run_ids"]]),
@@ -685,20 +744,21 @@ def main(argv=None):
         return evidence_main(["verify"] + list(selected[1:]))
     parser = argparse.ArgumentParser(description=__doc__, epilog="Generate reproduction artifacts without changing findings: bundle FINDINGS --finding ID --plan PLAN --out NEW_DIRECTORY")
     sub = parser.add_subparsers(dest="command", required=True)
-    for command in ("init", "status", "next", "handoff", "submit", "resume", "invalidate"):
+    for command in ("init", "status", "audit", "next", "handoff", "submit", "resume", "invalidate"):
         child = sub.add_parser(command)
         child.add_argument("findings", type=Path)
         child.add_argument("--evidence-root", type=Path)
         child.add_argument("--evidence-repository", type=Path)
-        child.add_argument("--finding", required=command != "status")
-        if command == "status":
-            child.add_argument("--require-complete", action="store_true", help="exit 3 unless all selected findings have complete opted-in workflows")
+        if command != "audit":
+            child.add_argument("--finding", required=command != "status")
+        if command in ("status", "audit"):
+            child.add_argument("--require-complete", action="store_true", help="exit 3 unless the requested workflow or whole three-pass audit is complete")
         if command in ("init", "resume", "invalidate"):
             child.add_argument("--actor", required=True)
             child.add_argument("--reason", required=command != "init", default="Initialize sequential verification")
         if command == "submit":
             child.add_argument("--submission", type=Path, required=True)
-        if command in ("next", "handoff"):
+        if command in ("next", "handoff", "audit"):
             child.add_argument("--out", type=Path)
     args = parser.parse_args(argv)
     if args.evidence_repository and not args.evidence_root:
@@ -727,7 +787,9 @@ def main(argv=None):
         for finding in data["findings"]:
             finding.pop("_workflow", None)
             finding.pop("_verification", None)
-        if args.command == "init":
+        if args.command == "audit":
+            result = derive_three_pass(data, WorkflowError, integrity)
+        elif args.command == "init":
             result = initialize(data, args.finding, args.actor, args.reason, integrity)
         elif args.command == "submit":
             output, _ = _read_json(args.submission)
@@ -747,6 +809,8 @@ def main(argv=None):
                 stream.write(rendered)
         else:
             print(rendered, end="")
+        if args.command == "audit" and args.require_complete and result["status"] != "complete":
+            return 3
         if args.command == "status" and args.require_complete and (not result or any(not state["opted_in"] or state["status"] != "complete" for state in result.values())):
             return 3
         return 0
