@@ -78,11 +78,16 @@ class ChromiumPDFPreflightTests(unittest.TestCase):
     def test_diagnostic_success_cannot_override_baseline_failure(self):
         with patch.dict(os.environ, {"CHROME": "/synthetic/chrome",
                                      "SECURITY_SCAN_REPORT_ARTIFACTS": "/synthetic/artifacts"}):
-            with patch.object(self.preflight, "run_preflight", side_effect=[1, 0]) as run:
-                self.assertEqual(self.preflight.main(), 1)
-                self.assertEqual(run.call_count, 2)
-                self.assertEqual(run.call_args.kwargs["extra_flags"],
-                                 ("--no-first-run", "--no-default-browser-check"))
+            for results in ([1, 0], [1, 1, 0], [1, 1, 1]):
+                with self.subTest(results=results):
+                    with patch.object(self.preflight, "run_preflight", side_effect=results) as run:
+                        self.assertEqual(self.preflight.main(), 1)
+                        self.assertEqual(run.call_count, len(results))
+                        self.assertEqual(run.call_args_list[1].kwargs["extra_flags"],
+                                         ("--timeout=5000",))
+                        if len(results) == 3:
+                            self.assertEqual(run.call_args_list[2].kwargs["extra_flags"],
+                                             ("--timeout=5000", "--disable-background-networking"))
 
     def test_successful_baseline_does_not_need_a_variant(self):
         with patch.dict(os.environ, {"CHROME": "/synthetic/chrome",

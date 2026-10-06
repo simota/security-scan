@@ -57,7 +57,7 @@ def run_preflight(chrome, output, timeout=20, extra_flags=()):
         (output / "result.txt").write_text(
             f"pdf_created={succeeded}\nexit_code={process.returncode}\ntimeout_seconds={timeout}\n",
             encoding="utf-8")
-    print(f"Chromium CLI PDF preflight: {'passed' if succeeded else 'FAILED'}", flush=True)
+    print(f"Chromium CLI PDF preflight [{output.name}]: {'passed' if succeeded else 'FAILED'}", flush=True)
     if not succeeded:
         for name in ("version.txt", "command.txt", "result.txt", "stdout.txt", "stderr.txt"):
             contents = (output / name).read_text(encoding="utf-8", errors="replace")
@@ -76,8 +76,12 @@ def main():
     if result:
         # A diagnostic-only comparison, never a replacement for the production
         # command or permission to consider the required PDF tests successful.
-        run_preflight(chrome, Path(artifacts) / "chromium-first-run-diagnostic",
-                      extra_flags=("--no-first-run", "--no-default-browser-check"))
+        timeout_result = run_preflight(
+            chrome, Path(artifacts) / "chromium-timeout-diagnostic",
+            extra_flags=("--timeout=5000",))
+        if timeout_result:
+            run_preflight(chrome, Path(artifacts) / "chromium-background-diagnostic",
+                          extra_flags=("--timeout=5000", "--disable-background-networking"))
     return result
 
 
