@@ -76,8 +76,30 @@ Chrome installed. Write `<dir>` outside the audited repository unless asked.
 `perspectives` entry needs a `name`; use the names in `reference/perspectives.md`.
 Other fields may be empty. `status` defaults to `Open`; `validation.verdict`
 defaults to `Unverified`. Findings marked `FalsePositive` or `NotApplicable` are
-left out of every count and listed in a closing "excluded" section; verdict
+left out of included totals and listed in a closing "excluded" section. The
+validation distribution intentionally includes all records; verdict
 rules are in `reference/validation.md`.
+
+## Reading the outputs
+
+- Both summaries state the number of `Unverified` findings, including those
+  with High severity, and the number excluded. Recorded `Fixed` and `Accepted`
+  statuses do not assert independent verification of remediation.
+- The open-finding queue orders by severity, then `Valid` + `Confirmed`
+  findings before those needing validation, then ID. Only that combination
+  calls for planning a fix; other open findings first call for evidence.
+- Scope, method, revision and limitations are visible before the finding
+  details. Missing perspective coverage is unknown. No coverage percentage,
+  all-clear verdict or risk score is inferred from missing data.
+- Dashboard filters only affect the register, not report-wide counts. An
+  explicit record selector switches between included, excluded and all
+  findings. Selecting an excluded verdict switches to all records.
+- Generated finding anchors link the queue, register and details. They are
+  stable for the same sorted input; re-scans can change numbering.
+- Source excerpts visibly identify truncation beyond 200 lines or 240
+  characters per line. The full source remains the evidence of record.
+- `previous_validation`, if present from a dependency re-scan, is shown as
+  historical context. It cannot replace the current verdict or counts.
 
 ## References and source excerpts
 

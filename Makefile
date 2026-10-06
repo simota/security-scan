@@ -47,6 +47,7 @@ DOCS := README.md skills/$(NAME)/*.md skills/$(NAME)/reference/*.md
 
 DEMO_OUT ?= $(or $(TMPDIR),/tmp)/$(NAME)-demo
 LANG_OUT ?= ja
+DEMO_INPUT ?= $(REPO)/examples/findings.sample$(if $(filter ja,$(LANG_OUT)),.ja,).json
 NO_PDF   ?=
 
 .PHONY: help link unlink status check demo deps test
@@ -126,8 +127,10 @@ check: test ## verify the skill is self-contained and internally consistent
 	    || { echo "MISS $$p does not parse" >&2; fail=1; }; \
 	done; \
 	out=$$(mktemp -d "$${TMPDIR:-/tmp}/$(NAME)-check.XXXXXX") || exit 1; \
-	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) "$(SKILL)/scripts/render.py" examples/findings.sample.json --out "$$out" --no-pdf >/dev/null \
-	  || { echo "MISS render.py fails on examples/findings.sample.json" >&2; fail=1; }; \
+	for sample in examples/findings.sample*.json; do \
+	  PYTHONDONTWRITEBYTECODE=1 $(PYTHON) "$(SKILL)/scripts/render.py" "$$sample" --out "$$out" --no-pdf >/dev/null \
+	    || { echo "MISS render.py fails on $$sample" >&2; fail=1; }; \
+	done; \
 	rm -rf "$$out"; \
 	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) "$(SKILL)/scripts/deps_scan.py" "$(REPO)" >/dev/null 2>&1 \
 	  || { echo "MISS deps_scan.py fails on this repository" >&2; fail=1; }; \
@@ -140,5 +143,5 @@ deps: ## dependency + supply-chain scan of TARGET (AUDIT=1 queries advisory data
 	  $(if $(AUDIT),--audit,) $(if $(OUT),--out "$(OUT)",)
 
 demo: ## render the sample findings into DEMO_OUT (dashboard + PDF)
-	@PYTHONDONTWRITEBYTECODE=1 $(PYTHON) "$(SKILL)/scripts/render.py" "$(REPO)/examples/findings.sample.json" \
+	@PYTHONDONTWRITEBYTECODE=1 $(PYTHON) "$(SKILL)/scripts/render.py" "$(DEMO_INPUT)" \
 	  --out "$(DEMO_OUT)" --lang $(LANG_OUT) $(if $(NO_PDF),--no-pdf,)

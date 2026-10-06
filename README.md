@@ -68,9 +68,24 @@ python3 skills/security-scan/scripts/render.py findings.json --out ./report --la
 
 | File | Contents |
 |---|---|
-| `dashboard.html` | Totals, charts by severity / confidence / category / status, filterable findings table with details, perspective coverage. Self-contained, offline, light and dark |
+| `dashboard.html` | Prioritized fix/validate queue, explicit uncertainty and coverage limits, report-wide totals, accessible searchable findings with included/excluded views and deep links. Self-contained, offline, light and dark |
 | `assessment.html` | The assessment document, print-styled for A4 |
-| `assessment.pdf` | Cover, summary, overview, perspectives, findings, sound items, decisions, limitations, next steps, excluded findings |
+| `assessment.pdf` | Decision-ready first page, fix/validate queue, scope and limits, linked finding register, full evidence, excluded records and page numbers |
+
+Both outputs distinguish potential severity, confidence and validation. An open
+finding is ready to plan a fix only when its verdict is `Valid` and its confidence
+is `Confirmed`; all other open findings call for validation first. The queue
+sorts by severity, then readiness to fix, then ID. No risk score or deadline is
+invented. `Fixed` and `Accepted` describe recorded status, not an independent
+verification of remediation.
+
+Unverified and excluded counts are explicit. Headline totals include `Open`,
+`Fixed` and `Accepted`, excluding `FalsePositive` and `NotApplicable`; the
+validation distribution includes all records for traceability. Filters affect
+only the finding register, with a visible result count and a reset button.
+Choose Included, Excluded only, or All records, and open details with a keyboard
+or a direct finding link. Missing coverage is unknown, and zero findings is
+never presented as a guarantee of security.
 
 Each finding carries its evidence: code findings embed the lines around
 `path:line` (with `--repo`, best-effort redaction) and link to the
@@ -84,6 +99,9 @@ excerpts, but redaction is heuristic, not a guarantee. Inspect reports before
 sharing them; without `--repo`, source is not embedded. `source_link` and
 `snippet` are derived fields and cannot be injected through input JSON. All
 report links must be absolute HTTP(S) URLs without credentials or controls.
+Excerpts are capped at 200 lines and 240 characters per line; visible notes
+identify shortened excerpts. Previous validation, when available, is labelled
+as historical and never changes the current verdict or counts.
 
 The PDF is printed with headless Chrome/Chromium (`CHROME=/path/to/binary` to
 choose one), falling back to WeasyPrint. With neither available the HTML files
@@ -156,7 +174,12 @@ Try it on the bundled sample:
 ```sh
 make demo                       # Japanese, with PDF, into $TMPDIR/security-scan-demo
 make demo LANG_OUT=en NO_PDF=1  # English, HTML only
+make demo DEMO_INPUT=/path/to/findings.json  # custom data
 ```
+
+The default Japanese demo uses `examples/findings.sample.ja.json`, an explicitly
+fictional report with confirmed, uncertain, fixed, accepted and excluded records.
+The English demo uses `examples/findings.sample.json`.
 
 ## Layout
 
