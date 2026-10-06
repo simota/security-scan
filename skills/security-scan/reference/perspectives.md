@@ -5,9 +5,9 @@ them; REPORT, to fill the `perspectives` table in `findings.json`.
 
 One reading of the code finds what that reading looks for. Review the same
 application through several perspectives, each asking a different question.
-Pick the ones that apply from the recon map, run each as its own pass (or its
-own independent reviewer on a large codebase), and record every perspective in
-the report — including the ones that found nothing and the ones not run.
+Pick the ones that apply from the recon map, apply each of them within every
+review unit (`SKILL.md`, *Run contract*), and record every perspective in the
+report — including the ones that found nothing and the ones not run.
 
 | Perspective | The question it asks |
 |---|---|

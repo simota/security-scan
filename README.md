@@ -77,6 +77,26 @@ make unlink
 
 Then invoke `security-scan` (or `/security-scan`).
 
+### Same result on every host
+
+Claude Code, Codex and Antigravity load the same `SKILL.md`, whose *Run
+contract* fixes the choices hosts used to make differently: a fresh output
+directory and no reading of other runs' reports, review units (resource
+domains plus one cross-cutting unit), one finding per root cause, `F-NNN` /
+`D-NNN` IDs, `D-*` only from `deps_scan.py --into`, schema version 2 with source
+evidence from `evidence_capture.py`, one severity table, and a fixed output set.
+`contract_check.py` enforces the mechanical parts before the summary:
+
+```sh
+python3 skills/security-scan/scripts/evidence_capture.py /path/to/repo --findings out/findings.json src/a.py src/b.py
+python3 skills/security-scan/scripts/deps_scan.py /path/to/repo --audit --out out/deps.json --into out/findings.json
+python3 skills/security-scan/scripts/render.py out/findings.json --out out --repo /path/to/repo
+python3 skills/security-scan/scripts/contract_check.py out      # exit 1 lists each violation
+```
+
+The check covers shape and provenance markers, not whether a finding is true;
+hosts can still find different issues, but no longer report them differently.
+
 ## Outputs
 
 ```sh
@@ -387,6 +407,8 @@ skills/security-scan/
   reference/report.md          checklist and findings report formats
   reference/findings-schema.md findings.json and the render command
   scripts/deps_scan.py         dependency inventory, supply-chain checks, audits (stdlib only)
+  scripts/evidence_capture.py  assessed-revision source -> evidence/ and schema-2 records
+  scripts/contract_check.py    run-contract gate shared by every host
   scripts/render.py            findings.json -> dashboard / assessment PDF (stdlib only)
   scripts/verification.py      evidence consistency and derived verification/retest states
   scripts/evidence_integrity.py read-only local evidence verification and separate receipts

@@ -1165,7 +1165,7 @@ def finding_key(f):
             tuple(sorted(f.get("advisory_ids") or [])))
 
 
-def merge_into(path, result):
+def merge_into(path, result, audit=None):
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     old = [f for f in data.get("findings", []) if str(f.get("id", "")).startswith("D-")]
     # Never silently reuse a reachability decision after code/config changes.
@@ -1187,6 +1187,9 @@ def merge_into(path, result):
     lim = [x for x in data.get("limitations", []) if not x.startswith("Dependency audit not run:")]
     lim += [f"Dependency audit not run: {n['tool']} - {n['reason']}" for n in result["not_run"]]
     data["limitations"] = lim
+    # contract_check.py compares this with the D-* count to reject hand-written D-* findings.
+    data["dependency_scan"] = {"tool": "deps_scan.py", "audit": audit,
+                               "findings": len(result["findings"]), "not_run": len(result["not_run"])}
     Path(path).write_text(json.dumps(safe_output(data), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
@@ -1211,7 +1214,7 @@ def main(argv=None):
     elif not a.into:
         print(blob)
     if a.into:
-        merge_into(a.into, result)
+        merge_into(a.into, result, audit=a.audit)
     counts = {}
     for f in result["findings"]:
         counts[f["severity"]] = counts.get(f["severity"], 0) + 1
