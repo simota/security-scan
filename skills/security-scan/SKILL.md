@@ -1,7 +1,7 @@
 ---
 name: security-scan
 description: "Static security review of an application's own source: maps routes, auth and tenancy, then checks authn/authz, cross-tenant access, API parameter tampering, injection, uploads, secrets, config, vulnerable/malicious dependencies, supply chain. Outputs a dashboard and a PDF report. Read-only. Use when asked to audit a codebase for vulnerabilities or data-isolation gaps, or to list what to check."
-allowed-tools: Read, Grep, Glob, Bash
+allowed-tools: Read, Grep, Glob, Bash, Write
 ---
 
 ## Owns
@@ -50,7 +50,8 @@ otherwise choose differently, the choice is fixed here, and
 | Severity | The table below, decided before confidence; confidence never raises or lowers it |
 | Outputs | Exactly `findings.json`, `deps.json`, `evidence/`, `dashboard.html`, `assessment.html`, `assessment.pdf` (plus `run/` at expert grade), in the requester's language. No README, summary PDF or extra audit dumps unless asked (`contract_check.py --allow NAME`) |
 | `meta.assessor` | Host and model, e.g. `Claude Code (<model>)`, `Codex (<model>)`, `Antigravity (<model>)` |
-| Read-only | `allowed-tools` above is enforced by Claude Code only. Elsewhere keep to it yourself: read, search and run this skill's scripts; write nothing inside the audited repository |
+| Writing the record | Never build `findings.json` with a shell heredoc, an inline `python -c` or a generated script. Write each batch of results as a JSON fragment with the file-write tool into scratch (not the output directory), then `scripts/findings.py merge <out>/findings.json <fragment>…`. The first fragment carries `meta`; `scripts/evidence_capture.py` then pins the record, and later fragments add `verification` to the same IDs |
+| Read-only | `allowed-tools` above is enforced by Claude Code only. Elsewhere keep to it yourself: read, search and run this skill's scripts; `Write` is for finding fragments in scratch only; write nothing inside the audited repository |
 
 | Severity | When |
 |---|---|
@@ -63,6 +64,29 @@ Each further condition the attacker does not control lowers severity one level.
 An `Environment-dependent` finding is graded as if its stated condition holds,
 and names that condition.
 
+## When the host refuses an action
+
+A host safety check or permission prompt may refuse one tool call. That refusal
+covers that action, not the assessment: this skill exists to close holes, and
+the run continues.
+
+1. Do not resend the same call, and never disguise it (encoding, splitting,
+   renaming, moving the content elsewhere). The aim is a different, defensive
+   shape of the work, not a way past the check
+2. Find what made the call look offensive. Almost always it is one of: finding
+   text inside a shell command or generated script, a literal attack string,
+   or something resembling an exploit or traffic generator. Switch to the
+   sanctioned shape: a JSON fragment written with the file-write tool and
+   `scripts/findings.py merge`; the request shape as method, path and parameter
+   names with placeholders (`<other tenant's id>`); the fix direction instead of
+   a demonstration
+3. If the sanctioned shape is refused too, drop that step only: add it to
+   `limitations` (what was not recorded and why), continue every phase that does
+   not depend on it, and name the blocked step and the exact command in the chat
+   summary so the requester can run it themselves
+4. Never end the run silently on a refusal. "Cannot proceed in this session" is
+   only a valid report when no remaining phase can be done
+
 ## Phases
 
 | Phase | Do | Reference |
@@ -71,7 +95,7 @@ and names that condition.
 | CHECKLIST | Choose the perspectives that apply and turn the map into this app's checklist; attach early suspicions marked unverified | `reference/perspectives.md`, `reference/report.md` |
 | REVIEW | One pass (or one independent reviewer) per review unit from the *Run contract*, applying every applicable perspective; handlers a low-privilege actor can reach first, admin-only handlers for the severe classes only; `deps_scan.py --audit --into` for known-vulnerable and malicious packages | `reference/perspectives.md`, `reference/dependencies.md` |
 | VERIFY | Record evidence-linked reachability, preconditions, defenses and impact; try to falsify the claim; preserve unknown conditions and independent reviewer findings; distinguish static support from isolated runtime evidence | `reference/validation.md`, `reference/verification-workflow.md`, `reference/evidence-integrity.md` |
-| REPORT | Write `findings.json` with a `path:line` location for every code finding and `references` (advisory, fix commit, article) for every library finding; capture cited source with `scripts/evidence_capture.py`; render the dashboard and the assessment PDF with `scripts/render.py --repo <audited-repo>` so code excerpts are embedded; pass `scripts/contract_check.py`; then give the summary in chat | `reference/findings-schema.md`, `reference/report.md` |
+| REPORT | Write `findings.json` through fragments and `scripts/findings.py merge`, with a `path:line` location for every code finding and `references` (advisory, fix commit, article) for every library finding; capture cited source with `scripts/evidence_capture.py`; render the dashboard and the assessment PDF with `scripts/render.py --repo <audited-repo>` so code excerpts are embedded; pass `scripts/contract_check.py`; then give the summary in chat | `reference/findings-schema.md`, `reference/report.md` |
 | REPRODUCE *(on request)* | Generate a deterministic synthetic seed/repro/cleanup bundle for a selected finding; verify its pins and hashes, repeat the local model twice and preserve unsupported/error outcomes. A synthetic model is not application runtime verification | `reference/reproduction-bundles.md` |
 | VERIFY-FIX *(on request)* | With explicit permission, test the same case before/after in owned local or throwaway code; require a legitimate secure-assertion failure before, pass after, plus passing positive control and regression. Record retest evidence separately from `Fixed` | `reference/fix-verification.md` |
 
