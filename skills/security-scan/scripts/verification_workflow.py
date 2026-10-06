@@ -669,7 +669,12 @@ def _save(path, data, original):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    # Bundle generation is read-only with respect to findings and the journal.
+    selected = sys.argv[1:] if argv is None else argv
+    if selected and selected[0] == "bundle":
+        from reproduction import main as reproduction_main
+        return reproduction_main(["generate"] + list(selected[1:]))
+    parser = argparse.ArgumentParser(description=__doc__, epilog="Generate reproduction artifacts without changing findings: bundle FINDINGS --finding ID --plan PLAN --out NEW_DIRECTORY")
     sub = parser.add_subparsers(dest="command", required=True)
     for command in ("init", "status", "next", "handoff", "submit", "resume", "invalidate"):
         child = sub.add_parser(command)

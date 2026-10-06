@@ -13,7 +13,9 @@ how sure the finding is — or, when only a plan is asked for, a checklist tailo
 to this application.
 
 It does not fix code and does not send traffic to any deployed environment.
-Fixing is a separate, later request.
+Fixing is a separate, later request. On an explicit request for reproducible
+fixtures, it can generate and run a separate synthetic local bundle; this never
+executes or changes the assessed application.
 
 Phases: `RECON → CHECKLIST → REVIEW → VERIFY → REPORT`.
 
@@ -42,6 +44,7 @@ Phases: `RECON → CHECKLIST → REVIEW → VERIFY → REPORT`.
 | REVIEW | One pass (or one independent reviewer) per perspective; handlers a low-privilege actor can reach first, admin-only handlers for the severe classes only; `deps_scan.py --audit` for known-vulnerable and malicious packages | `reference/perspectives.md`, `reference/dependencies.md` |
 | VERIFY | Record evidence-linked reachability, preconditions, defenses and impact; try to falsify the claim; preserve unknown conditions and independent reviewer findings; distinguish static support from isolated runtime evidence | `reference/validation.md`, `reference/verification-workflow.md` |
 | REPORT | Write `findings.json` with a `path:line` location for every code finding and `references` (advisory, fix commit, article) for every library finding; render the dashboard and the assessment PDF with `scripts/render.py --repo <audited-repo>` so code excerpts are embedded; then give the summary in chat | `reference/findings-schema.md`, `reference/report.md` |
+| REPRODUCE *(on request)* | Generate a deterministic synthetic seed/repro/cleanup bundle for a selected finding; verify its pins and hashes, repeat the local model twice and preserve unsupported/error outcomes. A synthetic model is not application runtime verification | `reference/reproduction-bundles.md` |
 | VERIFY-FIX *(on request)* | With explicit permission, test the same case before/after in owned local or throwaway code; require a legitimate secure-assertion failure before, pass after, plus passing positive control and regression. Record retest evidence separately from `Fixed` | `reference/fix-verification.md` |
 
 ## Outputs
@@ -67,7 +70,8 @@ requester's language (`--lang ja|en`).
 | A protection depends on a request header (client IP, host, forwarded proto) | Find where the header is set and which entry in it is trusted. Report as environment-dependent and name the setting to check |
 | A finding's impact depends on deployment (debug flags, proxy, storage ACL) | Report it as `environment-dependent` with the exact setting, not as confirmed and not as dropped |
 | The requester wants live confirmation | Only on a local or throwaway environment they own, only after an explicit go-ahead, never production, never a third party |
-| Asked to confirm a fix, write a repro, or guard against regression | Write a local regression test that is red on the vulnerable code and green on the fix, in the repo's own suite (`reference/fix-verification.md`). Own code and local-only; not an attack tool |
+| Asked for reproducible seed data or a portable reproduction bundle | Use `scripts/reproduction.py` or `verification_workflow.py bundle`, following `reference/reproduction-bundles.md`. Generate only the supported synthetic template or a clearly unsupported scaffold; do not infer permission to execute application code |
+| Asked to confirm a fix, write a repro against the application, or guard against regression | Write a local regression test that is red on the vulnerable code and green on the fix, in the repo's own suite (`reference/fix-verification.md`). Own code and local-only; not an attack tool |
 | Two reviewers disagree | Re-read the disputed evidence and record the disagreement and its resolution. A vote is not verification; keep material unresolved disagreements incomplete |
 | A secret is found in the repo | Report its location and kind only. Never print the value |
 
@@ -126,6 +130,11 @@ requester's language (`--lang ja|en`).
   evidence-based decision. It accepts review outputs and controls stage order;
   it does not launch AI reviewers or application tests. A stale or unfinished
   opted-in workflow cannot become fix-ready
+- Reproduction bundles bind the selected finding, assessment pin, evidence
+  records, template and configuration. Revalidate against current findings before
+  running. Deterministic synthetic red/green outcomes never prove the actual
+  application boundary; exported records keep that boundary mocked and never
+  automatically update findings (`reference/reproduction-bundles.md`)
 - `scripts/verification.py` checks record structure and declared consistency,
   not whether artifacts are truthful, test commands ran or all paths were covered
 - Dependency findings come from `scripts/deps_scan.py` (static checks, plus
