@@ -40,7 +40,10 @@ class SecurityScanRegressionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory(prefix="security-scan-test-")
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
+        # Subprocesses are mocked, but the audit boundary now validates real inputs.
+        for name in ("package-lock.json", "composer.lock"):
+            (self.root / name).write_text("{}", encoding="utf-8")
 
     def load_finding(self, f: dict, **meta) -> dict:
         data = {"meta": {"project": "Synthetic fixture", "date": "2026-10-06", **meta},
@@ -68,6 +71,7 @@ class SecurityScanRegressionTests(unittest.TestCase):
         self.assertTrue(collector.not_run, "Audit error was silently converted to zero findings")
 
     def test_03_uv_lock_does_not_audit_the_host_environment(self) -> None:
+        (self.root / "uv.lock").write_text("", encoding="utf-8")
         collector = self.deps.Collector(self.root)
         with patch.object(self.deps, "audit_osv", return_value=set()), \
              patch.object(self.deps, "audit_simple") as audit:
@@ -209,6 +213,7 @@ class SecurityScanRegressionTests(unittest.TestCase):
 
     def test_python_locks_are_reported_as_not_run(self):
         for name in ("uv.lock", "poetry.lock", "Pipfile.lock", "pdm.lock"):
+            (self.root / name).write_text("", encoding="utf-8")
             with self.subTest(name=name):
                 c = self.deps.Collector(self.root)
                 with patch.object(self.deps, "audit_osv", return_value=set()), patch.object(self.deps, "run") as run:
@@ -219,6 +224,7 @@ class SecurityScanRegressionTests(unittest.TestCase):
     def test_osv_coverage_does_not_skip_an_uncovered_python_file(self):
         covered = self.root / "package-lock.json"
         path = self.root / "requirements-dev.txt"
+        path.write_text("fixture==1.0", encoding="utf-8")
         c = self.deps.Collector(self.root)
         with patch.object(self.deps, "audit_osv", return_value={covered}), \
              patch.object(self.deps, "audit_requirements") as audit:
