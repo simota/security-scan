@@ -65,6 +65,7 @@ requester's language (`--lang ja|en`).
 |---|---|
 | Asked "what should we check" or "list the items" | RECON and CHECKLIST only, then stop and deliver the checklist |
 | Asked to check, audit or scan | All five phases |
+| Asked for three-pass assurance or discovery → conditions → challenge | Opt into the schema-version-2 `three_pass` coverage profile, reuse the manual workflow and require the aggregate audit; see `reference/three-pass-check.md`. Do not promise a numerical accuracy rate |
 | Tenancy is enforced by a default/global scope or a base query | List every model **without** it and every query path that **bypasses** it. That list is the cross-tenant hunt list |
 | A guard exists in one layer only (UI routes vs API routes, one middleware group vs another, list endpoint vs detail endpoint) | Check the other layer. Asymmetric guards are the most common real finding |
 | A protection depends on a request header (client IP, host, forwarded proto) | Find where the header is set and which entry in it is trusted. Report as environment-dependent and name the setting to check |
@@ -131,6 +132,14 @@ requester's language (`--lang ja|en`).
   evidence-based decision. It accepts review outputs and controls stage order;
   it does not launch AI reviewers or application tests. A stale or unfinished
   opted-in workflow cannot become fix-ready
+- For the opt-in three-pass profile, account for every planned perspective/target
+  cell, map every candidate, and use distinct declared discovery, conditions and
+  falsification actors. Independently challenge all four claims at every severity;
+  scope challenge must also cover zero-candidate and N/A cells. Run
+  `verification_workflow.py audit findings.json --require-complete`. Missing
+  workflows, stale records and zero candidates remain incomplete. Actor names are
+  not authenticated identities; scope completeness is not security completeness
+  (`reference/three-pass-check.md`)
 - Reproduction bundles bind the selected finding, assessment pin, evidence
   records, template and configuration. Revalidate against current findings before
   running. Deterministic synthetic red/green outcomes never prove the actual
