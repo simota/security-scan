@@ -104,7 +104,8 @@ def check(data, out_dir, pdf=True, allow=()):
     expected = {"findings.json", "dashboard.html", "assessment.html"} | ({"assessment.pdf"} if pdf else set())
     for name in sorted(expected - present):
         add(f"outputs: {name} missing; run render.py findings.json --out {out_dir}")
-    for name in sorted(present - OUTPUTS - set(allow)):
+    extra = {"run"} if "expert" in data else set()  # expert grade keeps its run records beside the report
+    for name in sorted(present - OUTPUTS - extra - set(allow)):
         add(f"outputs: unexpected '{name}'; write only the contract outputs unless the requester asked for more")
     return problems
 

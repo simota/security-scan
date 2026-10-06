@@ -97,6 +97,31 @@ python3 skills/security-scan/scripts/contract_check.py out      # exit 1 lists e
 The check covers shape and provenance markers, not whether a finding is true;
 hosts can still find different issues, but no longer report them differently.
 
+### Expert grade
+
+Ask for an expert, commercial-grade or "no compromise" assessment and the skill
+prices a worker envelope, asks for consent to the ceiling, engines and data
+boundary, then runs every judgment through workers that did not produce what
+they judge: two independent recon maps, three discovery angles per scope cell,
+variant analysis, an omission challenge, independent condition tracing,
+refutation panels, calibrated double severity rating with CWE, cold reads by
+executive / engineer / auditor personas, and a non-participant QA audit
+(`skills/security-scan/reference/expert-mode.md`). Host spawn commands live
+only in `reference/engine-map.md`. The report gains an *Assessment method and
+assurance* section, and the run is labelled expert-grade only when the gate
+passes:
+
+```sh
+python3 skills/security-scan/scripts/expert_audit.py out   # 0 complete, 3 held/degraded
+```
+
+The records prove the process was recorded, not that every vulnerability was
+found; the report never states a detection rate.
+
+Report typography follows `docs/report-design.md`: a journal-style assessment
+(numbered sections, captioned booktabs tables and listings, one mincho face
+for both scripts) and a dashboard in the same system.
+
 ## Outputs
 
 ```sh
@@ -405,10 +430,14 @@ skills/security-scan/
   reference/fix-verification.md local regression tests that lock a fix in
   reference/reproduction-bundles.md deterministic synthetic seed/repro bundles and limits
   reference/report.md          checklist and findings report formats
+  reference/expert-mode.md     expert-grade multi-agent run card, envelope and calibration anchors
+  reference/engine-map.md      the only place host spawn tools and preflights are named
   reference/findings-schema.md findings.json and the render command
   scripts/deps_scan.py         dependency inventory, supply-chain checks, audits (stdlib only)
   scripts/evidence_capture.py  assessed-revision source -> evidence/ and schema-2 records
   scripts/contract_check.py    run-contract gate shared by every host
+  scripts/expert.py            expert-grade gate derivation (independence, redundancy, panels, calibration)
+  scripts/expert_audit.py      expert-grade gate over records, run files and the rendered report
   scripts/render.py            findings.json -> dashboard / assessment PDF (stdlib only)
   scripts/verification.py      evidence consistency and derived verification/retest states
   scripts/evidence_integrity.py read-only local evidence verification and separate receipts
