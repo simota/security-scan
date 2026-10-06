@@ -88,7 +88,9 @@ report links must be absolute HTTP(S) URLs without credentials or controls.
 The PDF is printed with headless Chrome/Chromium (`CHROME=/path/to/binary` to
 choose one), falling back to WeasyPrint. With neither available the HTML files
 are still written and the script exits `3`. Exit `2` means `findings.json` does
-not match the schema; the message names the field.
+not match the schema; the message names the field. Validation evidence must be
+a string; `Valid`, `FalsePositive` and `NotApplicable` require a nonblank string.
+Null, booleans, numbers, arrays and objects cannot justify an exclusion.
 
 The format is documented in
 `skills/security-scan/reference/findings-schema.md`.
@@ -104,13 +106,25 @@ make deps TARGET=/path/to/repo AUDIT=1
 
 `--audit` sends the package list to public advisory databases. Install
 [osv-scanner](https://github.com/google/osv-scanner) for every-ecosystem
-coverage and malicious-package detection. Without it, installed Composer, npm,
-Cargo and pip-audit tools provide limited fallbacks. Composer runs with
-`--no-plugins --no-scripts`. The pip-audit fallback accepts only plain
-`name==version` requirements, copied into a temporary input and audited with
-`--no-deps --disable-pip`. Includes, URLs, options, extras, markers and floating
-versions are reported as not run rather than resolved. No dependency code is
-intentionally installed or built. Use trusted audit-tool installations.
+coverage and malicious-package detection. Without it, installed Composer, npm
+and pip-audit tools provide limited fallbacks. Automatic `cargo audit` execution
+is disabled: Cargo lockfiles require OSV coverage, otherwise the audit is
+recorded in `not_run` rather than running Cargo against the target checkout.
+
+npm explicitly includes prod, dev, optional and peer dependencies, even when
+`.npmrc` or the environment omits them, and disables lifecycle scripts.
+Composer runs with `--no-plugins --no-scripts` against a temporary copy of the
+lockfile, an auditor-owned manifest and an empty Composer home. Project/global
+exclusions and `COMPOSER*` environment overrides are not inherited; abandoned
+packages are explicitly reported. Custom repository configuration is not copied,
+and its advisory coverage is recorded as incomplete. The original project files
+are unchanged. See `AUDIT_SAFETY.md` for the boundaries of these fallbacks.
+
+The pip-audit fallback accepts only plain `name==version` requirements, copied
+into a temporary input and audited with `--no-deps --disable-pip`. Includes,
+URLs, options, extras, markers and floating versions are reported as not run
+rather than resolved. No dependency code is intentionally installed or built.
+Use trusted audit-tool installations.
 
 Python lockfiles (`uv.lock`, `poetry.lock`, `Pipfile.lock`, `pdm.lock`) require
 OSV coverage; the scanner never substitutes its own Python environment. Errors
@@ -118,6 +132,19 @@ and malformed results from fallback tools are recorded in `not_run`. Use
 `--audit --strict` to exit `3` when any audit is incomplete (JSON output is still
 written); the default remains exit `0` after a completed scan invocation.
 `--strict` is a completeness check, not a vulnerability severity gate.
+
+Shared lockfiles are associated with explicitly declared Cargo and npm/Yarn
+workspace members, respecting exclusions and nested workspace boundaries.
+Cargo workspace TOML parsing requires Python 3.11+; on Python 3.9/3.10, missing
+parser support is recorded as incomplete. Implicit Cargo path-dependency
+membership, explicit `package.workspace` pointers and pnpm YAML membership are
+not guessed: unresolved ownership is listed in `not_run`.
+
+Workflow interpolation checks distinguish ordinary block-style `steps[*].run`
+scalars from `env` and `with` data. Safe environment-variable handoffs are not
+reported as direct shell interpolation. This is a conservative YAML subset;
+aliased/tagged steps and flow-style structures require manual review and are
+recorded as incomplete when recognized.
 
 On `--into`, prior manual dependency verdicts are kept as `previous_validation`
 only for the same location, package/version, title and advisory IDs. They do not
@@ -156,5 +183,6 @@ make check   # tests plus citations resolve, references headed, frontmatter vali
              # scripts compile, sample renders
 ```
 
-Requirements: Python 3.9+; Chrome/Chromium or WeasyPrint for the PDF;
-osv-scanner and/or the ecosystem audit tools for `--audit`.
+Requirements: Python 3.9+ (Python 3.11+ for Cargo workspace ownership parsing);
+Chrome/Chromium or WeasyPrint for the PDF; osv-scanner and/or the supported
+ecosystem audit tools for `--audit`.

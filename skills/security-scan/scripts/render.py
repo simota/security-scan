@@ -161,9 +161,12 @@ def load(path):
         val.setdefault("verdict", "Unverified")
         if val["verdict"] not in VERDICTS:
             raise SchemaError(f"{where}.validation.verdict: one of {VERDICTS}")
-        if val["verdict"] in ("Valid", "FalsePositive", "NotApplicable") and not str(val.get("evidence", "")).strip():
+        evidence = val.get("evidence", "")
+        if not isinstance(evidence, str):
+            raise SchemaError(f"{where}.validation.evidence: must be a string")
+        if val["verdict"] in ("Valid", "FalsePositive", "NotApplicable") and not evidence.strip():
             raise SchemaError(f"{where}.validation.evidence: required when verdict is {val['verdict']}")
-        val["evidence"] = str(val.get("evidence") or "")
+        val["evidence"] = evidence
         f["validation"] = val
         f["verdict"] = val["verdict"]
         refs = f.get("references") or []
