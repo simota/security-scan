@@ -254,7 +254,11 @@ that passes the secure assertion through a `real` boundary contradicts `Valid`.
 A legitimate real-boundary failed security assertion instead contradicts
 `FalsePositive` or `NotApplicable`. Either conflict adds `runtime_contradiction`
 and derives `incomplete`, preserving the recorded verdict; it cannot be overruled
-by another run or reviewer votes. Do not cherry-pick recorded runs. Post-fix and normal-control
+by another run or reviewer votes. A real-boundary security pass is consistent
+with an evidence-backed exclusion and does not add `runtime_incomplete`; its
+support remains `static_supported`. Other listed incomplete attempts or
+unverified boundaries still retain their gaps and block workflow completion.
+Do not cherry-pick recorded runs. Post-fix and normal-control
 runs belong to the remediation links, not the original reproduction list.
 Unknown environment conditions derive `environment_unverified` unless other
 blocking gaps already make verification `incomplete`; an isolated fixture does

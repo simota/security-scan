@@ -411,13 +411,18 @@ class VerificationTests(unittest.TestCase):
     def test_secure_pass_is_not_counterevidence_to_an_exclusion(self):
         self.finding.pop('remediation')
         self.finding['status'] = 'Open'
-        self.finding['validation']['verdict'] = 'FalsePositive'
         self.record['claims']['preconditions']['status'] = 'contradicted'
-        self.record['exclusion'] = {'basis': 'condition_absent', 'reason': 'Specific condition checked.',
-                                     'evidence_ids': ['source-before']}
         self.data['test_runs'][0].update(result='pass', failure_kind='none', exit_code=0)
-        self.assertEqual(self.derive()['level'], 'static_supported')
-        self.assertNotIn('runtime_contradiction', self.derive()['gaps'])
+        for verdict, basis in (('FalsePositive', 'condition_absent'), ('NotApplicable', 'not_applicable')):
+            with self.subTest(verdict=verdict):
+                self.finding['validation']['verdict'] = verdict
+                self.record['exclusion'] = {'basis': basis, 'reason': 'Specific condition checked.',
+                                           'evidence_ids': ['source-before']}
+                state = self.derive()
+                self.assertEqual(state['level'], 'static_supported')
+                self.assertEqual(state['gaps'], [])
+                self.assertEqual(state['run_ids'], ['before'])
+                self.assertEqual(state['retest'], 'not_requested')
 
     def test_all_gap_and_level_codes_are_declared(self):
         self.record['reviews'] = []

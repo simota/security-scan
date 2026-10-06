@@ -15,6 +15,11 @@ def redact_urls(text):
         suffix = ""
         if text[match.start() - 1:match.start()] == "'" and token.endswith("'"):
             token, suffix = token[:-1], "'"
+        # Adjacent quoted URLs can be one token: urlsplit would sanitize only
+        # the first authority and leave later credentials in its path. Quotes
+        # can also be secret data, so redact the ambiguous token as a whole.
+        if "://" in token.partition("://")[2]:
+            return "[redacted URL]" + suffix
         try:
             u = urlsplit(token)
             if not u.hostname:

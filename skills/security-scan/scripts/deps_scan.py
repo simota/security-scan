@@ -293,6 +293,18 @@ def workflow_run_lines(c, path, text):
         stripped = line.lstrip()
         if not stripped or stripped.startswith("#"):
             continue
+        sequence = re.match(r"^-\s+(.*)$", stripped)
+        if sequence and sequence[1].startswith(("{", "[", "*", "&", "!", "<<:")):
+            # A sequence item's flow mapping/alias does not match `mapping`.
+            # Drop the previous item's keys before checking its parent, while
+            # retaining `steps` for YAML's indentationless sequence form.
+            while stack and stack[-1][0] > indent:
+                stack.pop()
+            if stack and stack[-1][1] == "steps":
+                incomplete(c, "workflow run scan", path,
+                           "non-block or aliased step requires manual review")
+                block = (indent, False)
+                continue
         if "\t" in line[:len(line) - len(stripped)] or stripped.startswith(("<<:", "*", "&")):
             incomplete(c, "workflow run scan", path, "alias, merge or indentation requires manual review")
         match = mapping.match(line)
@@ -512,7 +524,8 @@ def check_workflow(c, p):
                   impact="Runs with repository secrets on events from forks; dangerous if it checks out PR code",
                   fix="Do not check out or execute PR code in this workflow")
     for i, script in workflow_run_lines(c, p, text):
-        if re.search(r"\$\{\{\s*github\.event\.(issue|pull_request|comment|review|head_commit|commits)\b[^}]*(title|body|message|name|ref|label)", script):
+        if re.search(r"\$\{\{\s*github\.(?:head_ref\b|event\."
+                     r"(issue|pull_request|comment|review|head_commit|commits)\b[^}]*(title|body|message|name|ref|label))", script):
             c.add("Medium", "untrusted event text interpolated into a workflow", p, i, category=CAT_BUILD,
                   impact="Text controlled by outsiders becomes part of a shell command",
                   fix="Pass it through an env variable and quote it")

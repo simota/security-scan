@@ -569,6 +569,47 @@ class ReportOutputTests(unittest.TestCase):
                 self.save_browser_artifact(page, lang + "-keyboard-and-filters")
                 self.assertFalse(errors)
 
+    @unittest.skipUnless(os.environ.get("SECURITY_SCAN_BROWSER_TEST") == "1", "opt-in Chromium interaction test")
+    def test_browser_prototype_named_ids_have_no_phantom_workflows(self):
+        import verification_workflow
+
+        page = self.start_browser()
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        special_ids = ("__proto__", "constructor", "toString", "hasOwnProperty")
+        for mode in ("legacy", "structured", "mixed-workflows"):
+            data = self.report([self.finding(identifier, verdict="Valid")
+                                for identifier in (*special_ids, "ordinary")])
+            if mode != "legacy":
+                self.with_verification(data, set(special_ids) | {"ordinary"})
+            if mode == "mixed-workflows":
+                verification_workflow.initialize(data, "ordinary", "synthetic-coordinator")
+            for lang in ("en", "ja"):
+                with self.subTest(mode=mode, lang=lang):
+                    labels = self.renderer.LABELS[lang]
+                    page.goto("about:blank")
+                    page.set_content(self.renderer.render_dashboard(data, labels, lang),
+                                     wait_until="domcontentloaded")
+                    self.assertEqual(page.locator("tr.row").count(), len(data["findings"]))
+                    self.assertEqual(page.locator("#lists > section").count(), 3)
+                    for finding in data["findings"]:
+                        anchor = self.renderer.finding_anchor(data, finding)
+                        row = page.locator("#" + anchor)
+                        row.locator("button").click()
+                        detail = page.locator("#" + anchor + "-detail")
+                        self.assertTrue(detail.is_visible())
+                        has_workflow = mode == "mixed-workflows" and finding["id"] == "ordinary"
+                        self.assertEqual(detail.locator(".workflow-record").count(), int(has_workflow))
+                        action = "verify_first" if mode == "legacy" or has_workflow else "fix_now"
+                        self.assertEqual(detail.locator(".action-guidance > strong").inner_text(),
+                                         labels[action])
+                        if finding["id"] in special_ids:
+                            self.assertEqual(row.locator(".workflow-status, .workflow-next").count(), 0)
+                            card = page.locator(".priority-item").filter(
+                                has=page.locator('a[href="#' + anchor + '"]'))
+                            self.assertEqual(card.locator(".workflow-next").count(), 0)
+                    self.assertFalse(errors)
+
     @unittest.skipUnless(os.environ.get("SECURITY_SCAN_BROWSER_TEST") == "1", "opt-in Chromium mobile test")
     def test_browser_mobile_long_hostile_text_does_not_overflow_or_execute(self):
         page = self.start_browser()

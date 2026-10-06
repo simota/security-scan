@@ -235,6 +235,70 @@ class WorkflowTests(unittest.TestCase):
                 self.assertEqual(self.state()['status'], 'complete')
                 self.assertEqual(self.finding['validation']['verdict'], verdict)
 
+    def test_exclusion_completes_with_real_security_pass(self):
+        for verdict, basis in (('FalsePositive', 'condition_absent'), ('NotApplicable', 'not_applicable')):
+            with self.subTest(verdict=verdict):
+                self.setUp()
+                self.data['test_runs'][0].update(result='pass', failure_kind='none', exit_code=0)
+                self.init()
+                output = self.output()
+                output['claims']['preconditions']['status'] = 'contradicted'
+                workflow.submit(self.data, self.identifier, output)
+                self.advance()
+                output = self.output()
+                output['validation']['verdict'] = verdict
+                output['run_ids'] = ['before']
+                output['exclusion'] = dict(basis=basis, reason='Evidence-backed absent condition',
+                                           evidence_ids=['source-before', 'test-before'])
+                workflow.submit(self.data, self.identifier, output)
+                self.assertEqual(self.state()['status'], 'complete')
+                self.assertIsNone(self.state()['next_stage'])
+                self.assertEqual(self.finding['validation']['verdict'], verdict)
+                self.assertEqual(self.finding['verification']['run_ids'], ['before'])
+                self.assertEqual(self.finding['confidence'], 'Suspected')
+
+    def test_exclusion_retains_incomplete_and_conflicting_runs_even_with_secure_pass(self):
+        cases = [(outcome, 'none', None, 'real', 'security', 'held')
+                 for outcome in ('not_run', 'blocked', 'error', 'skip', 'unsupported')]
+        cases += [('fail', 'infrastructure', 1, 'real', 'security', 'held'),
+                  ('pass', 'none', 0, 'mocked', 'security', 'held'),
+                  ('pass', 'none', 0, 'unknown', 'security', 'held'),
+                  ('pass', 'none', 0, 'real', 'positive_control', 'held'),
+                  ('fail', 'assertion', 1, 'real', 'security', 'conflict')]
+        for verdict, basis in (('FalsePositive', 'condition_absent'), ('NotApplicable', 'not_applicable')):
+            for result, failure, code, boundary, role, expected_status in cases:
+                for additional_pass in (False, True):
+                    with self.subTest(verdict=verdict, result=result, failure=failure, boundary=boundary,
+                                      role=role, additional_pass=additional_pass):
+                        self.setUp()
+                        run = self.data['test_runs'][0]
+                        run.update(result=result, failure_kind=failure, exit_code=code, role=role)
+                        run['context']['boundary'] = boundary
+                        run_ids = ['before']
+                        if additional_pass:
+                            passed = copy.deepcopy(run)
+                            passed.update(id='secure-pass', result='pass', failure_kind='none', exit_code=0,
+                                          role='security')
+                            passed['context']['boundary'] = 'real'
+                            self.data['test_runs'].append(passed)
+                            run_ids.append('secure-pass')
+                        self.init()
+                        output = self.output()
+                        output['claims']['preconditions']['status'] = 'contradicted'
+                        workflow.submit(self.data, self.identifier, output)
+                        self.advance()
+                        output = self.output()
+                        output['validation']['verdict'] = verdict
+                        output['run_ids'] = run_ids
+                        output['exclusion'] = dict(basis=basis, reason='Evidence-backed absent condition',
+                                                   evidence_ids=['source-before'])
+                        workflow.submit(self.data, self.identifier, output)
+                        self.assertEqual(self.state()['status'], expected_status)
+                        reason = 'runtime_contradiction' if expected_status == 'conflict' else 'runtime_incomplete'
+                        self.assertIn(reason, self.state()['reasons'])
+                        self.assertEqual(self.finding['validation']['verdict'], 'Unverified')
+                        self.assertEqual(self.finding['verification']['run_ids'], run_ids)
+
     def test_relevant_input_changes_stale_and_resume_restarts_preserving_history(self):
         mutations = [lambda: self.finding.update(title='Changed claim'),
                      lambda: self.finding['validation'].update(evidence='Changed conclusion'),

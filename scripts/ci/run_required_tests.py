@@ -9,6 +9,7 @@ import unittest
 REPO = Path(__file__).resolve().parents[2]
 REQUIRED_TESTS = frozenset({
     "test_report_outputs.ReportOutputTests.test_browser_keyboard_filters_reset_excluded_categories_and_hash_navigation",
+    "test_report_outputs.ReportOutputTests.test_browser_prototype_named_ids_have_no_phantom_workflows",
     "test_report_outputs.ReportOutputTests.test_browser_mobile_long_hostile_text_does_not_overflow_or_execute",
     "test_review_hardening.ReviewHardeningTests.test_dashboard_draws_hostile_text_in_real_browser",
     "test_ci_report_artifacts.ReportArtifactTests.test_english_sample_pdf",

@@ -338,7 +338,9 @@ class _Validator:
             run = self.runs[ref]
             if self.legitimate_red(run):
                 runtime = True
-            else:
+            elif not (verdict in ("FalsePositive", "NotApplicable") and self.passed(run, "security")):
+                # A completed real-boundary secure pass is consistent with an
+                # exclusion. It supplies no vulnerable-runtime reproduction credit.
                 gaps.append("runtime_incomplete")
             if ((verdict == "Valid" and self.passed(run, "security"))
                     or (verdict in ("FalsePositive", "NotApplicable") and self.legitimate_red(run))):
