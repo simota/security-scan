@@ -493,6 +493,9 @@ class ReportOutputTests(unittest.TestCase):
                 self.assertEqual(page.locator("html").get_attribute("lang"), lang)
                 self.assertEqual(page.locator("tr.row").count(), 4)
                 totals_before = page.locator("#cards").inner_text()
+                charts = page.locator("details.chart-section")
+                charts.locator("summary").click()
+                self.assertTrue(charts.evaluate("node => node.open"))
                 for category in ("__proto__", "constructor", "toString"):
                     bar = page.locator("#c-cat .bar").filter(has=page.locator(".t", has_text=re.compile("^" + re.escape(category) + "$")))
                     self.assertEqual(bar.locator(".v").inner_text(), "1")

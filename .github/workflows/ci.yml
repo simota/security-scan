@@ -2,6 +2,7 @@ name: Offline tests and report artifacts
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -73,7 +74,9 @@ jobs:
       - name: Require real browser and PDF tests with zero skips
         env:
           SECURITY_SCAN_REPORT_ARTIFACTS: ${{ runner.temp }}/security-scan-report-artifacts
-        run: python scripts/ci/run_required_tests.py
+        run: |
+          python scripts/ci/check_chromium_pdf.py
+          python scripts/ci/run_required_tests.py
       - name: Retain synthetic browser and PDF evidence
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
