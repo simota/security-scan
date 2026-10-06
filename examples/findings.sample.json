@@ -1,0 +1,72 @@
+{
+  "meta": {
+    "project": "Sample App",
+    "date": "2026-10-06",
+    "assessor": "security-scan",
+    "scope": "src/ (API and web)",
+    "method": "static source review, read-only"
+  },
+  "findings": [
+    {
+      "id": "F-001",
+      "title": "Detail endpoint lacks ownership check",
+      "severity": "High",
+      "confidence": "Confirmed",
+      "category": "Actor and tenant",
+      "location": "src/api/orders.py:42",
+      "actor": "Customer",
+      "request": "GET /orders/{id}",
+      "impact": "Another customer's order can be read",
+      "fix": "Scope the lookup to the caller's account",
+      "validation": {
+        "verdict": "Valid",
+        "evidence": "Route registered for role customer (src/api/routes.py:12); handler loads by primary key with no account filter; serializer returns all order fields",
+        "method": "review"
+      }
+    },
+    {
+      "id": "F-002",
+      "title": "Page size has no upper bound",
+      "severity": "Medium",
+      "confidence": "Confirmed",
+      "category": "Availability",
+      "location": "src/api/util.py:7",
+      "actor": "Any signed-in user",
+      "request": "GET /orders per_page",
+      "impact": "Very large responses",
+      "fix": "Cap per_page",
+      "validation": { "verdict": "Likely", "method": "review" }
+    },
+    {
+      "id": "F-003",
+      "title": "Debug output enabled in deploy config",
+      "severity": "Low",
+      "confidence": "Environment-dependent",
+      "category": "Configuration and deployment",
+      "location": "deploy/php.ini:9",
+      "status": "Fixed"
+    },
+    {
+      "id": "F-004",
+      "title": "Raw SQL fragment in report filter",
+      "severity": "High",
+      "confidence": "Suspected",
+      "category": "Input handling",
+      "location": "src/api/reports.py:88",
+      "validation": {
+        "verdict": "FalsePositive",
+        "evidence": "The fragment is built only from a fixed allowlist of column names (src/api/reports.py:70-76); no request value reaches it",
+        "method": "review"
+      }
+    }
+  ],
+  "perspectives": [
+    { "name": "Actor and tenant", "result": "1 High", "note": "" },
+    { "name": "Input handling", "result": "No issues", "note": "1 suspected finding ruled out" },
+    { "name": "Privacy", "result": "N/A", "note": "No personal data stored" }
+  ],
+  "checked_ok": ["Queries use bound parameters"],
+  "decisions": ["Should staff see archived orders?"],
+  "limitations": ["Deployed settings not inspected"],
+  "next_steps": ["Fix F-001 first"]
+}
