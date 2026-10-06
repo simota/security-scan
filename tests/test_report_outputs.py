@@ -107,6 +107,19 @@ class ReportOutputTests(unittest.TestCase):
         path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         return self.renderer.load(path)
 
+    def with_verification(self, data, finding_ids):
+        """Attach synthetic structured evidence only to intended ready fixtures."""
+        sample = json.loads((Path(__file__).resolve().parents[1] /
+                             "examples/findings.verification.sample.json").read_text(encoding="utf-8"))
+        for key in ("schema_version", "assessment", "evidence", "test_runs"):
+            data[key] = copy.deepcopy(sample[key])
+        data["meta"]["commit"] = sample["meta"]["commit"]
+        for finding in data["findings"]:
+            if finding["id"] in finding_ids:
+                finding["verification"] = copy.deepcopy(sample["findings"][0]["verification"])
+        self.renderer.validate_verification(data, self.renderer.SchemaError)
+        return data
+
     def output(self, data, lang="en"):
         labels = self.renderer.LABELS[lang]
         dashboard = self.renderer.render_dashboard(data, labels, lang)
@@ -137,6 +150,7 @@ class ReportOutputTests(unittest.TestCase):
         data = self.report([self.finding(f"M-{i:03d}", verdict=verdict,
                                         confidence=confidence, status=status)
                             for i, (verdict, confidence, status) in enumerate(combinations)])
+        self.with_verification(data, {f["id"] for f in data["findings"] if f["verdict"] == "Valid"})
         original = copy.deepcopy(data)
         model = r.report_model(data)
         queued = {item["finding"]["id"]: item for item in model["queue"]}
@@ -148,14 +162,19 @@ class ReportOutputTests(unittest.TestCase):
                 expected = ("fix_now" if finding["status"] == "Open"
                             and finding["verdict"] == "Valid"
                             and finding["confidence"] == "Confirmed" else "verify_first")
-                self.assertEqual(r.action_kind(finding), expected)
+                self.assertEqual(r.action_kind(finding, model["verification"][finding["id"]]), expected)
+                self.assertEqual(r.action_kind(finding), "verify_first",
+                                 "Readiness cannot trust an unbound, injected derived flag")
                 if included_open:
                     self.assertEqual(queued[finding["id"]]["action"], expected)
-        self.assertEqual({k: v for k, v in model.items() if k != "queue"}, {
+        self.assertEqual({k: v for k, v in model.items()
+                          if k not in ("queue", "verification", "verification_counts")}, {
             "open_count": 12, "fix_now": 1, "verify_first": 11,
             "fixed": 12, "accepted": 12, "excluded": 18,
             "unverified": 9, "unverified_high": 9,
         })
+        self.assertEqual(model["verification_counts"],
+                         {"static": 0, "runtime": 9, "pending": 27, "retested": 0})
         self.assertEqual(data, original, "Deriving actions must not rewrite evidence or verdicts")
 
     def test_priority_is_severity_first_then_readiness_then_id(self):
@@ -168,6 +187,7 @@ class ReportOutputTests(unittest.TestCase):
             self.finding("Fixed", status="Fixed", verdict="Valid"),
             self.finding("Excluded", verdict="FalsePositive"),
         ])
+        self.with_verification(data, {"L-fix", "Z-fix", "M-fix", "Fixed"})
         expected = ["Z-fix", "A-verify", "B-verify", "M-fix", "M-verify", "L-fix"]
         model = self.renderer.report_model(data)
         self.assertEqual([item["finding"]["id"] for item in model["queue"]], expected)

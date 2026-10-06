@@ -1,0 +1,241 @@
+{
+  "schema_version": 2,
+  "meta": {
+    "project": "Synthetic verification fixture",
+    "date": "2026-10-06",
+    "commit": "1111111111111111111111111111111111111111",
+    "scope": "Illustrative source and local records only; no application tests were executed."
+  },
+  "assessment": {
+    "repository": "synthetic/sample-app",
+    "commit": "1111111111111111111111111111111111111111",
+    "worktree": "clean"
+  },
+  "evidence": [
+    {
+      "id": "source-before",
+      "kind": "source",
+      "commit": "1111111111111111111111111111111111111111",
+      "location": "src/orders.py:12-24",
+      "summary": "Synthetic example: registered customer route reads an order without owner scope.",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "id": "test-before",
+      "kind": "runtime",
+      "commit": "1111111111111111111111111111111111111111",
+      "location": "artifacts/before.txt",
+      "summary": "Synthetic fixture record: secure assertion fails on the vulnerable version.",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "id": "test-after",
+      "kind": "runtime",
+      "commit": "2222222222222222222222222222222222222222",
+      "location": "artifacts/after.txt",
+      "summary": "Synthetic fixture record: secure assertion passes after owner scoping.",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "id": "test-control",
+      "kind": "runtime",
+      "commit": "2222222222222222222222222222222222222222",
+      "location": "artifacts/control.txt",
+      "summary": "Synthetic fixture record: owner can still read their own order.",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "id": "test-regression",
+      "kind": "runtime",
+      "commit": "2222222222222222222222222222222222222222",
+      "location": "artifacts/regression.txt",
+      "summary": "Synthetic fixture record: sibling list endpoint retains owner scoping.",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ],
+  "test_runs": [
+    {
+      "id": "before",
+      "case_id": "order-tenant-boundary",
+      "commit": "1111111111111111111111111111111111111111",
+      "role": "security",
+      "context": {
+        "environment": "local",
+        "configuration": "synthetic-in-memory-v1",
+        "fixture": "two-fake-tenants-v1",
+        "test_version": "security-tests-v1",
+        "boundary": "real"
+      },
+      "result": "fail",
+      "failure_kind": "assertion",
+      "exit_code": 1,
+      "expected": "The secure expectation is satisfied.",
+      "observed": "Synthetic assertion failed because another tenant order was returned.",
+      "command": "python -m unittest tests.test_orders",
+      "recorded_at": "2026-10-06T09:00:00Z",
+      "evidence_ids": [
+        "test-before"
+      ]
+    },
+    {
+      "id": "after",
+      "case_id": "order-tenant-boundary",
+      "commit": "2222222222222222222222222222222222222222",
+      "role": "security",
+      "context": {
+        "environment": "local",
+        "configuration": "synthetic-in-memory-v1",
+        "fixture": "two-fake-tenants-v1",
+        "test_version": "security-tests-v1",
+        "boundary": "real"
+      },
+      "result": "pass",
+      "failure_kind": "none",
+      "exit_code": 0,
+      "expected": "The secure expectation is satisfied.",
+      "observed": "Synthetic secure assertion passed.",
+      "command": "python -m unittest tests.test_orders",
+      "recorded_at": "2026-10-06T09:00:00Z",
+      "evidence_ids": [
+        "test-after"
+      ]
+    },
+    {
+      "id": "control",
+      "case_id": "owner-can-read-order",
+      "commit": "2222222222222222222222222222222222222222",
+      "role": "positive_control",
+      "context": {
+        "environment": "local",
+        "configuration": "synthetic-in-memory-v1",
+        "fixture": "two-fake-tenants-v1",
+        "test_version": "security-tests-v1",
+        "boundary": "real"
+      },
+      "result": "pass",
+      "failure_kind": "none",
+      "exit_code": 0,
+      "expected": "The secure expectation is satisfied.",
+      "observed": "Synthetic secure assertion passed.",
+      "command": "python -m unittest tests.test_orders",
+      "recorded_at": "2026-10-06T09:00:00Z",
+      "evidence_ids": [
+        "test-control"
+      ]
+    },
+    {
+      "id": "regression",
+      "case_id": "list-remains-scoped",
+      "commit": "2222222222222222222222222222222222222222",
+      "role": "regression",
+      "context": {
+        "environment": "local",
+        "configuration": "synthetic-in-memory-v1",
+        "fixture": "two-fake-tenants-v1",
+        "test_version": "security-tests-v1",
+        "boundary": "real"
+      },
+      "result": "pass",
+      "failure_kind": "none",
+      "exit_code": 0,
+      "expected": "The secure expectation is satisfied.",
+      "observed": "Synthetic secure assertion passed.",
+      "command": "python -m unittest tests.test_orders",
+      "recorded_at": "2026-10-06T09:00:00Z",
+      "evidence_ids": [
+        "test-regression"
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "id": "F-001",
+      "title": "Synthetic order detail lacks owner scoping",
+      "severity": "High",
+      "confidence": "Confirmed",
+      "location": "src/orders.py:18",
+      "status": "Fixed",
+      "validation": {
+        "verdict": "Valid",
+        "method": "synthetic fixture",
+        "evidence": "Illustrative evidence only; not an assessment of a real application."
+      },
+      "verification": {
+        "reviewer": "synthetic-author",
+        "claims": {
+          "reachability": {
+            "status": "supported",
+            "evidence_ids": [
+              "source-before"
+            ],
+            "reason": "Synthetic source trace supports this claim."
+          },
+          "preconditions": {
+            "status": "supported",
+            "evidence_ids": [
+              "source-before"
+            ],
+            "reason": "Synthetic source trace supports this claim."
+          },
+          "defenses": {
+            "status": "supported",
+            "evidence_ids": [
+              "source-before"
+            ],
+            "reason": "Synthetic source trace supports this claim."
+          },
+          "impact": {
+            "status": "supported",
+            "evidence_ids": [
+              "source-before"
+            ],
+            "reason": "Synthetic source trace supports this claim."
+          }
+        },
+        "falsification": [
+          {
+            "check": "Check middleware, policy and query scopes for an ownership defense.",
+            "result": "clear",
+            "evidence_ids": [
+              "source-before"
+            ],
+            "reason": "Synthetic review found no compensating ownership guard."
+          }
+        ],
+        "reviews": [
+          {
+            "reviewer": "synthetic-independent-reviewer",
+            "conclusion": "agree",
+            "evidence_ids": [
+              "source-before"
+            ],
+            "reason": "Synthetic independent review re-read the complete source trace."
+          }
+        ],
+        "environment": {
+          "status": "not_required",
+          "reason": "The claim is scoped to the pinned source and isolated fixture; deployed applicability is not asserted.",
+          "evidence_ids": []
+        },
+        "run_ids": [
+          "before"
+        ]
+      },
+      "remediation": {
+        "before_run_id": "before",
+        "after_run_id": "after",
+        "positive_control_run_ids": [
+          "control"
+        ],
+        "regression_run_ids": [
+          "regression"
+        ],
+        "commit": "2222222222222222222222222222222222222222"
+      }
+    }
+  ],
+  "limitations": [
+    "All evidence, commit IDs, hashes, reviewers and run results in this file are invented test fixtures, not actual security findings or executed tests.",
+    "Structural validation cannot verify that an artifact exists or that its contents prove the claim."
+  ]
+}

@@ -36,6 +36,13 @@ The older smoke test's dependency skips are also caught by this runner.
   including excluded findings and historical evidence, must survive. Each long
   PDF must span at least three pages and retain every one of its 120 evidence
   paragraphs and 60 remediation paragraphs, including Japanese text.
+- The structured-verification fixture is rendered to an additional PDF in each
+  language. Every displayed claim, reviewer, countercheck, execution record and
+  referenced evidence item must survive text extraction. All input records are
+  fictional; the report renderer does not execute their recorded commands.
+- Verification states, retest gaps, report-wide counts and redacted proof details
+  are checked in the real browser in both languages at 375 px. HTML-like proof
+  remains inert text, and the new checks are mandatory in the zero-skip runner.
 
 The `synthetic-report-evidence` Actions artifact retains the generated HTML,
 PDFs, extracted UTF-8 text, page metadata and browser screenshots for seven days.

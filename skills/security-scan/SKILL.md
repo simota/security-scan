@@ -40,9 +40,9 @@ Phases: `RECON → CHECKLIST → REVIEW → VERIFY → REPORT`.
 | RECON | Build the attack-surface map: stack, every entry point with its auth and role guard, how tenancy is enforced and which models escape it, data sinks, config; run `scripts/deps_scan.py` for the dependency inventory and supply-chain checks | `reference/recon.md`, `reference/dependencies.md` |
 | CHECKLIST | Choose the perspectives that apply and turn the map into this app's checklist; attach early suspicions marked unverified | `reference/perspectives.md`, `reference/report.md` |
 | REVIEW | One pass (or one independent reviewer) per perspective; handlers a low-privilege actor can reach first, admin-only handlers for the severe classes only; `deps_scan.py --audit` for known-vulnerable and malicious packages | `reference/perspectives.md`, `reference/dependencies.md` |
-| VERIFY | Validate every finding: reachable, preconditions hold, no compensating control, impact follows; record a verdict with evidence; settle reviewer disagreements in the code; triage dependency advisories per package | `reference/validation.md` |
+| VERIFY | Record evidence-linked reachability, preconditions, defenses and impact; try to falsify the claim; preserve unknown conditions and independent reviewer findings; distinguish static support from isolated runtime evidence | `reference/validation.md` |
 | REPORT | Write `findings.json` with a `path:line` location for every code finding and `references` (advisory, fix commit, article) for every library finding; render the dashboard and the assessment PDF with `scripts/render.py --repo <audited-repo>` so code excerpts are embedded; then give the summary in chat | `reference/findings-schema.md`, `reference/report.md` |
-| VERIFY-FIX *(on request)* | Turn a `Valid` finding into a local regression test: red on the vulnerable code, green on the fix, kept in the repo's own suite. Own code, local-only, benign inert input; never an attack tool | `reference/fix-verification.md` |
+| VERIFY-FIX *(on request)* | With explicit permission, test the same case before/after in owned local or throwaway code; require a legitimate secure-assertion failure before, pass after, plus passing positive control and regression. Record retest evidence separately from `Fixed` | `reference/fix-verification.md` |
 
 ## Outputs
 
@@ -68,7 +68,7 @@ requester's language (`--lang ja|en`).
 | A finding's impact depends on deployment (debug flags, proxy, storage ACL) | Report it as `environment-dependent` with the exact setting, not as confirmed and not as dropped |
 | The requester wants live confirmation | Only on a local or throwaway environment they own, only after an explicit go-ahead, never production, never a third party |
 | Asked to confirm a fix, write a repro, or guard against regression | Write a local regression test that is red on the vulnerable code and green on the fix, in the repo's own suite (`reference/fix-verification.md`). Own code and local-only; not an attack tool |
-| Two reviewers disagree | Neither wins. Read the code and record which was right |
+| Two reviewers disagree | Re-read the disputed evidence and record the disagreement and its resolution. A vote is not verification; keep material unresolved disagreements incomplete |
 | A secret is found in the repo | Report its location and kind only. Never print the value |
 
 ## Always / Never
@@ -76,7 +76,14 @@ requester's language (`--lang ja|en`).
 - Always: anchor every finding to `file:line` and name the actor and the request
   shape (method, path, parameter names)
 - Always: grade **severity** (High / Medium / Low) and **confidence**
-  (Confirmed / Environment-dependent / Suspected) separately
+  (Confirmed / Environment-dependent / Suspected) separately; also distinguish
+  the recorded verdict, evidence-derived verification basis and remediation status
+- Always: pin structured evidence to the assessed revision and record the four
+  claims, falsification checks, reviewer evidence and unresolved conditions
+- Always: retain legacy verdicts without promoting them to verified or fix-ready;
+  label missing structured evidence as insufficient verification. Only explicit
+  `schema_version: 2` opts into the new rules; versionless/version-1 extension
+  fields remain historical, regardless of their names
 - Always: list what was checked and found sound. A report with no negatives
   cannot be told apart from a report that did not look
 - Always: say what static reading cannot show — deployed config, data actually
@@ -101,6 +108,21 @@ requester's language (`--lang ja|en`).
   query/response by the agent writing the report, not only by a reviewer
 - Every claim that a field leaks is checked against the model's hidden/visible
   rules and the relations actually loaded
+- Definitive High findings have a different reviewer inspect the supporting
+  evidence; unresolved disagreements are not settled by majority vote
+- Static support is never labelled runtime reproduction. Isolated runtime
+  evidence does not establish deployed conditions; skipped, blocked, unsupported
+  and errored runs never become passes. A listed incomplete current-version run
+  blocks runtime/retest verification. A passing secure assertion contradicts
+  `Valid`; a legitimate failing one contradicts an exclusion. Keep either
+  conflict incomplete, and do not discard counterevidence
+- `Unverified`, `Likely` and `Unlikely` remain verification-incomplete even with
+  complete evidence fields; recorded verdicts are not automatically upgraded
+- `Fixed` is a recorded claim. An independently evidenced retest requires the
+  runtime-supported original case, matching before/after records and passing
+  normal/positive-control and regression records
+- `scripts/verification.py` checks record structure and declared consistency,
+  not whether artifacts are truthful, test commands ran or all paths were covered
 - Dependency findings come from `scripts/deps_scan.py` (static checks, plus
   audit tool output with `--audit`); every audit in its `not_run` list appears
   in the report's limitations, and platform end-of-life is checked against the
@@ -110,6 +132,7 @@ requester's language (`--lang ja|en`).
 
 Every entry point reachable by a non-admin actor has been read, every
 perspective in `reference/perspectives.md` is recorded as applied, N/A or not
-checked, every High and Medium finding carries a validation verdict other than
-`Unverified` (or the report's first line says how many do not), and the report states its
-own blind spots.
+checked, every High and Medium finding has a recorded verdict and explicit
+verification basis (or the first line names the outstanding validation and
+insufficient-evidence counts), and the report states its own blind spots. Record
+uncertainty honestly; a completed report need not claim every finding is verified.
