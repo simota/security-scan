@@ -13,7 +13,8 @@ def load_script(name):
     path = Path(__file__).resolve().parents[1] / "skills/security-scan/scripts" / (name + ".py")
     spec = importlib.util.spec_from_file_location("boundary_" + name, path)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    with patch.object(sys, "path", [str(path.parent)] + sys.path):
+        spec.loader.exec_module(module)
     return module
 
 

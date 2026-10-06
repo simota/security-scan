@@ -30,7 +30,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
+from url_redaction import redact_urls
 
 SKIP_DIRS = {".git", "node_modules", "vendor", ".venv", "venv", "dist", "build",
              "target", "__pycache__", ".next", ".nuxt", "bower_components", ".tox"}
@@ -51,23 +51,6 @@ ECOSYSTEM = {"package.json": "npm", "composer.json": "composer", "Gemfile": "bun
 
 CAT_DEP = "Dependencies and platform"
 CAT_BUILD = "Build and delivery"
-
-
-URL_RE = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^\s'\"<>]+")
-
-
-def redact_urls(text):
-    """Do not copy URL credentials, queries or fragments into generated reports."""
-    def clean(match):
-        try:
-            u = urlsplit(match.group())
-            if not u.hostname:
-                return "[redacted URL]"
-            u.port  # Validate the authority before retaining it.
-            return urlunsplit((u.scheme, u.netloc.rsplit("@", 1)[-1], u.path, "", ""))
-        except ValueError:
-            return "[redacted URL]"
-    return URL_RE.sub(clean, text)
 
 
 def safe_output(value):
