@@ -2,6 +2,7 @@ name: Offline tests and report artifacts
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -53,27 +54,62 @@ jobs:
       - name: Install pinned browser-test tooling
         run: |
           python -m pip install --disable-pip-version-check --only-binary=:all: -r scripts/ci/requirements.txt
-      - name: Install Chromium and Japanese PDF dependencies
+      - name: Install Chrome system libraries and Japanese PDF dependencies
         run: |
-          python -m playwright install --with-deps chromium
+          python -m playwright install-deps chromium
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends fonts-noto-cjk poppler-utils
+          sudo apt-get install --yes --no-install-recommends fonts-noto-cjk poppler-utils unzip
           fc-cache -f
-          python - <<'PY'
+      - name: Install pinned official Chrome for Testing
+        env:
+          CHROME_VERSION: '154.0.8037.57'
+        run: |
+          browser_root="$RUNNER_TEMP/security-scan-chrome-$CHROME_VERSION"
+          evidence="$RUNNER_TEMP/security-scan-report-artifacts/browser-install"
+          mkdir -p "$browser_root" "$evidence"
+          curl --fail --location --retry 3 --max-time 60 \
+            "https://googlechromelabs.github.io/chrome-for-testing/$CHROME_VERSION.json" \
+            --output "$evidence/manifest.json"
+          python - <<'PYTHON'
+          import json
           import os
           from pathlib import Path
-          from playwright.sync_api import sync_playwright
-          with sync_playwright() as playwright:
-              chrome = Path(playwright.chromium.executable_path)
-              if not chrome.is_file():
-                  raise SystemExit("The required Playwright Chromium binary is missing")
-              with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
-                  env.write(f"CHROME={chrome}\n")
-          PY
+          version = os.environ["CHROME_VERSION"]
+          evidence = Path(os.environ["RUNNER_TEMP"]) / "security-scan-report-artifacts/browser-install"
+          manifest = json.loads((evidence / "manifest.json").read_text())
+          expected = f"https://storage.googleapis.com/chrome-for-testing-public/{version}/linux64/chrome-linux64.zip"
+          urls = [item["url"] for item in manifest["downloads"]["chrome"] if item["platform"] == "linux64"]
+          if manifest["version"] != version or urls != [expected]:
+              raise SystemExit("Official Chrome manifest does not match the pinned Linux version")
+          (evidence / "download-url.txt").write_text(expected + "\n")
+          PYTHON
+          curl --fail --location --retry 3 --max-time 180 \
+            "$(cat "$evidence/download-url.txt")" --output "$browser_root/chrome-linux64.zip"
+          sha256sum "$browser_root/chrome-linux64.zip" | tee "$evidence/archive-sha256.txt"
+          unzip -q "$browser_root/chrome-linux64.zip" -d "$browser_root"
+          export CHROME="$browser_root/chrome-linux64/chrome"
+          python - <<'PYTHON'
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+          chrome = os.environ["CHROME"]
+          version = subprocess.run([chrome, "--version"], capture_output=True, text=True, check=True, timeout=5).stdout.strip()
+          print(version, flush=True)
+          evidence = Path(os.environ["RUNNER_TEMP"]) / "security-scan-report-artifacts/browser-install"
+          (evidence / "version.txt").write_text(version + "\n")
+          match = re.fullmatch(r"(?:Google )?Chrome for Testing ([0-9.]+)", version)
+          if not match or match.group(1) != os.environ["CHROME_VERSION"]:
+              raise SystemExit("Downloaded Chrome version does not match the exact CI pin")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              env.write(f"CHROME={chrome}\n")
+          PYTHON
       - name: Require real browser and PDF tests with zero skips
         env:
           SECURITY_SCAN_REPORT_ARTIFACTS: ${{ runner.temp }}/security-scan-report-artifacts
-        run: python scripts/ci/run_required_tests.py
+        run: |
+          python scripts/ci/check_chromium_pdf.py
+          python scripts/ci/run_required_tests.py
       - name: Retain synthetic browser and PDF evidence
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

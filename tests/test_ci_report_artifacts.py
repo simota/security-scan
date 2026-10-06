@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -64,6 +65,48 @@ class RequiredCIRunnerTests(unittest.TestCase):
     def test_required_browser_and_pdf_tests_are_present(self):
         suite = unittest.TestLoader().discover(str(REPO / "tests"))
         self.assertFalse(self.runner.REQUIRED_TESTS - set(self.runner.test_ids(suite)))
+
+
+class ChromiumPDFPreflightTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location(
+            "ci_pdf_preflight", REPO / "scripts/ci/check_chromium_pdf.py")
+        cls.preflight = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.preflight)
+
+    def test_diagnostic_success_cannot_override_baseline_failure(self):
+        with patch.dict(os.environ, {"CHROME": "/synthetic/chrome",
+                                     "SECURITY_SCAN_REPORT_ARTIFACTS": "/synthetic/artifacts"}):
+            with patch.object(self.preflight.shutil, "which", return_value="/synthetic/system-chrome"):
+                for results in ([1, 0, 0], [1, 0, 1], [1, 1, 0], [1, 1, 1]):
+                    with self.subTest(results=results):
+                        with patch.object(self.preflight, "run_preflight", side_effect=results) as run:
+                            self.assertEqual(self.preflight.main(), 1)
+                            self.assertEqual(run.call_count, 3)
+                            self.assertEqual(run.call_args_list[1].args[0], "/synthetic/system-chrome")
+                            self.assertEqual(run.call_args_list[1].kwargs, {})
+                            self.assertEqual(run.call_args_list[2].args[0], "/synthetic/chrome")
+                            self.assertEqual(run.call_args_list[2].kwargs["headless_flags"], ("--headless",))
+
+    def test_missing_system_chrome_is_recorded_as_unavailable(self):
+        with tempfile.TemporaryDirectory(prefix="preflight-unit-") as root:
+            with patch.dict(os.environ, {"CHROME": "/synthetic/chrome",
+                                         "SECURITY_SCAN_REPORT_ARTIFACTS": root}):
+                with patch.object(self.preflight.shutil, "which", return_value=None):
+                    with patch.object(self.preflight, "run_preflight", side_effect=[1, 0]) as run:
+                        self.assertEqual(self.preflight.main(), 1)
+                        self.assertEqual(run.call_count, 2)
+            result = (Path(root) / "system-chrome-diagnostic/result.txt").read_text()
+            self.assertIn("available=False", result)
+            self.assertIn("unavailable", result)
+
+    def test_successful_baseline_does_not_need_a_variant(self):
+        with patch.dict(os.environ, {"CHROME": "/synthetic/chrome",
+                                     "SECURITY_SCAN_REPORT_ARTIFACTS": "/synthetic/artifacts"}):
+            with patch.object(self.preflight, "run_preflight", return_value=0) as run:
+                self.assertEqual(self.preflight.main(), 0)
+                run.assert_called_once()
 
 
 @unittest.skipUnless(BROWSER_TESTS, "opt-in real Chromium PDF tests")
