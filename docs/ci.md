@@ -144,3 +144,13 @@ References:
 - [GitHub Actions security guidance](https://docs.github.com/en/actions/reference/security/secure-use)
 - [Playwright Python CI setup](https://playwright.dev/python/docs/ci)
 - [Playwright browser installation](https://playwright.dev/python/docs/browsers)
+
+## Synthetic reproduction evidence
+
+The offline suite executes the generated SQLite owner-scope model twice from a
+clean owned fixture, comparing semantic hashes and both security/control cases.
+It also rejects stale input, altered scripts, unsafe fixture paths, unsupported
+plans and incomplete runs. The strict reports job retains the generated bundle,
+fictional input and separate run/evidence JSON under `reproduction-evidence/` in
+the existing artifact. This is actual execution of a synthetic model only, not
+an assessment of application code or a verified target remediation.

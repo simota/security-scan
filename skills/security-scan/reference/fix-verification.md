@@ -106,3 +106,15 @@ failed and blocked evidence as limitations and name the remaining check.
 The schema checks the recorded pairing and outcomes; it does not run a test,
 verify that a command was really executed, or guarantee semantic equivalence of
 two fixtures. A reviewer must inspect those facts before relying on the result.
+
+## Reproducible preparation bundles
+
+For explicitly requested seed and reproduction scripts, see
+`reference/reproduction-bundles.md`. The generator binds deterministic synthetic
+fixtures and generated scripts to the finding and declared revisions, then
+checks two clean runs. Its SQLite owner-scope model is a preparation aid, not a
+test of the application's own authorization boundary. A model red/green result
+cannot satisfy the runtime-supported original case required above. Adaptation
+into the project's framework needs its own authorized local target, real
+boundary, pinned dependencies and before/after evidence; edited bundle code is
+not accepted by the trusted template runner.

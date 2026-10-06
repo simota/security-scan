@@ -165,3 +165,22 @@ Runtime reproduction is separate and still requires explicit authorization for
 owned local or throwaway code. The workflow does not expand that authorization.
 Static support, an isolated recorded reproduction and deployed conditions remain
 distinct. Fix verification continues to follow `reference/fix-verification.md`.
+
+## Generate a reproducibility bundle
+
+The bundle command is an alias for the separate reproduction generator:
+
+```sh
+python3 skills/security-scan/scripts/verification_workflow.py bundle \
+  findings.json --finding F-001 --plan plan.json --out NEW_BUNDLE
+```
+
+It reads the finding and evidence records but does not advance a review stage,
+change a verdict or run the assessed application. Use `scripts/reproduction.py`
+to verify and run the generated synthetic model against the current findings
+file.
+
+See `reference/reproduction-bundles.md` for the plan, deterministic seed scripts,
+two-run checks, unsupported scaffolds and evidence limits. A stale bundle must
+be regenerated and reviewed; a successful synthetic run does not complete this
+workflow or grant runtime verification.

@@ -46,6 +46,12 @@ RECON ─► CHECKLIST ─► REVIEW ─► VERIFY ─► REPORT
   separate from evidenced retest completion. Owned local or throwaway code only;
   synthetic fixtures and inert inputs, never a working exploit
   (`reference/fix-verification.md`)
+- **Reproducibility bundles** *(on explicit request)* — generate deterministic
+  synthetic seed data, reproduction and cleanup scripts, a hash-bound manifest,
+  and two-run evidence. The first supported template models SQLite owner
+  scoping locally; it does not execute the assessed application or verify its
+  fix. Unsupported cases receive a manual-adaptation scaffold
+  (`reference/reproduction-bundles.md`)
 - **Verify** — every High and Medium finding is re-read end to end before it is
   reported; each carries severity and confidence separately
 - **Report** — one `findings.json` supplies the dashboard and assessment, with
@@ -137,6 +143,47 @@ a completed stage or several agreeing reviewers cannot certify it by themselves.
 See `skills/security-scan/reference/verification-workflow.md` for the commands,
 stage contract and resuming interrupted work.
 
+### 再現スクリプトとシードデータを生成する
+
+明示的に依頼した場合だけ、finding に結び付いた再現バンドルを生成できます。
+現在の実行テンプレートは、架空の owner と resource を使う SQLite の所有者境界モデルです。
+実際のアプリケーション、その認証・認可層、修正コミットは実行しません。
+以下は同梱の架空データを使った、ネットワーク不要の例です。
+
+```sh
+work=$(mktemp -d "${TMPDIR:-/tmp}/security-scan-repro.XXXXXX")
+python3 skills/security-scan/scripts/reproduction.py generate \
+  examples/findings.workflow.sample.json --finding F-001 \
+  --plan examples/reproduction.plan.sample.json --out "$work/bundle"
+python3 skills/security-scan/scripts/reproduction.py verify \
+  "$work/bundle" --findings examples/findings.workflow.sample.json
+python3 skills/security-scan/scripts/reproduction.py run \
+  "$work/bundle" --findings examples/findings.workflow.sample.json \
+  --out "$work/results"
+```
+
+生成先・結果の保存先には、親ディレクトリが存在する未使用のパスを指定します。
+結果は results/results.json、results/records.json、results/evidence/ に保存されます。
+バンドルには seed・再現・cleanup・反復実行用のスクリプトが入ります。
+固定 seed で初期化し、修正前モデルでは安全な期待値の assertion が失敗、
+修正後モデルでは成功すること、正当な所有者のアクセスと存在しない resource の
+対照ケースが成功することを確認します。cleanup を挟んで 2 回実行し、
+fixture と観測結果の意味的な hash が一致することも調べます。
+
+成功時の results.json は `status: completed`、`repeatable: true` になります。
+生成・整合性検証だけでは `not_run` のままです。実行エラーや未対応を成功とみなしません。
+
+manifest は finding、評価対象の revision、選択した証拠レコード、設定と生成コードを
+結び付けます。元の findings が変わった場合や生成コードが改変された場合は、
+再検証で拒否します。結果は findings とは別に保存し、自動で `Valid`、
+`Fixed`、runtime 検証済みへ昇格させません。記録された対象コミットや証拠の hash は、
+対象コードを実際に実行した証明にはなりません。
+
+`verification_workflow.py bundle` からも同じ生成ができます。
+実アプリへの適用には別途、対象・権限・隔離方法を確認し、そのアプリのテスト基盤で
+本物の境界を通るテストを作ります。詳細と未対応ケースの扱いは
+`skills/security-scan/reference/reproduction-bundles.md` を参照してください。
+
 ### Structured verification records
 
 New evidence-backed assessments use `schema_version: 2`, a pinned `assessment`,
@@ -163,13 +210,16 @@ and `Unlikely` also stay incomplete even with complete evidence fields; recorded
 verdicts are never automatically upgraded. A verified retest requires
 runtime-supported original reproduction.
 
-This is a record-and-report MVP. It does not add scanners, execute stored
-commands, retrieve evidence files, verify their hashes, use credentials or extend
-runtime authorization. Hashes identify declared artifacts; structural validation
-is not proof that the evidence is true or that all paths were examined. Runtime
-work still requires explicit permission for owned local or throwaway code. Broader
-asset/coverage inventories and automated application-test execution are outside
-this format's implemented scope.
+The structured verifier is a record-and-report layer. It does not add scanners,
+execute stored commands, retrieve evidence files, verify their declared hashes,
+use credentials or extend runtime authorization. Hashes identify declared
+artifacts; structural validation is not proof that the evidence is true or that
+all paths were examined. The separate opt-in reproduction runner verifies its
+own generated files and runs only its synthetic local template. It never runs
+application code or stored evidence commands. Runtime work against an application
+still requires explicit permission for owned local or throwaway code. Broader
+asset/coverage inventories and automated application-test execution remain
+outside this implementation's scope.
 
 The format and exact rules are documented in
 `skills/security-scan/reference/findings-schema.md`. The explicitly synthetic
@@ -260,14 +310,18 @@ skills/security-scan/
   reference/validation.md      verdicts and how each finding is validated
   reference/verification-workflow.md conditions, falsification and decision handoffs
   reference/fix-verification.md local regression tests that lock a fix in
+  reference/reproduction-bundles.md deterministic synthetic seed/repro bundles and limits
   reference/report.md          checklist and findings report formats
   reference/findings-schema.md findings.json and the render command
   scripts/deps_scan.py         dependency inventory, supply-chain checks, audits (stdlib only)
   scripts/render.py            findings.json -> dashboard / assessment PDF (stdlib only)
   scripts/verification.py      evidence consistency and derived verification/retest states
   scripts/verification_workflow.py ordered local review handoffs, progress and lineage
+  scripts/reproduction.py      generate, verify and run isolated synthetic bundles
+  scripts/reproduction_runtime.py trusted standalone seed/repro/cleanup runtime
 examples/findings.sample.json  fictional legacy sample for make demo / make check
 examples/findings.verification.sample.json  synthetic structured-verification example
+examples/reproduction.plan.sample.json      deterministic SQLite owner-scope demo plan
 ```
 
 ## Development

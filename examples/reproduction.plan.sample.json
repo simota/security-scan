@@ -1,0 +1,20 @@
+{
+  "plan_version": 1,
+  "template": "sqlite-owner-scope-v1",
+  "case_id": "owner-boundary",
+  "seed": 42,
+  "before": {
+    "policy": "unscoped"
+  },
+  "after": {
+    "policy": "owner_scoped",
+    "commit": "2222222222222222222222222222222222222222"
+  },
+  "fixture": {
+    "owners": 2,
+    "resources_per_owner": 2
+  },
+  "evidence_ids": [
+    "source-before"
+  ]
+}
