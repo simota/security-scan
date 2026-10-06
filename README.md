@@ -40,6 +40,12 @@ RECON ─► CHECKLIST ─► REVIEW ─► VERIFY ─► REPORT
   environment conditions remain distinct. Legacy verdicts are preserved but
   without structured evidence cannot become fix-ready. Dependency advisories
   remain auto-triaged and then reviewed per package; exclusions stay visible
+- **Local evidence integrity** *(opt-in)* — read safe local artifact files,
+  compare their actual SHA-256 digests, and compare source artifacts with a blob
+  at the declared commit in an explicitly supplied owned local Git repository.
+  Separate receipts and report provenance distinguish checked bytes from declared
+  records; no hashes certify the claim, reviewer or execution
+  (`reference/evidence-integrity.md`)
 - **Fix verification** *(on explicit request)* — record the same local case
   failing a secure assertion for the right reason before the fix, passing after,
   and passing positive-control and regression cases. Recorded `Fixed` remains
@@ -184,6 +190,38 @@ manifest は finding、評価対象の revision、選択した証拠レコード
 本物の境界を通るテストを作ります。詳細と未対応ケースの扱いは
 `skills/security-scan/reference/reproduction-bundles.md` を参照してください。
 
+### 証拠ファイルの実体・hash・コミットを照合する
+
+記録された hash だけでなく、手元の証拠ファイルを毎回読み直して照合できます。
+`evidence.location` は証拠ルートからの相対ファイルパス、`source_path` は
+明示したローカル Git リポジトリ内のファイルパスにします。
+source は宣言した完全なコミット ID の blob とも照合します。行番号付きの
+表示用 location や URL は、証拠ファイルのパスとして使いません。
+
+```sh
+python3 skills/security-scan/scripts/evidence_integrity.py verify findings.json \
+  --root /path/to/local-evidence --repository /path/to/owned-local-repo \
+  --out /path/to/new-receipt.json
+python3 skills/security-scan/scripts/render.py findings.json \
+  --evidence-root /path/to/local-evidence \
+  --evidence-repository /path/to/owned-local-repo \
+  --out /path/to/new-report --lang ja --no-pdf
+```
+
+receipt は findings と別ファイルです。findings や判定は書き換えません。
+レポート・workflow・再現バンドルで使うときも、同じ証拠ルートとリポジトリを
+指定して再照合します。古い receipt を読み込むだけでは検証済みになりません。
+既存データは従来どおり宣言として扱い、過去の証拠に検証済みの信用を追加しません。
+`schema_version: 2` のトップレベルに `"evidence_integrity": {"required": true}` を
+設定すると、新しい照合が足りない finding は構造化検証・再テストの条件を満たしません。
+
+source は clean なコミットへの対応付けのみ検証でき、dirty source pin は未対応です。
+ネットワーク取得、Git hook、対象アプリや記録されたコマンドは実行しません。
+runtime・environment の hash が一致しても、ログの出来事、実行したコードや
+環境条件が真実だとは証明できません。source の一致も脆弱性の存在を証明しません。
+[安全上の制約と、新しい架空 Git リポジトリだけで試す例](skills/security-scan/reference/evidence-integrity.md)
+を参照してください。同梱サンプルの架空 hash は実ファイルの検証には使えません。
+
 ### Structured verification records
 
 New evidence-backed assessments use `schema_version: 2`, a pinned `assessment`,
@@ -210,16 +248,19 @@ and `Unlikely` also stay incomplete even with complete evidence fields; recorded
 verdicts are never automatically upgraded. A verified retest requires
 runtime-supported original reproduction.
 
-The structured verifier is a record-and-report layer. It does not add scanners,
-execute stored commands, retrieve evidence files, verify their declared hashes,
-use credentials or extend runtime authorization. Hashes identify declared
-artifacts; structural validation is not proof that the evidence is true or that
-all paths were examined. The separate opt-in reproduction runner verifies its
-own generated files and runs only its synthetic local template. It never runs
+Structural verification checks declared records; it does not by itself read
+artifacts or verify their hashes. The separate opt-in local evidence check reads
+actual bytes and, for source, checks the explicitly supplied local repository's
+commit blob. Required-integrity policy can gate structured support and retest;
+without it, existing record-level behavior remains, with provenance identifying
+what was declared and what was freshly checked. Neither route authenticates
+reviewers, proves recorded execution or establishes that all paths were examined.
+No scanners, network retrieval, credentials or application-test execution are
+added by this check. The separate reproduction runner continues to verify its
+own generated files and run only its synthetic local template; it never executes
 application code or stored evidence commands. Runtime work against an application
 still requires explicit permission for owned local or throwaway code. Broader
-asset/coverage inventories and automated application-test execution remain
-outside this implementation's scope.
+asset/coverage inventories remain outside this implementation's scope.
 
 The format and exact rules are documented in
 `skills/security-scan/reference/findings-schema.md`. The explicitly synthetic
@@ -309,6 +350,7 @@ skills/security-scan/
   reference/dependencies.md    dependency, vulnerability and supply-chain review
   reference/validation.md      verdicts and how each finding is validated
   reference/verification-workflow.md conditions, falsification and decision handoffs
+  reference/evidence-integrity.md local artifact bytes, source commits and safety limits
   reference/fix-verification.md local regression tests that lock a fix in
   reference/reproduction-bundles.md deterministic synthetic seed/repro bundles and limits
   reference/report.md          checklist and findings report formats
@@ -316,6 +358,7 @@ skills/security-scan/
   scripts/deps_scan.py         dependency inventory, supply-chain checks, audits (stdlib only)
   scripts/render.py            findings.json -> dashboard / assessment PDF (stdlib only)
   scripts/verification.py      evidence consistency and derived verification/retest states
+  scripts/evidence_integrity.py read-only local evidence verification and separate receipts
   scripts/verification_workflow.py ordered local review handoffs, progress and lineage
   scripts/reproduction.py      generate, verify and run isolated synthetic bundles
   scripts/reproduction_runtime.py trusted standalone seed/repro/cleanup runtime

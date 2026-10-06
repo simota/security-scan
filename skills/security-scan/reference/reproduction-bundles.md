@@ -19,7 +19,8 @@ named commits, execute the application's authentication or authorization
 layers, install dependencies, execute commands recorded in evidence, use
 credentials or send network requests. There is no target-host, live-system or
 network option. A declared target revision is a reference, not proof that the
-revision was executed.
+revision was executed. Optional source-evidence checks can establish a blob's
+correspondence with a local commit, but do not execute that revision.
 
 Only explicitly requested owned-local or throwaway work is in scope. A static
 review or report-rendering request does not authorize execution. Never use real
@@ -67,6 +68,56 @@ python3 skills/security-scan/scripts/verification_workflow.py bundle \
 This alias neither runs a case nor advances conditions, falsification or
 decision stages. See `reference/verification-workflow.md` for those handoffs.
 
+## Check the evidence behind a bundle
+
+Generated-script and findings-input hash verification remains mandatory. It is
+separate from optional verification of the registered evidence files themselves.
+For actual local artifacts, add these flags to `generate`, `verify` and `run`:
+
+```sh
+python3 skills/security-scan/scripts/reproduction.py generate findings.json \
+  --finding F-001 --plan plan.json --out /path/to/new-bundle \
+  --evidence-root /path/to/local-evidence \
+  --evidence-repository /path/to/owned-local-repository
+python3 skills/security-scan/scripts/reproduction.py verify /path/to/new-bundle \
+  --findings findings.json --evidence-root /path/to/local-evidence \
+  --evidence-repository /path/to/owned-local-repository
+python3 skills/security-scan/scripts/reproduction.py run /path/to/new-bundle \
+  --findings findings.json --out /path/to/new-results \
+  --evidence-root /path/to/local-evidence \
+  --evidence-repository /path/to/owned-local-repository
+```
+
+Use actual records with safe artifact paths and source `source_path` fields;
+the bundled fictional sample is not suitable for successful artifact checks.
+See `reference/evidence-integrity.md` for a synthetic Git setup and safety limits.
+A required-integrity assessment refuses generation or execution without the
+necessary successful fresh checks. A bundle generated with evidence checks
+binds their deterministic receipt hash as `evidence_receipt_sha256`. Later
+`verify` and `run` must recheck the same sources even if the assessment's policy
+is optional. Supplying a saved receipt cannot replace those reads.
+
+For checked bundles, use this repository's `reproduction.py` entry point to
+seed or execute the model. Generated standalone `seed.py`, `reproduce.py` and
+`run.py` cannot independently recheck external evidence and refuse such bundles.
+Standalone `cleanup.py` is deliberately allowed without fresh external evidence,
+so a missing artifact does not prevent safe removal of an owned fixture. Cleanup
+still requires unchanged findings, valid integrity policy, manifest identity,
+generated-file hashes, and the exact owned fixture inventory/database hash.
+It grants no evidence credit and never relaxes those ownership checks.
+
+Unchanged findings, checked source bytes and trusted generated code are separate
+requirements. Manifest identity is recomputed; removing receipt metadata cannot
+silently turn a checked bundle into an unchecked one. If bindings become stale,
+investigate and regenerate; do not patch the manifest or use standalone
+execution to bypass checks.
+
+A source match establishes that the artifact equals a blob at the declared
+commit. A runtime/environment hash match establishes only the artifact bytes.
+Neither proves a logged event, executes the original application or upgrades
+synthetic observations from `mocked` to `real`. Checked synthetic bundles still
+cannot establish runtime-supported findings or verified application fixes.
+
 ## Plan contract
 
 The minimal supported plan is `examples/reproduction.plan.sample.json`:
@@ -98,13 +149,15 @@ The minimal supported plan is `examples/reproduction.plan.sample.json`:
   intentionally contrasts an unscoped read with an owner-scoped read. Merely
   declaring the policies does not establish the real application's behavior.
 - The before revision comes from the current assessment pin; `after.commit`
-  declares the intended fixed revision. Neither field makes the runner fetch,
-  execute or verify that revision's source.
+  declares the intended fixed revision. Neither field makes the runner fetch
+  or execute that revision. Optional evidence checks only verify source artifacts
+  explicitly registered with a source path and local commit.
 - `fixture` describes synthetic owners and resources per owner. Provide enough
   independent owners to test an ownership boundary. Do not substitute real data.
 - `evidence_ids` selects existing evidence records to bind to the manifest.
-  Their declared hashes and descriptions remain claims that need source review;
-  the runner does not retrieve or authenticate those external artifacts.
+  Their declared hashes and descriptions need source review. Optional local
+  checks below read actual artifact bytes and source commit blobs; the runner
+  never retrieves remote artifacts or authenticates their claims.
 
 The plan accepts exactly the fields above; no commands, SQL, URLs or extra
 keys. The current bounds are:
@@ -139,9 +192,10 @@ hash stale. Changing generated code and updating its declared hash is not an
 approved way to introduce a new adapter.
 
 Hash consistency detects changed bytes and declared inputs. It is not a digital
-signature, an identity check, an attestation of an external evidence artifact,
-or proof that the assessment is complete. An application commit and source
-location in a manifest remain declared references.
+signature, an identity check, proof that recorded events happened or proof that
+the assessment is complete. Without fresh evidence checks, application commits
+and source locations in a manifest remain declared references. With them, only
+the supported local artifact/source-blob correspondence is additionally checked.
 
 The generated standalone entry points are:
 
@@ -164,7 +218,11 @@ filesystem.
 
 Fixture paths used by the scripts are relative to their bundle, not the
 caller's working directory. Every standalone command requires the unchanged
-source findings. Use isolated mode and disable site startup hooks:
+source findings. The full sequence below is for unchecked default bundles;
+checked bundles require the repository runner for seeding and execution. The
+`cleanup.py` command also works for checked bundles without rechecking external
+evidence, subject to all manifest and owned-fixture checks above. Use isolated
+mode and disable site startup hooks:
 
 ```sh
 findings="$PWD/examples/findings.workflow.sample.json"
@@ -280,6 +338,10 @@ or running it:
    database reset or exploit-payload generator.
 6. Export sanitized evidence for independent review, preserving the exercised
    boundary and limitations. Do not auto-promote the finding or remediation.
+
+The trusted runtime template is now version 2. Its checked-evidence standalone
+guard changes generated code; regenerate and review bundles from version 1
+against the current trusted template. The plan and bundle schemas are unchanged.
 
 The current trusted runner rejects manually edited generated code; it is not a
 plugin loader for adapters. Run a reviewed project adaptation through that

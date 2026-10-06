@@ -160,7 +160,7 @@ class ReproductionTests(unittest.TestCase):
         manifest["boundary"] = "real"
         (self.bundle / "manifest.json").write_bytes(runtime.canonical(manifest))
         (self.bundle / "manifest.sha256.json").write_text(json.dumps({"sha256": runtime.digest(runtime.canonical(manifest))}))
-        with self.assertRaisesRegex(repro.BundleError, "trusted template"):
+        with self.assertRaisesRegex(repro.BundleError, "trusted template|Bundle identity"):
             repro.verify(self.bundle, self.findings)
 
     def test_timeout_is_captured_with_no_successful_runs(self):

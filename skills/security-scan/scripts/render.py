@@ -24,6 +24,7 @@ from urllib.parse import quote, urlsplit
 from url_redaction import redact_urls
 from verification import CLAIMS, derive_verification, validate_verification
 from verification_workflow import derive_workflow, validate_workflows
+from evidence_integrity import verify_evidence
 
 SEVERITIES = ["High", "Medium", "Low", "Info"]
 CONFIDENCES = ["Confirmed", "Environment-dependent", "Suspected"]
@@ -246,7 +247,7 @@ VERIFICATION_LABELS = {
         "v_expected": "Expected", "v_observed": "Observed", "v_command": "Recorded command (not executed by this report)",
         "v_context": "Context", "v_time": "Recorded at", "v_exit": "Exit code", "v_failure": "Failure kind",
         "v_withheld": "Evidence text withheld for sensitive material; inspect the authorized original.",
-        "v_reason": "Reason", "v_hash": "Artifact SHA-256", "v_location": "Evidence location",
+        "v_reason": "Reason", "v_hash": "Declared artifact SHA-256", "v_location": "Evidence location",
         "v_author": "Original reviewer", "v_exclusion": "Exclusion basis", "v_remediation": "Retest target",
         "v_resolution": "Resolution of disagreement", "v_legacy_note": "Historical verification note (not structured evidence)",
         "v_environment_verified": "Environment conditions recorded as verified",
@@ -273,7 +274,7 @@ VERIFICATION_LABELS = {
         "v_case": "ケース", "v_expected": "期待結果", "v_observed": "観測結果", "v_command": "記録されたコマンド（帳票では実行しません）",
         "v_context": "実行条件", "v_time": "記録日時", "v_exit": "終了コード", "v_failure": "失敗の種類",
         "v_withheld": "機微な内容のため根拠本文を表示しません。許可された原本を確認してください。",
-        "v_reason": "理由", "v_hash": "根拠ファイルのSHA-256", "v_location": "根拠の場所",
+        "v_reason": "理由", "v_hash": "申告された根拠ファイルのSHA-256", "v_location": "根拠の場所",
         "v_author": "最初の確認者", "v_exclusion": "除外の根拠", "v_remediation": "再検査の対象",
         "v_resolution": "見解の相違を解決した根拠", "v_legacy_note": "以前の検証メモ（構造化された根拠ではありません）",
         "v_environment_verified": "環境条件の確認記録あり",
@@ -287,6 +288,88 @@ VERIFICATION_LABELS = {
 }
 for _lang, _labels in VERIFICATION_LABELS.items():
     LABELS[_lang].update(_labels)
+
+
+INTEGRITY_LABELS = {
+    "en": {
+        "i_title": "Evidence-file integrity",
+        "i_summary": "Evidence-file checks: {checked} findings checked, {incomplete} incomplete, {declared} with declared references only. Counts exclude ruled-out findings.",
+        "i_checked": "Current evidence bytes checked",
+        "i_declared": "Declared references only; evidence files not checked",
+        "i_incomplete": "Evidence-file checks incomplete",
+        "i_counts": "SHA-256 matched: {bytes_checked}/{evidence_total} referenced files. Commit/path blobs matched: {sources_checked}.",
+        "i_note": "A byte match confirms only that the file matches its declared SHA-256. A source match binds those bytes to a blob at the recorded commit and path. Neither proves authenticity, test execution, the truth of recorded results, or deployed behavior.",
+        "i_bytes": "File bytes", "i_source": "Source binding",
+        "i_source_path": "Recorded path within the commit",
+        "i_bytes_matched": "SHA-256 matched", "i_bytes_mismatch": "SHA-256 mismatch",
+        "i_bytes_unavailable": "Unavailable", "i_bytes_unsupported": "Unsupported",
+        "i_bytes_declared": "Declared; not checked", "i_bytes_not_checked": "Not checked",
+        "i_source_matched": "Blob matched at the recorded commit/path",
+        "i_source_mismatch": "Bytes differ from the recorded commit/path blob",
+        "i_source_declared": "Commit reference declared only",
+        "i_source_unavailable": "Commit/path binding unavailable",
+        "i_source_unsupported": "Commit/path binding unsupported",
+        "i_source_not_checked": "Commit/path binding not checked",
+        "i_reason_unknown": "The evidence-file check could not be completed.",
+        "v_gap_evidence_integrity_incomplete": "Fresh evidence-file checks are missing or incomplete.",
+        "v_gap_evidence_integrity_unchecked": "Required fresh evidence-file checks have not been performed.",
+        "v_gap_evidence_integrity_failed": "Fresh evidence-file checks did not establish matching bytes and required source bindings.",
+    },
+    "ja": {
+        "i_title": "根拠ファイルの整合性",
+        "i_summary": "根拠ファイルの確認：確認済みの指摘 {checked} 件、未完了 {incomplete} 件、参照の申告のみ {declared} 件。件数は除外した指摘を含みません。",
+        "i_checked": "今回、根拠ファイルのバイト列を確認済み",
+        "i_declared": "参照の申告のみ・根拠ファイルは未確認",
+        "i_incomplete": "根拠ファイルの確認が未完了",
+        "i_counts": "SHA-256 一致：参照ファイル {evidence_total} 件中 {bytes_checked} 件。コミット・パスの blob 一致：{sources_checked} 件。",
+        "i_note": "バイト列の一致は、ファイルが申告された SHA-256 と一致することだけを示します。ソースの一致は、記録されたコミット・パスの blob との対応を示します。真正性、テストの実行、記録された結果の真実性、本番環境での動作は証明しません。",
+        "i_bytes": "ファイルのバイト列", "i_source": "ソースとの対応",
+        "i_source_path": "コミット内の記録されたパス",
+        "i_bytes_matched": "SHA-256 一致", "i_bytes_mismatch": "SHA-256 不一致",
+        "i_bytes_unavailable": "確認不可", "i_bytes_unsupported": "非対応",
+        "i_bytes_declared": "申告のみ・未確認", "i_bytes_not_checked": "未確認",
+        "i_source_matched": "記録されたコミット・パスの blob と一致",
+        "i_source_mismatch": "記録されたコミット・パスの blob とバイト列が不一致",
+        "i_source_declared": "コミットの参照は申告のみ",
+        "i_source_unavailable": "コミット・パスとの対応を確認不可",
+        "i_source_unsupported": "コミット・パスとの対応は非対応",
+        "i_source_not_checked": "コミット・パスとの対応は未確認",
+        "i_reason_unknown": "根拠ファイルの確認を完了できませんでした。",
+        "v_gap_evidence_integrity_incomplete": "今回の根拠ファイルの確認が未実施、または未完了です。",
+        "v_gap_evidence_integrity_unchecked": "必須の根拠ファイルの確認が、今回まだ実施されていません。",
+        "v_gap_evidence_integrity_failed": "今回の根拠ファイルの確認では、バイト列の一致と必要なソースとの対応を確認できませんでした。",
+    },
+}
+for _lang, _labels in INTEGRITY_LABELS.items():
+    LABELS[_lang].update(_labels)
+
+
+_INTEGRITY_REASONS = {
+    "context_stale": ("Declarations changed after the file check; check them again.", "ファイルの確認後に申告内容が変わりました。再確認してください。"),
+    "recorded_receipt_only": ("A saved receipt is historical; fresh checks are required.", "保存された確認記録は履歴です。今回のファイル確認が必要です。"),
+    "evidence_not_checked": ("This referenced evidence file was not selected for checking.", "この参照ファイルは今回の確認対象に含まれていません。"),
+    "file_missing": ("The evidence file is missing.", "根拠ファイルが見つかりません。"),
+    "sha256_mismatch": ("The file differs from its declared SHA-256.", "ファイルが申告された SHA-256 と一致しません。"),
+    "source_path_required": ("The source record needs an explicit path within the commit.", "ソースの記録には、コミット内のパスの明示が必要です。"),
+    "repository_required": ("A local repository was not explicitly supplied for source binding.", "ソースとの対応確認に必要なローカルリポジトリが明示されていません。"),
+    "git_source_path_missing": ("The recorded path is absent from the commit.", "記録されたパスがコミット内にありません。"),
+    "git_source_bytes_mismatch": ("The file bytes differ from the blob at the recorded commit/path.", "ファイルのバイト列が、記録されたコミット・パスの blob と一致しません。"),
+    "dirty_source_unsupported": ("Dirty-worktree source binding is unsupported.", "未コミットの変更を含むソースとの対応確認は非対応です。"),
+    "unsafe_path": ("The evidence path is outside the supported safe path format.", "根拠のパスが安全に確認できる形式ではありません。"),
+    "unsafe_root": ("The explicit evidence root could not be opened safely.", "明示された根拠ファイルのルートを安全に開けませんでした。"),
+    "file_changed": ("The evidence file changed during checking.", "確認中に根拠ファイルが変更されました。"),
+    "path_changed": ("A checked filesystem path changed during checking.", "確認中にファイルシステムのパスが変更されました。"),
+    "not_regular_file": ("The evidence is not a supported regular file.", "根拠が対応可能な通常のファイルではありません。"),
+    "hardlinked_file": ("Hard-linked evidence files are unsupported.", "ハードリンクされた根拠ファイルは非対応です。"),
+    "size_limit": ("The evidence exceeds the bounded file-size limit.", "根拠ファイルが確認可能なサイズの上限を超えています。"),
+    "total_read_limit": ("The total read budget was exhausted, including final rechecks.", "最終再確認を含む読み取り総量が上限に達しました。"),
+    "time_limit": ("The bounded check reached its time limit.", "確認時間が上限に達しました。"),
+    "git_object_unavailable": ("The required local Git object is unavailable.", "必要なローカル Git オブジェクトを確認できません。"),
+    "git_commit_invalid": ("The recorded commit could not be verified locally.", "記録されたコミットをローカルで確認できませんでした。"),
+}
+for _code, (_en, _ja) in _INTEGRITY_REASONS.items():
+    LABELS["en"]["i_reason_" + _code] = _en
+    LABELS["ja"]["i_reason_" + _code] = _ja
 
 
 WORKFLOW_LABELS = {
@@ -467,6 +550,8 @@ def validate_data(data):
     validate_json_values(data)
     if not isinstance(data, dict):
         raise SchemaError("top level must be an object")
+    # Fresh verification is an explicit in-memory argument, never input JSON.
+    data.pop("_evidence_integrity", None)
     meta = data.get("meta")
     if not isinstance(meta, dict):
         raise SchemaError("meta: required object")
@@ -487,6 +572,7 @@ def validate_data(data):
         # These are derived output fields, never trusted JSON input.
         f.pop("source_link", None)
         f.pop("snippet", None)
+        f.pop("_evidence_integrity", None)
         for k in ("id", "title", "severity", "confidence", "location"):
             text_field(f, k, where, required=True)
         if any(ord(char) < 32 or ord(char) == 127 for char in f["location"]):
@@ -611,24 +697,25 @@ def public_verification_state(state):
 
 def display_finding(finding, state):
     """Only curated verification details enter the report's embedded payload."""
-    public = {key: value for key, value in finding.items()
-              if key not in ("verification", "remediation", "_verification",
-                             "verification_workflow", "_workflow")}
+    public = {key: finding[key] for key in (
+        "id", "title", "severity", "confidence", "location", "status", "category",
+        "actor", "request", "impact", "fix", "validation", "verdict", "previous_validation",
+        "references", "source_link", "snippet") if key in finding}
     public["_verification"] = public_verification_state(state)
     return public
 
 
-def workflow_states(data):
+def workflow_states(data, integrity=None):
     """Only schema-2 opt-in records affect the staged workflow display."""
-    return {f["id"]: derive_workflow(data, f, SchemaError) for f in data["findings"]
+    return {f["id"]: derive_workflow(data, f, SchemaError, integrity=integrity) for f in data["findings"]
             if data.get("schema_version") == 2 and "verification_workflow" in f}
 
 
-def report_model(data):
+def report_model(data, integrity=None):
     """One report-wide action model shared by both outputs; never mutates verdicts."""
     fs = active(data)
-    verification = derive_verification(data, SchemaError)
-    workflows = workflow_states(data)
+    verification = derive_verification(data, SchemaError, integrity=integrity)
+    workflows = workflow_states(data, integrity=integrity)
     queue = [{"finding": display_finding(f, verification[f["id"]]),
               "action": action_kind(f, verification[f["id"]], workflows.get(f["id"])), "anchor": finding_anchor(data, f)}
              for f in fs if f["status"] == "Open"]
@@ -969,6 +1056,22 @@ def verification_view(data, finding, state, lang):
         if items:
             sections.append({"title": L[key], "items": items})
 
+    provenance = state.get("integrity", {})
+    integrity_status = provenance.get("status", "declared")
+    # Only local result codes and counters are projected. A saved receipt is
+    # never consulted here, and artifact bytes/absolute roots are never copied.
+    if state["level"] != "legacy":
+        section("i_title", [
+            L.get("i_" + integrity_status, L["i_incomplete"]),
+            L["i_counts"].format(bytes_checked=provenance.get("bytes_checked", 0),
+                                 sources_checked=provenance.get("sources_checked", 0),
+                                 evidence_total=provenance.get("evidence_total", len(state.get("evidence_ids", [])))),
+            L["i_note"],
+        ])
+    if state["level"] != "legacy" and integrity_status == "incomplete":
+        section("v_reason", list(dict.fromkeys(L.get("i_reason_" + code, L["i_reason_unknown"])
+                                              for code in provenance.get("reasons", []))))
+    integrity_records = {item["evidence_id"]: item for item in provenance.get("records", [])}
     raw_verification = finding.get("verification")
     verification = raw_verification if isinstance(raw_verification, dict) and state["level"] != "legacy" else {}
     if isinstance(raw_verification, str) and raw_verification:
@@ -1031,15 +1134,22 @@ def verification_view(data, finding, state, lang):
     evidence_items = []
     for evidence_id in state.get("evidence_ids", []):
         record = evidence_index[evidence_id]
+        checked = integrity_records.get(evidence_id, {})
         normalized_location = record["location"].replace("\\", "/")
         match = LOC_RE.match(normalized_location)
         path = match.group("path") if match else normalized_location
-        withheld = sensitive_path(path) or finding.get("category", "").lower() == "secrets"
+        withheld = (sensitive_path(path) or sensitive_path(record.get("source_path", ""))
+                    or finding.get("category", "").lower() == "secrets")
         evidence_items.append(join(text(evidence_id) + " · " + text(record["kind"]),
                                    L["v_location"] + ": " + text(record["location"]),
                                    L["v_commit"] + ": " + text(record["commit"]),
+                                   L["i_source_path"] + ": " + text(record["source_path"]) if record.get("source_path") else "",
                                    "diff_sha256: " + text(record["diff_sha256"]) if record.get("diff_sha256") else "",
                                    L["v_hash"] + ": " + text(record["sha256"]),
+                                   L["i_bytes"] + ": " + L.get("i_bytes_" + checked.get("bytes", "declared"), L["i_bytes_unavailable"]),
+                                   L["i_source"] + ": " + L.get("i_source_" + checked.get("source", "declared"), L["i_source_unavailable"]),
+                                   L["v_reason"] + ": " + L.get("i_reason_" + checked["reason"], L["i_reason_unknown"])
+                                   if checked.get("reason") not in (None, "not_checked", "bytes_matched_revision_declared", "source_bytes_and_commit_matched") else "",
                                    L["v_withheld"] if withheld else text(record.get("summary"))))
     section("v_evidence", evidence_items)
     return {
@@ -1145,22 +1255,32 @@ def verification_summary_parts(model, L):
             for part in re.split(r"\{(static|runtime|pending|retested)\}", L["v_summary"])]
 
 
-def verification_summary_html(model, L):
+def integrity_summary_view(states, findings, L):
+    counts = Counter(states[f["id"]].get("integrity", {}).get("status", "declared") for f in findings)
+    return {"text": L["i_summary"].format(**{key: counts[key] for key in ("checked", "incomplete", "declared")}),
+            "note": L["i_note"],
+            "counts": {key: counts[key] for key in ("checked", "incomplete", "declared")}}
+
+
+def verification_summary_html(model, L, integrity_summary=None):
     parts = verification_summary_parts(model, L)
     sentence = "".join(f"<strong data-verification-count='{part['key']}'>{part['count']}</strong>"
                        if "count" in part else esc(part["text"]) for part in parts)
+    provenance = (f"<div class='integrity-summary'><h3>{esc(L['i_title'])}</h3>"
+                  f"<p>{esc(integrity_summary['text'])}</p>"
+                  f"<p class='small'>{esc(integrity_summary['note'])}</p></div>" if integrity_summary else "")
     return (f"<div id='verification-summary'><p>{sentence}</p>"
-            f"<p class='small'>{esc(L['v_note'])}</p></div>")
+            f"<p class='small'>{esc(L['v_note'])}</p>{provenance}</div>")
 
 
-def render_assessment_html(data, L, lang):
+def render_assessment_html(data, L, lang, integrity=None):
     L = {**ASSESSMENT_LABELS.get(lang, ASSESSMENT_LABELS["en"]), **L}
     m, st, fs = data["meta"], stats(data), active(data)
-    model = report_model(data)
-    verification_states = derive_verification(data, SchemaError)
+    model = report_model(data, integrity=integrity)
+    verification_states = derive_verification(data, SchemaError, integrity=integrity)
     verification_views = {f["id"]: verification_view(data, f, verification_states[f["id"]], lang)
                           for f in data["findings"]}
-    workflows = workflow_states(data)
+    workflows = workflow_states(data, integrity=integrity)
     workflow_views = {f["id"]: workflow_view(data, f, workflows[f["id"]], lang)
                       for f in data["findings"] if f["id"] in workflows}
     excluded = [f for f in data["findings"] if f["verdict"] in EXCLUDED]
@@ -1308,7 +1428,7 @@ def render_assessment_html(data, L, lang):
 <section class="summary-section" id="executive-summary"><h2>{esc(L['summary'])}</h2>
 <p class="lead">{esc(summary)}</p>{metrics_html}<p class="small">{esc(accounting)}</p>
 <p class="small">{esc(L['a_status_note'])}</p>
-{verification_summary_html(model, L)}
+{verification_summary_html(model, L, integrity_summary_view(verification_states, fs, L))}
 <h3 class="limit-heading">{esc(L['a_limits'])}</h3><p class="small">{esc(L['a_uncertainty'])}</p>
 <div class="limits">{bullets(data.get('limitations', []), 'a_limits_empty')}</div></section>
 <section id="priority-queue"><h2>{esc(L['a_queue'])}</h2><p class="section-note">{esc(L['a_queue_note'])}</p>{queue_html}</section>
@@ -1431,6 +1551,7 @@ summary.appendChild(el('strong',null,fmt(L.unverified_line,{n:R.unverified,high:
 summary.appendChild(el('p',null,F.length?(D.open_hm?fmt(L.risk_summary,{n:D.open_hm}):(R.open_count?fmt(L.open_summary,{n:R.open_count}):L.no_open)):L.no_findings));
 summary.appendChild(el('p',{'class':'muted'},fmt(L.status_summary,{open:R.open_count,fixed:R.fixed,accepted:R.accepted,excluded:R.excluded})));
 var verificationSummary=byId('verification-summary'),verificationSentence=el('p');verificationSummary.setAttribute('aria-label',L.v_title);D.verification_summary.forEach(function(part){verificationSentence.appendChild(part.key?el('strong',{'data-verification-count':part.key},part.count):document.createTextNode(part.text));});verificationSummary.appendChild(verificationSentence);verificationSummary.appendChild(el('p',{'class':'muted'},L.v_note));
+var integritySummary=el('div',{'class':'integrity-summary'});integritySummary.appendChild(el('h3',null,L.i_title));integritySummary.appendChild(el('p',null,D.integrity_summary.text));integritySummary.appendChild(el('p',{'class':'muted'},D.integrity_summary.note));verificationSummary.appendChild(integritySummary);
 function workflowNode(f){var view=D.workflow_views[f.id];if(!view)return null;var box=el('div',{'class':'workflow-record'});box.appendChild(el('h4',null,L.w_title));box.appendChild(el('p',{'class':'workflow-status'},L.w_status+': '+view.status));box.appendChild(el('p',{'class':'workflow-next'},L.w_next+': '+view.next_stage));box.appendChild(el('p',{'class':'muted'},L.w_note));if(view.gaps.length){box.appendChild(el('h5',null,L.w_gaps));var ul=el('ul',{'class':'workflow-gaps'});view.gaps.forEach(function(gap){ul.appendChild(el('li',null,gap));});box.appendChild(ul);}view.sections.forEach(function(section){var group=el('section');group.appendChild(el('h5',null,section.title));section.items.forEach(function(item){group.appendChild(el('p',{'class':'prose'},item));});box.appendChild(group);});box.appendChild(el('p',{'class':'muted'},L.w_safety));return box;}
 function verificationNode(f){var view=D.verification_views[f.id],box=el('div',{'class':'verification-record'});box.appendChild(el('h4',null,L.v_title));box.appendChild(el('p',{'class':'verification-level'},view.level));box.appendChild(el('p',null,L.v_retest+': '+view.retest));if(view.gaps.length){var ul=el('ul',{'class':'verification-gaps'});view.gaps.forEach(function(gap){ul.appendChild(el('li',null,gap));});box.appendChild(ul);}view.sections.forEach(function(section){var group=el('section');group.appendChild(el('h5',null,section.title));section.items.forEach(function(item){group.appendChild(el('p',{'class':'prose'},item));});box.appendChild(group);});return box;}
 
@@ -1477,17 +1598,18 @@ window.addEventListener('hashchange',openHash);draw();if(window.location.hash)op
 """
 
 
-def render_dashboard(data, L, lang):
+def render_dashboard(data, L, lang, integrity=None):
     for f in data["findings"]:
         if f.get("source_link"):
             http_url(f["source_link"], "source_link")
         for ref in f.get("references", []):
             http_url(ref["url"], "references.url")
-    model = report_model(data)
-    verification_states = derive_verification(data, SchemaError)
-    workflows = workflow_states(data)
+    model = report_model(data, integrity=integrity)
+    verification_states = derive_verification(data, SchemaError, integrity=integrity)
+    workflows = workflow_states(data, integrity=integrity)
     payload = {
-        "meta": data["meta"],
+        "meta": {key: data["meta"][key] for key in ("project", "date", "assessor", "scope", "method", "commit", "source_url")
+                 if key in data["meta"]},
         "workflow_views": {f["id"]: workflow_view(data, f, workflows[f["id"]], lang)
                            for f in data["findings"] if f["id"] in workflows},
         "findings": [display_finding(f, model["verification"][f["id"]]) for f in data["findings"]],
@@ -1495,6 +1617,7 @@ def render_dashboard(data, L, lang):
         "verification_views": {f["id"]: verification_view(data, f, verification_states[f["id"]], lang)
                                for f in data["findings"]},
         "verification_summary": verification_summary_parts(model, L),
+        "integrity_summary": integrity_summary_view(verification_states, active(data), L),
         "anchors": {str(f["id"]): finding_anchor(data, f) for f in data["findings"]},
         "order": {"severity": SEVERITIES, "confidence": CONFIDENCES, "status": STATUSES, "verdict": VERDICTS},
         "excluded_verdicts": sorted(EXCLUDED),
@@ -1517,15 +1640,26 @@ def main(argv=None):
     p.add_argument("--lang", choices=sorted(LABELS), default="en")
     p.add_argument("--no-pdf", action="store_true", help="skip PDF generation")
     p.add_argument("--repo", help="audited repository root: embeds redacted source excerpts for path:line locations")
+    p.add_argument("--evidence-root", help="explicit local root for fresh evidence-file SHA-256 checks; never executes recorded commands")
+    p.add_argument("--evidence-repository", help="explicit local Git repository for commit/path blob checks; requires --evidence-root")
     a = p.parse_args(argv)
+    if a.evidence_repository and not a.evidence_root:
+        p.error("--evidence-repository requires --evidence-root")
     try:
         data = load(a.findings)
+        integrity = None
+        if a.evidence_root is not None:
+            try:
+                integrity = verify_evidence(data, a.evidence_root, repository=a.evidence_repository)
+            except (ValueError, OSError):
+                # Evidence setup errors can contain private filesystem paths.
+                raise SchemaError("evidence integrity: unable to check the explicitly supplied local inputs") from None
         attach_sources(data, a.repo)
         L = LABELS[a.lang]
         # Render before creating any output: nested extension data can fit the
         # input decoder but exceed the encoder limit inside the report payload.
-        dashboard = render_dashboard(data, L, a.lang)
-        assessment = render_assessment_html(data, L, a.lang)
+        dashboard = render_dashboard(data, L, a.lang, integrity=integrity)
+        assessment = render_assessment_html(data, L, a.lang, integrity=integrity)
     except RecursionError:
         print("render.py: report: JSON nesting is too deep to render", file=sys.stderr)
         return 2

@@ -154,3 +154,27 @@ plans and incomplete runs. The strict reports job retains the generated bundle,
 fictional input and separate run/evidence JSON under `reproduction-evidence/` in
 the existing artifact. This is actual execution of a synthetic model only, not
 an assessment of application code or a verified target remediation.
+
+
+## Evidence-byte verification and CI artifacts
+
+The report-artifact review established that specific retained CI files contained
+actual bytes and the expected rendered text. Those manual artifact inspections
+(including the earlier PR #11 review) are distinct from the repeatable local
+`scripts/evidence_integrity.py` check documented in
+[local evidence integrity](../skills/security-scan/reference/evidence-integrity.md).
+No past artifact review is automatically imported as verification credit.
+
+The new command reads local artifacts, compares declared SHA-256 values and,
+for source records, compares an explicit source path with a committed blob in an
+explicitly supplied owned local repository. It writes a separate receipt and can
+be repeated by report/workflow/reproduction consumers. Required-integrity policy
+can prevent insufficient evidence from receiving structured support or verified
+retest; a copied receipt is never authoritative.
+
+Tests and demonstrations for this boundary use newly created synthetic local
+Git repositories and artifact files. They do not assess a real application,
+fetch a repository, execute recorded commands or run a deployed-system scan.
+Even a matching runtime artifact cannot authenticate its logged events, original
+conditions or claimed application revision. Existing generated-bundle code and
+input-hash checks continue independently of these evidence-file checks.
