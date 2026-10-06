@@ -18,7 +18,8 @@ import sys
 import tempfile
 import time
 from collections import Counter
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from urllib.parse import quote, urlsplit
 
 SEVERITIES = ["High", "Medium", "Low", "Info"]
 CONFIDENCES = ["Confirmed", "Environment-dependent", "Suspected"]
@@ -96,6 +97,21 @@ class SchemaError(Exception):
     pass
 
 
+def http_url(value, field="url"):
+    """Validate every href, not just its HTML escaping."""
+    if not isinstance(value, str) or not value or any(ord(ch) <= 32 or ord(ch) == 127 for ch in value) or "\\" in value:
+        raise SchemaError(f"{field}: must be an absolute http(s) URL without whitespace or controls")
+    try:
+        parsed = urlsplit(value)
+        if (parsed.scheme.lower() not in ("http", "https") or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None):
+            raise ValueError("unsafe URL")
+        parsed.port  # Reject malformed/out-of-range ports too.
+    except ValueError:
+        raise SchemaError(f"{field}: must be an absolute http(s) URL without credentials") from None
+    return value
+
+
 def load(path):
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -109,6 +125,8 @@ def load(path):
     for k in ("project", "date"):
         if not str(meta.get(k, "")).strip():
             raise SchemaError(f"meta.{k}: required")
+    if meta.get("source_url") not in (None, ""):
+        meta["source_url"] = http_url(meta["source_url"], "meta.source_url")
     findings = data.get("findings")
     if not isinstance(findings, list):
         raise SchemaError("findings: required list")
@@ -117,6 +135,9 @@ def load(path):
         where = f"findings[{i}]"
         if not isinstance(f, dict):
             raise SchemaError(f"{where}: must be an object")
+        # These are derived output fields, never trusted JSON input.
+        f.pop("source_link", None)
+        f.pop("snippet", None)
         for k in ("id", "title", "severity", "confidence", "location"):
             if not str(f.get(k, "")).strip():
                 raise SchemaError(f"{where}.{k}: required")
@@ -152,8 +173,9 @@ def load(path):
         for j, r in enumerate(refs):
             if isinstance(r, str):
                 r = {"url": r}
-            if not isinstance(r, dict) or not str(r.get("url", "")).startswith(("https://", "http://")):
-                raise SchemaError(f"{where}.references[{j}].url: must be an http(s) URL")
+            if not isinstance(r, dict):
+                raise SchemaError(f"{where}.references[{j}]: must be an object or URL")
+            http_url(r.get("url"), f"{where}.references[{j}].url")
             clean.append({"type": str(r.get("type") or "web"), "url": r["url"], "title": str(r.get("title") or "")})
         f["references"] = clean
     for k in ("checked_ok", "decisions", "limitations", "next_steps"):
@@ -230,32 +252,65 @@ SECRET_RE = re.compile(
     r"(?!\$|[A-Za-z_][\w.]*\(|process\.env|os\.environ|null\b|None\b|true\b|false\b)([^'\"\s,;)]{4,})")
 
 
+SENSITIVE_NAMES = {".npmrc", ".yarnrc", ".yarnrc.yml", ".pypirc", ".netrc", ".git-credentials",
+                   "auth.json", "credentials", "credentials.json", "secrets.json", "secrets.yaml", "secrets.yml",
+                   "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"}
+SENSITIVE_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".jks", ".keystore"}
+PRIVATE_KEY_RE = re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----")
+URL_CREDENTIAL_RE = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://)[^/\s'\"<>]+@")
+QUOTED_SECRET_RE = re.compile(
+    r"(?i)((?:password|passwd|secret|token|api[_-]?key|private[_-]?key|access[_-]?key|credential)"
+    r"[\w.-]*['\"]?\s*(?:=>|:=|[:=])\s*)(['\"])(?:\\.|(?!\2).)*\2")
+
+
+def sensitive_path(path):
+    path = Path(path)
+    name = path.name.lower()
+    return (name == ".env" or name.startswith(".env.") or name.endswith(".env")
+            or name in SENSITIVE_NAMES or path.suffix.lower() in SENSITIVE_SUFFIXES
+            or any(part.lower() in {".ssh", ".aws", ".kube", "secrets"} for part in path.parts))
+
+
 def redact(line):
+    line = URL_CREDENTIAL_RE.sub(lambda m: m.group(1) + "********@", line)
+    line = QUOTED_SECRET_RE.sub(lambda m: m.group(1) + m.group(2) + "********" + m.group(2), line)
     return SECRET_RE.sub(lambda m: m.group(1) + "********", line)
 
 
 def attach_sources(data, repo, context=3):
-    """Add a redacted source excerpt and an optional link for findings with path:line locations."""
-    base = str(data["meta"].get("source_url") or "").rstrip("/")
+    """Attach safe links and best-effort redacted excerpts; omit sensitive sources."""
+    base = data["meta"].get("source_url") or ""
+    if base:
+        base = http_url(base, "meta.source_url").rstrip("/")
     root = Path(repo).resolve() if repo else None
     for f in data["findings"]:
+        f.pop("source_link", None)
+        f.pop("snippet", None)
         m = LOC_RE.match(f["location"].strip())
         if not m:
             continue
-        rel, start = m.group("path"), int(m.group("start"))
+        rel, start = m.group("path").replace("\\", "/"), int(m.group("start"))
         end = int(m.group("end") or start)
+        if PurePosixPath(rel).is_absolute() or ".." in PurePosixPath(rel).parts or start < 1 or end < start:
+            continue
         if base:
-            f["source_link"] = f"{base}/{rel}#L{start}" + (f"-L{end}" if end != start else "")
-        if not root:
+            link = f"{base}/{quote(rel, safe='/')}#L{start}" + (f"-L{end}" if end != start else "")
+            f["source_link"] = http_url(link, "source_link")
+        if not root or sensitive_path(rel) or str(f.get("category", "")).lower() == "secrets":
             continue
         path = (root / rel).resolve()
-        if root not in path.parents or not path.is_file():
+        if root not in path.parents or not path.is_file() or sensitive_path(path.relative_to(root)):
             continue
         try:
-            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        lo, hi = max(1, start - context), min(len(lines), end + context)
+        # Do not show even a middle line of a multiline private key.
+        if PRIVATE_KEY_RE.search(text):
+            continue
+        lines = text.splitlines()
+        lo, hi = max(1, start - max(0, context)), min(len(lines), end + max(0, context))
+        hi = min(hi, lo + 199)
         f["snippet"] = {"start": lo, "hit": [start, end],
                         "lines": [redact(lines[i - 1])[:240] for i in range(lo, hi + 1)]}
 
@@ -274,8 +329,8 @@ def snippet_html(f):
 def refs_html(f):
     items = []
     if f.get("source_link"):
-        items.append(("source", f["source_link"], ""))
-    items += [(r["type"], r["url"], r["title"]) for r in f.get("references", [])]
+        items.append(("source", http_url(f["source_link"], "source_link"), ""))
+    items += [(r["type"], http_url(r["url"], "references.url"), r["title"]) for r in f.get("references", [])]
     if not items:
         return ""
     lis = "".join(f"<li><span class='rt'>{esc(t)}</span> <a href='{esc(u)}'>{esc(title or u)}</a></li>"
@@ -329,7 +384,7 @@ def render_assessment_html(data, L, lang):
             items.append(("references", refs_html(f)))
         dl = "".join(f"<dt>{esc(L[k])}</dt><dd>{v}</dd>" for k, v in items)
         return (f"<div class='finding sev-{f['severity']}'><h3>{esc(f['id'])} "
-                f"<span class='badge {f['severity']}'>{esc(f['severity'])}</span> {esc(f['title'])}</h3><dl>{dl}</dl></div>")
+                f"<span class='badge {f['severity']}'>{esc(f['severity'])}</span> {esc(f['title'])}</h3><dl>{dl}</div>")
 
     details = [card(f) for f in fs]
     excluded_html = (f"<h2>{esc(L['excluded'])}</h2>" + "".join(card(f) for f in excluded)) if excluded else ""
@@ -551,6 +606,11 @@ document.getElementById('lists').appendChild(p);});
 
 
 def render_dashboard(data, L, lang):
+    for f in data["findings"]:
+        if f.get("source_link"):
+            http_url(f["source_link"], "source_link")
+        for ref in f.get("references", []):
+            http_url(ref["url"], "references.url")
     payload = {
         "meta": data["meta"], "findings": data["findings"], "labels": L,
         "open_hm": stats(data)["open_hm"],
@@ -573,10 +633,10 @@ def main(argv=None):
     a = p.parse_args(argv)
     try:
         data = load(a.findings)
+        attach_sources(data, a.repo)
     except (SchemaError, OSError) as e:
         print(f"render.py: {e}", file=sys.stderr)
         return 2
-    attach_sources(data, a.repo)
     L = LABELS[a.lang]
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)

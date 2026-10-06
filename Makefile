@@ -49,7 +49,7 @@ DEMO_OUT ?= $(or $(TMPDIR),/tmp)/$(NAME)-demo
 LANG_OUT ?= ja
 NO_PDF   ?=
 
-.PHONY: help link unlink status check demo deps
+.PHONY: help link unlink status check demo deps test
 
 help: ## list targets
 	@echo "$(NAME) - skill install"
@@ -97,7 +97,10 @@ status: ## show what is installed, per host
 	  else echo "absent   $$d"; fi; \
 	done
 
-check: ## verify the skill is self-contained and internally consistent
+test: ## run offline regression tests (no external audit commands)
+	@cd "$(REPO)" && PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m unittest discover -s tests -v
+
+check: test ## verify the skill is self-contained and internally consistent
 	@cd "$(REPO)" || exit 1; fail=0; \
 	misses=$$( \
 	for f in $(DOCS); do \

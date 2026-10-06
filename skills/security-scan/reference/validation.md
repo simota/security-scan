@@ -68,8 +68,13 @@ Then, for each package (not each advisory), the agent or person:
 4. Confirms the deployed version matches the lockfile when the deploy builds
    from it; if not, the verdict is `Unverified` with that note
 
-Re-running `deps_scan.py --into` keeps any verdict whose `method` is not
-`auto`, so reviews survive a re-scan.
+Re-running `deps_scan.py --into` retains a matching manual review in
+`previous_validation`, not as the current verdict. Matching includes the
+normalized finding location, package/version, title and advisory IDs, so reviews
+cannot cross project paths. The newly scanned finding keeps its auto-triage
+(or `Unverified`) verdict. Revalidate before excluding it again, even at the same
+path: code, configuration and reachability may have changed. The previous
+review remains in the JSON record for reference and does not affect counts.
 
 ## Reporting
 

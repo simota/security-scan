@@ -73,9 +73,17 @@ python3 skills/security-scan/scripts/render.py findings.json --out ./report --la
 | `assessment.pdf` | Cover, summary, overview, perspectives, findings, sound items, decisions, limitations, next steps, excluded findings |
 
 Each finding carries its evidence: code findings embed the lines around
-`path:line` (with `--repo`, secret-looking values masked) and link to the
+`path:line` (with `--repo`, best-effort redaction) and link to the
 source when `meta.source_url` is set; library findings link to the advisory,
 the fix commit or pull request on GitHub, and related articles.
+
+Sensitive paths (`.env*`, credential files and private keys), files containing
+private-key blocks, and findings categorized as `Secrets` do not embed source
+excerpts. URL credentials and common secret assignments are masked in other
+excerpts, but redaction is heuristic, not a guarantee. Inspect reports before
+sharing them; without `--repo`, source is not embedded. `source_link` and
+`snippet` are derived fields and cannot be injected through input JSON. All
+report links must be absolute HTTP(S) URLs without credentials or controls.
 
 The PDF is printed with headless Chrome/Chromium (`CHROME=/path/to/binary` to
 choose one), falling back to WeasyPrint. With neither available the HTML files
@@ -96,8 +104,25 @@ make deps TARGET=/path/to/repo AUDIT=1
 
 `--audit` sends the package list to public advisory databases. Install
 [osv-scanner](https://github.com/google/osv-scanner) for every-ecosystem
-coverage and malicious-package detection; without it only `composer audit` and
-`npm audit` run, and the rest is reported as not run.
+coverage and malicious-package detection. Without it, installed Composer, npm,
+Cargo and pip-audit tools provide limited fallbacks. Composer runs with
+`--no-plugins --no-scripts`. The pip-audit fallback accepts only plain
+`name==version` requirements, copied into a temporary input and audited with
+`--no-deps --disable-pip`. Includes, URLs, options, extras, markers and floating
+versions are reported as not run rather than resolved. No dependency code is
+intentionally installed or built. Use trusted audit-tool installations.
+
+Python lockfiles (`uv.lock`, `poetry.lock`, `Pipfile.lock`, `pdm.lock`) require
+OSV coverage; the scanner never substitutes its own Python environment. Errors
+and malformed results from fallback tools are recorded in `not_run`. Use
+`--audit --strict` to exit `3` when any audit is incomplete (JSON output is still
+written); the default remains exit `0` after a completed scan invocation.
+`--strict` is a completeness check, not a vulnerability severity gate.
+
+On `--into`, prior manual dependency verdicts are kept as `previous_validation`
+only for the same location, package/version, title and advisory IDs. They do not
+silently replace the new triage verdict: revalidate exclusions after every
+scan because source and configuration may have changed.
 
 Try it on the bundled sample:
 
@@ -126,7 +151,8 @@ examples/findings.sample.json  fictional sample for make demo / make check
 ## Development
 
 ```sh
-make check   # citations resolve, references headed, frontmatter valid,
+make test    # offline unit/regression tests; all audit subprocesses are mocked
+make check   # tests plus citations resolve, references headed, frontmatter valid,
              # scripts compile, sample renders
 ```
 

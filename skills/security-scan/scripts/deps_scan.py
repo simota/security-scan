@@ -27,6 +27,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 SKIP_DIRS = {".git", "node_modules", "vendor", ".venv", "venv", "dist", "build",
@@ -315,6 +316,27 @@ def run(cmd, cwd, timeout=600):
         return None, "", str(e)
 
 
+def audit_json(c, tool, path, code, out, success_codes=(0, 1)):
+    """Accept a result only after both process and envelope validation."""
+    reason = ""
+    if code not in success_codes:
+        reason = f"unexpected exit {code}"
+    else:
+        try:
+            data = json.loads(out)
+        except (json.JSONDecodeError, TypeError):
+            reason = "invalid or missing JSON output"
+        else:
+            if not isinstance(data, (dict, list)):
+                reason = "unexpected JSON result type"
+            elif isinstance(data, dict) and ("error" in data or data.get("errors")):
+                reason = "audit returned an error object"
+            else:
+                return data
+    c.not_run.append({"tool": tool, "reason": f"{c.rel(path)}: {reason}"})
+    return None
+
+
 REF_ORDER = {"advisory": 0, "fix": 1, "article": 2, "report": 3, "source": 4, "web": 5, "package": 6}
 
 
@@ -362,7 +384,8 @@ def osv_refs(v):
 
 
 def vuln(c, sev, pkg, version, ids, summary, path, tool, fixed="", refs=None):
-    ids = ", ".join(i for i in ids if i)
+    advisory_ids = sorted(set(i for i in ids if i))
+    ids = ", ".join(advisory_ids)
     malicious = any(str(i).startswith("MAL-") for i in ids.split(", "))
     c.add("High" if malicious else SEV_MAP.get(str(sev).lower(), "Medium"),
           f"{'MALICIOUS package' if malicious else 'Vulnerable dependency'}: {pkg}"
@@ -370,7 +393,7 @@ def vuln(c, sev, pkg, version, ids, summary, path, tool, fixed="", refs=None):
           path, impact=summary or f"Reported by {tool}",
           fix=(f"Upgrade to {fixed}" if fixed else "Upgrade to a fixed version or remove the dependency"))
     c.findings[-1].update({"package": pkg, "version": version, "lockfile": str(path), "malicious": malicious,
-                           "references": dedupe_refs(refs or [])})
+                           "references": dedupe_refs(refs or []), "advisory_ids": advisory_ids})
 
 
 OSV_LOCKFILES = {"composer.lock", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
@@ -446,11 +469,20 @@ def audit_composer(c, root, lock, abandoned_only=False):
     if not exe:
         c.not_run.append({"tool": "composer audit", "reason": "composer not installed"})
         return
-    code, out, err = run([exe, "audit", "--format=json", "--locked", "--no-interaction"], lock.parent)
-    try:
-        data = json.loads(out)
-    except json.JSONDecodeError:
-        c.not_run.append({"tool": "composer audit", "reason": (err or "no JSON output").strip()[:300]})
+    code, out, err = run([exe, "--no-plugins", "--no-scripts", "audit", "--format=json",
+                          "--locked", "--no-interaction"], lock.parent)
+    data = audit_json(c, "composer audit", lock, code, out, (0, 1, 2, 3))
+    if data is None:
+        return
+    # PHP encodes an empty map as []; accept that, but not an absent result.
+    if (not isinstance(data, dict) or "advisories" not in data
+            or not (isinstance(data["advisories"], dict) or data["advisories"] == [])
+            or not (isinstance(data.get("abandoned", {}), dict) or data.get("abandoned") == [])):
+        c.not_run.append({"tool": "composer audit", "reason": f"{c.rel(lock)}: invalid result schema"})
+        return
+    if not all(isinstance(items, list) and all(isinstance(a, dict) for a in items)
+               for items in (data["advisories"] or {}).values()):
+        c.not_run.append({"tool": "composer audit", "reason": f"{c.rel(lock)}: invalid advisory entries"})
         return
     try:
         lockdata = json.loads(read(lock))
@@ -488,10 +520,15 @@ def audit_npm(c, root, lock):
         c.not_run.append({"tool": "npm audit", "reason": "npm not installed"})
         return
     code, out, err = run([exe, "audit", "--json", "--package-lock-only"], lock.parent)
-    try:
-        data = json.loads(out)
-    except json.JSONDecodeError:
-        c.not_run.append({"tool": "npm audit", "reason": (err or "no JSON output").strip()[:300]})
+    data = audit_json(c, "npm audit", lock, code, out)
+    if data is None:
+        return
+    if (not isinstance(data, dict) or not isinstance(data.get("vulnerabilities"), dict)
+            or not all(isinstance(v, dict) and isinstance(v.get("via"), list)
+                       and all(isinstance(x, (str, dict)) for x in v["via"])
+                       for v in data["vulnerabilities"].values())
+            or (code == 1 and not data["vulnerabilities"])):
+        c.not_run.append({"tool": "npm audit", "reason": f"{c.rel(lock)}: invalid or inconsistent result schema"})
         return
     for name, v in (data.get("vulnerabilities") or {}).items():
         via = [x for x in v.get("via", []) if isinstance(x, dict)]
@@ -505,28 +542,51 @@ def audit_npm(c, root, lock):
              f"{via[0].get('title', '')} (affected: {v.get('range', '')})", lock, "npm audit", fixed, refs)
 
 
-def audit_simple(c, root, tool, cmd, cwd, parse):
+def audit_simple(c, root, tool, cmd, cwd, parse, target=None):
+    target = target or cwd
     exe = shutil.which(cmd[0])
     if not exe:
-        c.not_run.append({"tool": tool, "reason": f"{cmd[0]} not installed"})
+        c.not_run.append({"tool": tool, "reason": f"{c.rel(target)}: {cmd[0]} not installed"})
         return
     code, out, err = run([exe] + cmd[1:], cwd)
+    data = audit_json(c, tool, target, code, out)
+    if data is None:
+        return
+    start = len(c.findings)
     try:
-        parse(c, json.loads(out), cwd)
-    except (json.JSONDecodeError, AttributeError, TypeError):
-        c.not_run.append({"tool": tool, "reason": (err or "no JSON output").strip()[:300]})
+        parse(c, data, cwd)
+        if code == 1 and len(c.findings) == start:
+            raise ValueError("nonzero audit without findings")
+    except (ValueError, AttributeError, TypeError, KeyError):
+        del c.findings[start:]
+        c.not_run.append({"tool": tool, "reason": f"{c.rel(target)}: invalid or inconsistent result schema"})
 
 
 def parse_pip_audit(c, data, cwd):
-    for d in data.get("dependencies", data if isinstance(data, list) else []):
-        for v in d.get("vulns", []):
-            ids = [v.get("id")] + v.get("aliases", [])[:2]
-            vuln(c, "unknown", d.get("name"), d.get("version", ""), ids,
+    dependencies = data if isinstance(data, list) else data.get("dependencies") if isinstance(data, dict) else None
+    if not isinstance(dependencies, list):
+        raise ValueError("pip-audit dependencies must be a list")
+    for d in dependencies:
+        if not isinstance(d, dict) or not isinstance(d.get("name"), str):
+            raise ValueError("invalid pip-audit dependency")
+        if d.get("skip_reason"):
+            c.not_run.append({"tool": "pip-audit", "reason": f"{c.rel(cwd)}: a dependency was skipped"})
+            continue
+        if not isinstance(d.get("vulns"), list):
+            raise ValueError("pip-audit vulns must be a list")
+        for v in d["vulns"]:
+            if not isinstance(v, dict) or not isinstance(v.get("id"), str):
+                raise ValueError("invalid pip-audit vulnerability")
+            ids = [v["id"]] + v.get("aliases", [])[:2]
+            vuln(c, "unknown", d["name"], d.get("version", ""), ids,
                  v.get("description", "")[:200], cwd, "pip-audit", ", ".join(v.get("fix_versions", [])),
                  advisory_refs(ids))
 
 
 def parse_cargo_audit(c, data, cwd):
+    if (not isinstance(data, dict) or not isinstance(data.get("vulnerabilities"), dict)
+            or not isinstance(data["vulnerabilities"].get("list"), list)):
+        raise ValueError("cargo audit vulnerabilities.list must be a list")
     for v in (data.get("vulnerabilities") or {}).get("list", []):
         a, pk = v.get("advisory", {}), v.get("package", {})
         refs = advisory_refs([a.get("id")]) + ([{"type": "web", "url": a["url"]}] if a.get("url") else [])
@@ -534,9 +594,45 @@ def parse_cargo_audit(c, data, cwd):
              cwd / "Cargo.lock", "cargo audit", ", ".join((v.get("versions") or {}).get("patched", [])), refs)
 
 
+PINNED_REQUIREMENT = re.compile(r"([A-Za-z0-9][A-Za-z0-9._-]*)\s*==\s*([A-Za-z0-9][A-Za-z0-9.!+_-]*)")
+
+
+def audit_requirements(c, root, path):
+    """Audit only explicit pins, never resolve dependencies or execute package code.
+
+    Deliberately reject includes, options, URLs, markers, extras and wildcards.
+    A temporary normalized input also prevents the original file changing into
+    executable input between validation and invocation.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        c.not_run.append({"tool": "pip-audit", "reason": f"{c.rel(path)}: cannot read requirements"})
+        return
+    pins = []
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        match = PINNED_REQUIREMENT.fullmatch(line)
+        if not match:
+            c.not_run.append({"tool": "pip-audit", "reason": f"{c.rel(path)}: only plain name==version pins "
+                              "are supported safely; use osv-scanner for this input"})
+            return
+        pins.append("==".join(match.groups()))
+    with tempfile.TemporaryDirectory(prefix="security-scan-pins-") as tmp:
+        normalized = Path(tmp) / "requirements.txt"
+        normalized.write_text("\n".join(pins) + "\n", encoding="utf-8")
+        # Keep the reported finding location at the original file, not the temp input.
+        def parse(c, data, cwd):
+            parse_pip_audit(c, data, path)
+        audit_simple(c, root, "pip-audit",
+                     ["pip-audit", "-f", "json", "--no-deps", "--disable-pip", "-r", str(normalized)],
+                     Path(tmp), parse, target=path)
+
+
 def audits(c, root, files):
     covered = audit_osv(c, root, files)
-    used_osv = bool(covered)
     # Ecosystem tools fill what osv-scanner did not cover; composer audit also
     # reports abandoned packages, which OSV does not.
     for p in files:
@@ -549,14 +645,16 @@ def audits(c, root, files):
                     "bun.lockb": "bun audit"}[p.name]
             c.not_run.append({"tool": tool, "reason": f"{c.rel(p)} not audited; run it in that directory "
                                                       "or install osv-scanner"})
-        elif p.name in ("requirements.txt", "poetry.lock", "uv.lock") and not used_osv:
-            audit_simple(c, root, "pip-audit", ["pip-audit", "-f", "json", "-r", str(p)] if p.name == "requirements.txt"
-                         else ["pip-audit", "-f", "json"], p.parent, parse_pip_audit)
-        elif p.name == "Cargo.lock" and not used_osv:
+        elif re.match(r"^requirements.*\.txt$", p.name) and p not in covered:
+            audit_requirements(c, root, p)
+        elif p.name in ("poetry.lock", "uv.lock", "Pipfile.lock", "pdm.lock") and p not in covered:
+            c.not_run.append({"tool": "Python lockfile audit", "reason": f"{c.rel(p)}: requires osv-scanner; "
+                              "the scanner's Python environment is never used as a substitute"})
+        elif p.name == "Cargo.lock" and p not in covered:
             audit_simple(c, root, "cargo audit", ["cargo", "audit", "--json"], p.parent, parse_cargo_audit)
-        elif p.name == "Gemfile.lock" and not used_osv:
+        elif p.name == "Gemfile.lock" and p not in covered:
             c.not_run.append({"tool": "bundle-audit", "reason": "run `bundle-audit check --update` manually; no JSON parser here"})
-        elif p.name == "go.sum" and not used_osv:
+        elif p.name == "go.sum" and p.parent / "go.mod" not in covered:
             c.not_run.append({"tool": "govulncheck", "reason": "run `govulncheck ./...` in the module manually"})
 
 
@@ -712,16 +810,30 @@ def scan(root, audit):
     return {"inventory": c.inventory, "findings": c.findings, "not_run": c.not_run}
 
 
+def finding_key(f):
+    """Identity is project/path-specific; display IDs are not stable across scans."""
+    location = os.path.normpath(str(f.get("location", "")).replace("\\", "/")).replace(os.sep, "/")
+    return (location, f.get("package"), f.get("version"), f.get("title"),
+            tuple(sorted(f.get("advisory_ids") or [])))
+
+
 def merge_into(path, result):
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     old = [f for f in data.get("findings", []) if str(f.get("id", "")).startswith("D-")]
-    # A verdict set by a person or the reviewing agent survives a re-scan of the same advisory.
-    kept = {(f.get("package"), f.get("version"), f.get("title")): f["validation"] for f in old
-            if (f.get("validation") or {}).get("method") != "auto" and f.get("validation")}
+    # Never silently reuse a reachability decision after code/config changes.
+    # Keep a matching review as history, requiring revalidation on every scan.
+    kept = {}
+    for f in old:
+        val = f.get("validation") or {}
+        previous = val if val and val.get("method") != "auto" else f.get("previous_validation")
+        if previous:
+            kept[finding_key(f)] = previous
     for f in result["findings"]:
-        key = (f.get("package"), f.get("version"), f.get("title"))
-        if key in kept:
-            f["validation"] = kept[key]
+        previous = kept.get(finding_key(f))
+        if previous:
+            f["previous_validation"] = previous
+            f.setdefault("validation", {"verdict": "Unverified", "method": "auto",
+                                        "evidence": "Re-scan: previous manual review needs revalidation."})
     data["findings"] = [f for f in data.get("findings", []) if not str(f.get("id", "")).startswith("D-")]
     data["findings"] += result["findings"]
     lim = [x for x in data.get("limitations", []) if not x.startswith("Dependency audit not run:")]
@@ -734,9 +846,12 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("repo")
     p.add_argument("--audit", action="store_true", help="also run installed vulnerability audit tools")
+    p.add_argument("--strict", action="store_true", help="exit 3 if any audit was not completed (requires --audit)")
     p.add_argument("--out", help="write the result JSON here (default: stdout)")
     p.add_argument("--into", help="replace D-* findings in this findings.json with the new ones")
     a = p.parse_args(argv)
+    if a.strict and not a.audit:
+        p.error("--strict requires --audit")
     root = os.path.abspath(a.repo)
     if not os.path.isdir(root):
         print(f"deps_scan.py: {a.repo} is not a directory", file=sys.stderr)
@@ -754,7 +869,7 @@ def main(argv=None):
         counts[f["severity"]] = counts.get(f["severity"], 0) + 1
     print(f"deps_scan: {len(result['findings'])} findings {counts}, "
           f"{len(result['inventory'])} lockfiles, {len(result['not_run'])} not run", file=sys.stderr)
-    return 0
+    return 3 if a.strict and result["not_run"] else 0
 
 
 if __name__ == "__main__":
