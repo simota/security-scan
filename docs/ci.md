@@ -13,14 +13,10 @@ inputs are the self-contained, synthetic report fixtures.
 A CI-only preflight first prints a tiny synthetic HTML file using the renderer's
 exact Chromium command-line flags. It stops within roughly 25 seconds and saves
 the browser version, command, stdout and stderr in the synthetic artifact. A
-failure prints the diagnostics and compares the runner's already installed
-Google Chrome using identical production flags and a fresh profile. An absent
-system Chrome is recorded as an unavailable comparison, not a success. A second
-diagnostic uses the originally selected Chromium with plain `--headless` and
-without the legacy `--disable-gpu` flag. Each probe keeps the same roughly
-25-second outer bound, with at most three probes total. No browser is installed
-or security setting changed by these comparisons. Even if a diagnostic succeeds, the baseline
-failure stops the job before four slow PDF retries. It does not change the renderer, browser sandbox protections or PDF engine.
+failure prints the diagnostics and stops the job before four slow PDF retries.
+Only the selected browser is tried: there are no alternate binaries, flag variants
+or PDF-engine fallbacks that can turn a failing probe into a passing check.
+The probe does not change renderer flags or browser sandbox protections.
 
 `scripts/ci/run_required_tests.py` enables browser/PDF tests before discovery,
 requires all named integration tests to remain present, and fails on **any
@@ -62,14 +58,15 @@ python -m playwright install-deps chromium
 # Debian/Ubuntu: install Poppler and Japanese fonts if they are not present.
 sudo apt-get install --yes --no-install-recommends fonts-noto-cjk poppler-utils
 fc-cache -f
-# Point to Chrome for Testing 154.0.8037.57 installed from the official manifest.
-export CHROME="/path/to/chrome-linux64/chrome"
+# CI requires the runner-provided Google Chrome 154.0.8037.57 distribution.
+export CHROME="/usr/bin/google-chrome"
 export SECURITY_SCAN_REPORT_ARTIFACTS="/tmp/security-scan-report-artifacts"
 python scripts/ci/run_required_tests.py
 ```
 
-`CHROME` may instead point to an already installed Chrome/Chromium. Output is
-written outside the checkout. A runtime that blocks browser process creation
+For other local runs, `CHROME` may point to another installed Chrome/Chromium;
+that does not replace CI's exact distribution/version guard. Output is written
+outside the checkout. A runtime that blocks browser process creation
 cannot verify the integration suite; use the GitHub-hosted runner or another
 permitted browser-capable environment. Do not describe a stdlib-only pass as a
 browser/PDF pass, and do not disable system sandbox protections to hide failures.
@@ -95,21 +92,27 @@ exact versions in `scripts/ci/requirements.txt`, verified against PyPI:
 - [greenlet 3.5.5](https://pypi.org/project/greenlet/3.5.5/)
 - [typing_extensions 4.16.0](https://pypi.org/project/typing-extensions/4.16.0/)
 
-The workflow separately pins official Chrome for Testing **154.0.8037.57**, using
-its [official per-version manifest](https://googlechromelabs.github.io/chrome-for-testing/154.0.8037.57.json)
-and the manifest's Linux64 download. The archive and browser are extracted only
-under `runner.temp`. Installation checks the exact `--version` result and records
-the manifest, download URL, version and archive SHA-256 in the synthetic evidence.
-The SHA-256 is recorded for provenance, not compared with an upstream checksum.
-Playwright supplies the Python API and OS-library installation; its bundled
-Chromium 151 browser is not installed by this workflow.
+The workflow uses the GitHub runner's already-installed official **Google Chrome
+154.0.8037.57**, launched through `/usr/bin/google-chrome` and its normal package
+wrapper. It requires the exact browser identification/version and records the
+installed `google-chrome-stable` package version as evidence without assuming a
+Debian revision suffix. It records SHA-256 hashes of the package wrapper and browser executable in
+the synthetic evidence. No alternative browser is downloaded or installed.
+Playwright provides the pinned Python API and OS-library installation only.
 
-During CI diagnosis, bundled Chrome for Testing 151.0.7922.34 failed the bounded
-CLI PDF probe, while the runner's official Google Chrome 154.0.8037.57 passed the
-same production flags and retained English/Japanese text. The separately pinned
-Chrome for Testing 154.0.8037.57 still awaits its own preflight and complete-suite
-verification. Neither the system comparison nor a diagnostic variant can replace
-the selected browser's required pass. Production renderer flags are unchanged.
+This is an explicit image-version guard rather than a reproducible browser
+archive install. When GitHub updates the runner image, CI deliberately fails if
+the installed browser version changes. Revalidate the new distribution with the
+unchanged preflight and complete real browser/PDF suite before updating the guard.
+Do not silently switch browsers, remove the version guard or alter sandbox settings.
+
+During diagnosis, Chrome for Testing 151.0.7922.34 and 154.0.8037.57 both failed the
+bounded production-flag CLI PDF probe. The runner's standard Google Chrome
+154.0.8037.57 passed with those same flags and retained English/Japanese text.
+This demonstrates a distribution/launch-path difference, not a proven underlying
+cause. The selected browser must pass the preflight and full required suite on
+every run; the PR's checks and linked CI runs record the observed pass/fail status.
+Production renderer flags and all report assertions are unchanged.
 
 Ubuntu system packages come from the runner's configured distribution sources;
 those packages and the Python 3.12 patch version receive upstream updates rather

@@ -58,49 +58,45 @@ jobs:
         run: |
           python -m playwright install-deps chromium
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends fonts-noto-cjk poppler-utils unzip
+          sudo apt-get install --yes --no-install-recommends fonts-noto-cjk poppler-utils
           fc-cache -f
-      - name: Install pinned official Chrome for Testing
+      - name: Verify the runner's exact Google Chrome distribution
         env:
           CHROME_VERSION: '154.0.8037.57'
         run: |
-          browser_root="$RUNNER_TEMP/security-scan-chrome-$CHROME_VERSION"
-          evidence="$RUNNER_TEMP/security-scan-report-artifacts/browser-install"
-          mkdir -p "$browser_root" "$evidence"
-          curl --fail --location --retry 3 --max-time 60 \
-            "https://googlechromelabs.github.io/chrome-for-testing/$CHROME_VERSION.json" \
-            --output "$evidence/manifest.json"
           python - <<'PYTHON'
-          import json
+          import hashlib
           import os
           from pathlib import Path
-          version = os.environ["CHROME_VERSION"]
-          evidence = Path(os.environ["RUNNER_TEMP"]) / "security-scan-report-artifacts/browser-install"
-          manifest = json.loads((evidence / "manifest.json").read_text())
-          expected = f"https://storage.googleapis.com/chrome-for-testing-public/{version}/linux64/chrome-linux64.zip"
-          urls = [item["url"] for item in manifest["downloads"]["chrome"] if item["platform"] == "linux64"]
-          if manifest["version"] != version or urls != [expected]:
-              raise SystemExit("Official Chrome manifest does not match the pinned Linux version")
-          (evidence / "download-url.txt").write_text(expected + "\n")
-          PYTHON
-          curl --fail --location --retry 3 --max-time 180 \
-            "$(cat "$evidence/download-url.txt")" --output "$browser_root/chrome-linux64.zip"
-          sha256sum "$browser_root/chrome-linux64.zip" | tee "$evidence/archive-sha256.txt"
-          unzip -q "$browser_root/chrome-linux64.zip" -d "$browser_root"
-          export CHROME="$browser_root/chrome-linux64/chrome"
-          python - <<'PYTHON'
-          import os
-          from pathlib import Path
-          import re
           import subprocess
-          chrome = os.environ["CHROME"]
-          version = subprocess.run([chrome, "--version"], capture_output=True, text=True, check=True, timeout=5).stdout.strip()
-          print(version, flush=True)
-          evidence = Path(os.environ["RUNNER_TEMP"]) / "security-scan-report-artifacts/browser-install"
+          chrome = Path("/usr/bin/google-chrome")
+          if not chrome.is_file():
+              raise SystemExit("Required runner-provided Google Chrome is missing; no browser fallback is allowed")
+          evidence = Path(os.environ["RUNNER_TEMP"]) / "security-scan-report-artifacts/browser-selection"
+          evidence.mkdir(parents=True, exist_ok=True)
+          version = subprocess.run([str(chrome), "--version"], capture_output=True, text=True, check=True, timeout=5).stdout.strip()
+          package = subprocess.run(["dpkg-query", "-W", "-f=${Version}", "google-chrome-stable"], capture_output=True, text=True, check=True, timeout=5).stdout.strip()
+          print(f"Browser: {version}\nPackage: google-chrome-stable {package}", flush=True)
           (evidence / "version.txt").write_text(version + "\n")
-          match = re.fullmatch(r"(?:Google )?Chrome for Testing ([0-9.]+)", version)
-          if not match or match.group(1) != os.environ["CHROME_VERSION"]:
-              raise SystemExit("Downloaded Chrome version does not match the exact CI pin")
+          (evidence / "package-version.txt").write_text("google-chrome-stable " + package + "\n")
+          expected = os.environ["CHROME_VERSION"]
+          if version != f"Google Chrome {expected}":
+              raise SystemExit("Runner Chrome changed: revalidate the new image version before updating the explicit CI guard")
+          wrapper = chrome.resolve(strict=True)
+          files = subprocess.run(["dpkg-query", "-L", "google-chrome-stable"], capture_output=True, text=True, check=True, timeout=5).stdout.splitlines()
+          binaries = [Path(path) for path in files if Path(path).name == "chrome" and Path(path).is_file()]
+          if str(wrapper) not in files or len(binaries) != 1:
+              raise SystemExit("The Google Chrome package wrapper/executable cannot be identified unambiguously")
+          records = []
+          for path in (wrapper, binaries[0]):
+              digest = hashlib.sha256()
+              with path.open("rb") as binary:
+                  for block in iter(lambda: binary.read(1024 * 1024), b""):
+                      digest.update(block)
+              records.append(f"{digest.hexdigest()}  {path}")
+          hashes = "\n".join(records) + "\n"
+          print(hashes, end="", flush=True)
+          (evidence / "sha256.txt").write_text(hashes)
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
               env.write(f"CHROME={chrome}\n")
           PYTHON
