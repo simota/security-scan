@@ -1,7 +1,8 @@
 """Report-only regressions using synthetic data; no target audit is performed.
 
-The mandatory suite uses the standard library. Set SECURITY_SCAN_BROWSER_TEST=1
-and CHROME to opt into real, offline Chromium interaction checks.
+The default suite uses the standard library. Set SECURITY_SCAN_BROWSER_TEST=1
+and CHROME to require real, offline Chromium interaction checks. Missing browser
+dependencies then fail instead of skipping; CI uses scripts/ci/run_required_tests.py.
 """
 import copy
 from html.parser import HTMLParser
@@ -451,18 +452,31 @@ class ReportOutputTests(unittest.TestCase):
     def start_browser(self):
         exe = os.environ.get("CHROME") or shutil.which("chromium") or shutil.which("google-chrome")
         if not exe:
-            self.skipTest("Chrome/Chromium not installed")
+            self.fail("Required Chrome/Chromium not installed; set CHROME to its executable")
         try:
             from playwright.sync_api import sync_playwright
         except ImportError:
-            self.skipTest("Playwright is required for optional browser tests")
+            self.fail("Required Playwright not installed; install scripts/ci/requirements.txt")
         manager = sync_playwright().start()
         self.addCleanup(manager.stop)
         browser = manager.chromium.launch(executable_path=exe, headless=True, timeout=15000)
         self.addCleanup(browser.close)
-        page = browser.new_page()
+        page = browser.new_page(service_workers="block")
+        page.set_default_timeout(10000)
         page.route("**/*", lambda route: route.abort())
         return page
+
+    def test_requested_browser_without_chromium_fails_instead_of_skipping(self):
+        with patch.dict(os.environ, {"CHROME": ""}), patch.object(shutil, "which", return_value=None):
+            with self.assertRaisesRegex(AssertionError, "Required Chrome/Chromium"):
+                self.start_browser()
+
+    def save_browser_artifact(self, page, name):
+        destination = os.environ.get("SECURITY_SCAN_REPORT_ARTIFACTS")
+        if destination:
+            root = Path(destination) / "browser"
+            root.mkdir(parents=True, exist_ok=True)
+            page.screenshot(path=str(root / (name + ".png")), full_page=True)
 
     @unittest.skipUnless(os.environ.get("SECURITY_SCAN_BROWSER_TEST") == "1", "opt-in Chromium interaction test")
     def test_browser_keyboard_filters_reset_excluded_categories_and_hash_navigation(self):
@@ -470,50 +484,67 @@ class ReportOutputTests(unittest.TestCase):
         errors = []
         page.on("pageerror", lambda error: errors.append(str(error)))
         data = self.mixed_report()
-        page.set_content(self.renderer.render_dashboard(data, self.renderer.LABELS["en"], "en"),
-                         wait_until="domcontentloaded")
-        self.assertEqual(page.locator("tr.row").count(), 4)
-        totals_before = page.locator("#cards").inner_text()
-        for category in ("__proto__", "constructor", "toString"):
-            bar = page.locator("#c-cat .bar").filter(has=page.locator(".t", has_text=re.compile("^" + re.escape(category) + "$")))
-            self.assertEqual(bar.locator(".v").inner_text(), "1")
-        toggle = page.get_by_role("button", name=re.compile("^Fix fixture"))
-        detail = page.locator("#" + toggle.get_attribute("aria-controls"))
-        toggle.focus()
-        for key, expected in (("Enter", True), ("Space", False), ("Space", True), ("Enter", False)):
-            toggle.press(key)
-            self.assertEqual(toggle.get_attribute("aria-expanded"), str(expected).lower())
-            self.assertEqual(detail.is_visible(), expected)
-        for control, selected in (("f-sev", "High"), ("f-conf", "Confirmed"), ("f-cat", "__proto__"),
-                                  ("f-status", "Open"), ("f-verdict", "Valid")):
-            page.locator("#" + control).select_option(selected)
-        page.get_by_label("Search", exact=True).fill("Fix fixture")
-        self.assertEqual(page.locator("tr.row").count(), 1)
-        page.get_by_label("Search", exact=True).fill("SYNTHETIC_NO_MATCH")
-        self.assertEqual(page.locator("tr.row").count(), 0)
-        self.assertIn("No findings match", page.locator("#rows").inner_text())
-        page.get_by_role("button", name="Clear filters", exact=True).click()
-        self.assertEqual(page.locator("tr.row").count(), 4)
-        self.assertEqual(page.locator("#f-q").input_value(), "")
-        page.locator("#f-scope").select_option("excluded")
-        page.locator("#f-cat").select_option("Excluded-only category")
-        self.assertEqual(page.locator("tr.row").count(), 1)
-        self.assertIn("X-excluded", page.locator("tr.row").inner_text())
-        page.locator("#f-verdict").select_option("FalsePositive")
-        self.assertEqual(page.locator("#f-scope").input_value(), "all")
-        self.assertEqual(page.locator("tr.row").count(), 1)
-        page.get_by_role("button", name="Clear filters", exact=True).click()
-        self.assertEqual(page.locator("#f-scope").input_value(), "included")
-        page.locator("#f-sev").select_option("Low")
-        target = next(f for f in data["findings"] if f["id"] == "X-excluded")
-        anchor = self.renderer.finding_anchor(data, target)
-        page.evaluate("anchor => { window.location.hash = anchor; }", anchor)
-        page.wait_for_function("anchor => document.getElementById(anchor)?.querySelector('button').getAttribute('aria-expanded') === 'true'", arg=anchor)
-        self.assertEqual(page.locator("#f-sev").input_value(), "")
-        self.assertEqual(page.locator("#f-scope").input_value(), "all")
-        self.assertTrue(page.locator("#" + anchor + "-detail").is_visible())
-        self.assertEqual(page.locator("#cards").inner_text(), totals_before)
-        self.assertFalse(errors)
+        for lang in ("en", "ja"):
+            with self.subTest(lang=lang):
+                labels = self.renderer.LABELS[lang]
+                page.goto("about:blank")
+                page.set_content(self.renderer.render_dashboard(data, labels, lang),
+                                 wait_until="domcontentloaded")
+                self.assertEqual(page.locator("html").get_attribute("lang"), lang)
+                self.assertEqual(page.locator("tr.row").count(), 4)
+                totals_before = page.locator("#cards").inner_text()
+                for category in ("__proto__", "constructor", "toString"):
+                    bar = page.locator("#c-cat .bar").filter(has=page.locator(".t", has_text=re.compile("^" + re.escape(category) + "$")))
+                    self.assertEqual(bar.locator(".v").inner_text(), "1")
+                toggle = page.get_by_role("button", name=re.compile("^Fix fixture"))
+                detail = page.locator("#" + toggle.get_attribute("aria-controls"))
+                # Reach the control through the real tab order, not a synthetic click.
+                for _ in range(80):
+                    page.keyboard.press("Tab")
+                    if toggle.evaluate("node => node === document.activeElement"):
+                        break
+                else:
+                    self.fail("Finding expansion button is not reachable by Tab")
+                self.assertEqual(toggle.evaluate("node => getComputedStyle(node).outlineStyle"), "solid")
+                for key, expected in (("Enter", True), ("Space", False), ("Space", True), ("Enter", False)):
+                    page.keyboard.press(key)
+                    self.assertEqual(toggle.get_attribute("aria-expanded"), str(expected).lower())
+                    self.assertEqual(detail.is_visible(), expected)
+                for control, selected in (("f-sev", "High"), ("f-conf", "Confirmed"), ("f-cat", "__proto__"),
+                                          ("f-status", "Open"), ("f-verdict", "Valid")):
+                    page.locator("#" + control).select_option(selected)
+                page.get_by_label(labels["search"], exact=True).fill("Fix fixture")
+                self.assertEqual(page.locator("tr.row").count(), 1)
+                page.get_by_label(labels["search"], exact=True).fill("SYNTHETIC_NO_MATCH")
+                self.assertEqual(page.locator("tr.row").count(), 0)
+                self.assertIn(labels["no_matches"], page.locator("#rows").inner_text())
+                reset = page.get_by_role("button", name=labels["reset"], exact=True)
+                reset.focus()
+                page.keyboard.press("Enter")
+                self.assertEqual(page.locator("tr.row").count(), 4)
+                self.assertEqual(page.locator("#f-q").input_value(), "")
+                page.locator("#f-scope").select_option("excluded")
+                page.locator("#f-cat").select_option("Excluded-only category")
+                self.assertEqual(page.locator("tr.row").count(), 1)
+                self.assertIn("X-excluded", page.locator("tr.row").inner_text())
+                page.locator("#f-verdict").select_option("FalsePositive")
+                self.assertEqual(page.locator("#f-scope").input_value(), "all")
+                self.assertEqual(page.locator("tr.row").count(), 1)
+                reset.click()
+                self.assertEqual(page.locator("#f-scope").input_value(), "included")
+                page.locator("#f-sev").select_option("Low")
+                target = next(f for f in data["findings"] if f["id"] == "X-excluded")
+                anchor = self.renderer.finding_anchor(data, target)
+                # Reset the hash so the Japanese pass also exercises hashchange.
+                page.evaluate("history.replaceState(null, '', '#')")
+                page.evaluate("anchor => { window.location.hash = anchor; }", anchor)
+                page.wait_for_function("anchor => document.getElementById(anchor)?.querySelector('button').getAttribute('aria-expanded') === 'true'", arg=anchor)
+                self.assertEqual(page.locator("#f-sev").input_value(), "")
+                self.assertEqual(page.locator("#f-scope").input_value(), "all")
+                self.assertTrue(page.locator("#" + anchor + "-detail").is_visible())
+                self.assertEqual(page.locator("#cards").inner_text(), totals_before)
+                self.save_browser_artifact(page, lang + "-keyboard-and-filters")
+                self.assertFalse(errors)
 
     @unittest.skipUnless(os.environ.get("SECURITY_SCAN_BROWSER_TEST") == "1", "opt-in Chromium mobile test")
     def test_browser_mobile_long_hostile_text_does_not_overflow_or_execute(self):
@@ -528,15 +559,25 @@ class ReportOutputTests(unittest.TestCase):
                            meta={"project": long_text, "date": "2026-10-06", "scope": long_text})
         data["findings"][0]["snippet"] = {"start": 12, "hit": [12, 12], "lines": [hostile + long_text],
                                           "truncated": True}
-        page.set_content(self.renderer.render_dashboard(data, self.renderer.LABELS["en"], "en"),
-                         wait_until="domcontentloaded")
-        page.locator(".finding-toggle").click()
-        self.assertIn(hostile, page.locator(".snippet").inner_text())
-        self.assertIn(self.renderer.LABELS["en"]["snippet_truncated"], page.locator("tr.detail").inner_text())
-        self.assertEqual(page.locator("svg").count(), 0)
-        self.assertEqual(page.locator("script").count(), 2)
-        self.assertTrue(page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1"))
-        self.assertFalse(errors)
+        for lang in ("en", "ja"):
+            with self.subTest(lang=lang):
+                labels = self.renderer.LABELS[lang]
+                for name, markup in (
+                    ("dashboard", self.renderer.render_dashboard(data, labels, lang)),
+                    ("assessment", self.renderer.render_assessment_html(data, labels, lang)),
+                ):
+                    with self.subTest(output=name):
+                        page.set_content(markup, wait_until="domcontentloaded")
+                        self.assertEqual(page.locator("html").get_attribute("lang"), lang)
+                        if name == "dashboard":
+                            page.locator(".finding-toggle").click()
+                            self.assertIn(labels["snippet_truncated"], page.locator("tr.detail").inner_text())
+                        self.assertIn(hostile, page.locator(".snippet").inner_text())
+                        self.assertEqual(page.locator("svg").count(), 0)
+                        self.assertEqual(page.locator("script").count(), 2 if name == "dashboard" else 0)
+                        self.assertTrue(page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1"))
+                        self.save_browser_artifact(page, lang + "-" + name + "-375px")
+                        self.assertFalse(errors)
 
 
 if __name__ == "__main__":

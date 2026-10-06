@@ -109,6 +109,10 @@ are still written and the script exits `3`. Exit `2` means `findings.json` does
 not match the schema; the message names the field. Validation evidence must be
 a string; `Valid`, `FalsePositive` and `NotApplicable` require a nonblank string.
 Null, booleans, numbers, arrays and objects cannot justify an exclusion.
+Required report text (including finding IDs, titles and locations) must be
+nonblank strings; malformed types are rejected before output, rather than
+coerced into text or allowed to cause a traceback. Optional text can be omitted
+or empty. See the schema for object/list fields and the absent source-URL case.
 
 The format is documented in
 `skills/security-scan/reference/findings-schema.md`.
@@ -209,3 +213,7 @@ make check   # tests plus citations resolve, references headed, frontmatter vali
 Requirements: Python 3.9+ (Python 3.11+ for Cargo workspace ownership parsing);
 Chrome/Chromium or WeasyPrint for the PDF; osv-scanner and/or the supported
 ecosystem audit tools for `--audit`.
+
+GitHub CI also requires real Chromium interaction and Japanese/English PDF
+checks with zero skipped tests. See [CI checks and local reproduction](docs/ci.md)
+for the pinned tooling, synthetic artifacts and stricter test command.
