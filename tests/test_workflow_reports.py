@@ -285,6 +285,33 @@ class WorkflowReportTests(unittest.TestCase):
                             page.locator(".finding-toggle").click()
                             action = page.locator(".action-guidance strong").inner_text()
                             self.assertEqual(action, labels["fix_now" if state == "complete" else "verify_first"])
+                        else:
+                            geometry = page.locator(".index tbody tr").evaluate_all("""rows => rows.map(row => {
+                                const cells = row.querySelectorAll('td');
+                                const badge = cells[1].querySelector('.badge').getBoundingClientRect();
+                                const severity = cells[1].getBoundingClientRect();
+                                const range = document.createRange();
+                                range.selectNodeContents(cells[2]);
+                                return {
+                                    contained: badge.left >= severity.left && badge.right <= severity.right + 0.5,
+                                    overlaps: Array.from(range.getClientRects()).some(status =>
+                                        badge.left < status.right && badge.right > status.left &&
+                                        badge.top < status.bottom && badge.bottom > status.top),
+                                    label: getComputedStyle(cells[1], '::before').content
+                                };
+                            })""")
+                            self.assertTrue(geometry, "The mobile finding register must be exercised")
+                            for row in geometry:
+                                self.assertTrue(row["contained"], "Severity badge escapes its register cell")
+                                self.assertFalse(row["overlaps"], "Severity badge overlaps status text")
+                                self.assertIn(labels["severity"], row["label"])
+                            # Responsive screen rows must not replace the A4 print table.
+                            page.emulate_media(media="print")
+                            self.assertEqual(page.locator(".index td").first.evaluate(
+                                "cell => getComputedStyle(cell).display"), "table-cell")
+                            self.assertEqual(page.locator(".index thead").evaluate(
+                                "head => getComputedStyle(head).display"), "table-header-group")
+                            page.emulate_media(media="screen")
                         record = page.locator(".workflow-record")
                         self.assertTrue(record.is_visible())
                         content = record.inner_text()

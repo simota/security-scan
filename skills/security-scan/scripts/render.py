@@ -832,6 +832,14 @@ tr{break-inside:avoid;page-break-inside:avoid}
   html{background:#e9eef2}
   body{max-width:210mm;margin:10mm auto;padding:17mm 16mm 19mm;box-shadow:0 2mm 8mm #263b4d20}
 }
+@media screen and (max-width:600px){
+  .index,.index tbody,.index tr,.index td{display:block;width:100%}
+  .index colgroup,.index thead{display:none}
+  .index tr{margin:0 0 3mm;border:1px solid #d9dfe5}
+  .index td{border:0;padding:2mm 2.4mm}
+  .index td+td{border-top:1px solid #d9dfe5}
+  .index td::before{content:attr(data-label);display:block;font-size:8pt;font-weight:600;color:#465967;margin-bottom:1mm}
+}
 @media print{
   *{-webkit-print-color-adjust:exact;print-color-adjust:exact}
   body{width:auto;max-width:none}
@@ -1224,9 +1232,10 @@ def render_assessment_html(data, L, lang):
                      if lens else f"<p class='small'>{esc(L['a_coverage_empty'])}</p>")
 
     index_rows = "".join(
-        f"<tr><td><a class='index-title' href='#{esc(finding_anchor(data, f))}'>{esc(f['title'])}</a>"
-        f"<span class='index-id'>{esc(f['id'])}</span></td><td>{badge(f)}</td><td>{esc(f['status'])}</td>"
-        f"<td class='evidence-cell'><div><span>{esc(L['confidence'])}:</span> {esc(f['confidence'])}</div>"
+        f"<tr><td data-label='{esc(L['a_finding'])}'><a class='index-title' href='#{esc(finding_anchor(data, f))}'>{esc(f['title'])}</a>"
+        f"<span class='index-id'>{esc(f['id'])}</span></td><td data-label='{esc(L['severity'])}'>{badge(f)}</td>"
+        f"<td data-label='{esc(L['status'])}'>{esc(f['status'])}</td>"
+        f"<td class='evidence-cell' data-label='{esc(L['a_evidence_state'])}'><div><span>{esc(L['confidence'])}:</span> {esc(f['confidence'])}</div>"
         f"<div><span>{esc(L['verdict'])}:</span> {esc(f['verdict'])}</div>"
         f"<div>{esc(verification_views[f['id']]['level'])}</div>"
         + (f"<div class='workflow-status'>{esc(workflow_views[f['id']]['status'])}</div>"
