@@ -11,8 +11,9 @@ Static checks (always, no network):
     pull_request_target triggers, untrusted event data inside run steps
   - container base images without a pinned tag or digest
 --audit additionally runs whichever audit tools are installed
-(osv-scanner, composer audit, npm audit, pip-audit, bundle-audit, govulncheck,
-cargo audit) and converts their results into findings. These need network
+(osv-scanner, composer audit, npm audit, pip-audit) and converts their
+results into findings. Cargo is OSV-only; other unsupported audits are recorded
+as incomplete. These need network
 access to vulnerability databases; a tool that is missing or fails is listed
 under "not_run", never silently skipped.
 
@@ -157,11 +158,208 @@ def read(p):
         return ""
 
 
+def incomplete(c, tool, path, reason):
+    item = {"tool": tool, "reason": f"{c.rel(path)}: {reason}"}
+    if item not in c.not_run:
+        c.not_run.append(item)
+
+
+def workspace_pattern(relative, pattern):
+    """Match path segments, not fnmatch's slash-crossing '*'."""
+    import fnmatch
+    from functools import lru_cache
+    if (not isinstance(pattern, str) or not pattern or pattern.startswith("/")
+            or any(x in pattern for x in ("\\", "{", "}"))
+            or ".." in pattern.split("/")):
+        raise ValueError("unsupported workspace pattern")
+    parts = tuple(x for x in pattern.rstrip("/").split("/") if x != ".")
+    path = tuple(relative.split("/"))
+
+    @lru_cache(maxsize=None)
+    def match(a, b):
+        if not b:
+            return not a
+        if b[0] == "**":
+            return match(a, b[1:]) or bool(a and match(a[1:], b))
+        return bool(a and fnmatch.fnmatchcase(a[0], b[0]) and match(a[1:], b[1:]))
+
+    return match(path, parts)
+
+
+def matching_lockfiles(c, manifest):
+    """Return safe lockfiles, [] for absent locks, None for unknown ownership.
+
+    Resolve explicit Cargo and npm/Yarn memberships without executing tools.
+    Unsupported workspace syntax is incomplete, never guessed as covered.
+    """
+    manifest, root = Path(manifest), Path(c.root).resolve()
+    names = LOCKS.get(manifest.name, ())
+
+    def locks(directory):
+        return [directory / name for name in names
+                if safe_file(directory / name, root)]
+
+    local = locks(manifest.parent)
+    if local or manifest.name not in ("Cargo.toml", "package.json"):
+        return local
+
+    def parse(path):
+        if not safe_file(path, root):
+            raise ValueError("unsafe workspace manifest")
+        if path.name == "package.json":
+            value = json.loads(path.read_text(encoding="utf-8"))
+        else:
+            try:
+                import tomllib
+            except ImportError:
+                # Keep Python 3.9/3.10 supported, but do not invent TOML semantics.
+                raise ValueError("Cargo workspace discovery requires Python 3.11+") from None
+            value = tomllib.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            raise ValueError("workspace manifest must be an object")
+        return value
+
+    def unknown(reason):
+        incomplete(c, "workspace discovery", manifest, reason)
+        return None
+
+    try:
+        current = parse(manifest)
+        # A nested workspace must not inherit an unrelated ancestor's lock.
+        if (manifest.name == "Cargo.toml" and "workspace" in current
+                or manifest.name == "package.json" and "workspaces" in current):
+            return []
+        if manifest.name == "Cargo.toml" and (current.get("package") or {}).get("workspace"):
+            return unknown("explicit package.workspace pointers require manual ownership validation")
+        directory = manifest.parent.parent
+        while directory == root or root in directory.parents:
+            parent = directory / manifest.name
+            if os.path.lexists(parent):
+                data = parse(parent)
+                cargo = manifest.name == "Cargo.toml"
+                workspace = data.get("workspace" if cargo else "workspaces")
+                if workspace is not None:
+                    if cargo:
+                        if not isinstance(workspace, dict):
+                            raise ValueError("invalid Cargo workspace")
+                        members, excludes = workspace.get("members", []), workspace.get("exclude", [])
+                    else:
+                        members = workspace.get("packages", []) if isinstance(workspace, dict) else workspace
+                        excludes = []
+                    if not all(isinstance(v, list) and all(isinstance(x, str) for x in v)
+                               for v in (members, excludes)):
+                        raise ValueError("invalid workspace member/exclude list")
+                    relative = manifest.parent.relative_to(directory).as_posix()
+                    negative = [p[1:] for p in members if p.startswith("!")] + excludes
+                    if any(workspace_pattern(relative, p) for p in negative):
+                        return []
+                    if any(workspace_pattern(relative, p) for p in members if not p.startswith("!")):
+                        return locks(directory)
+                    if cargo:
+                        return unknown("implicit Cargo path-dependency membership was not resolved")
+                    return []
+            # Do not claim a pnpm member has no lock merely because package.json
+            # does not define npm workspaces. Full YAML membership is not parsed.
+            if manifest.name == "package.json" and os.path.lexists(directory / "pnpm-workspace.yaml"):
+                return unknown("pnpm YAML workspace membership requires manual ownership validation")
+            if directory == root:
+                break
+            directory = directory.parent
+    except (ValueError, OSError, UnicodeError, TypeError, AttributeError, RecursionError):
+        # Never copy manifest values or exception text, which may contain secrets.
+        return unknown("workspace syntax or ownership could not be validated safely")
+    return []
+
+
+def workflow_run_lines(c, path, text):
+    """Read ordinary block-style steps[*].run scalars, retaining source lines.
+
+    This is a conservative YAML subset, not a general YAML parser. Aliases,
+    flow collections and unsupported forms are explicitly incomplete.
+    """
+    mapping = re.compile(r'''^( *)(- +)?(?:([A-Za-z0-9_.-]+)|"([A-Za-z0-9_.-]+)"|'([A-Za-z0-9_.-]+)')\s*:\s*(.*)$''')
+    stack, block = [], None
+    if text.lstrip().startswith(("{", "[")):
+        incomplete(c, "workflow run scan", path, "flow-style workflow requires manual review")
+    for number, line in enumerate(text.splitlines(), 1):
+        indent = len(line) - len(line.lstrip(" "))
+        if block is not None:
+            level, is_run = block
+            if not line.strip() or indent > level:
+                if is_run:
+                    yield number, line
+                continue
+            block = None
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if "\t" in line[:len(line) - len(stripped)] or stripped.startswith(("<<:", "*", "&")):
+            incomplete(c, "workflow run scan", path, "alias, merge or indentation requires manual review")
+        match = mapping.match(line)
+        if not match:
+            continue
+        level = len(match[1]) + len(match[2] or "")
+        key, value = next(x for x in match.group(3, 4, 5) if x is not None), match[6]
+        while stack and stack[-1][0] >= level:
+            stack.pop()
+        is_run = key == "run" and bool(stack and stack[-1][1] == "steps")
+        if (value.startswith(("*", "&", "!"))
+                or key == "steps" and value and not value.startswith("#")
+                or value.startswith(("{", "[")) and (key == "jobs" or stack and stack[-1][1] == "jobs")):
+            incomplete(c, "workflow run scan", path, "non-block steps or tagged/aliased values require manual review")
+        if is_run:
+            yield number, value
+        # Skip the contents of every scalar block, not just run: script examples
+        # in with/env values must not be mistaken for step definitions.
+        if is_run or re.match(r"^[|>][0-9+-]*(?:\s|$)", value):
+            block = (level, is_run)
+        elif value.startswith(("'", '"')) and not value.rstrip().endswith(value[0]):
+            block = (level, False)
+        stack.append((level, key))
+
+
+def isolated_composer_audit(c, root, lock, exe):
+    """Audit a copy of the lock with no project/global audit exclusions."""
+    try:
+        raw = lock.read_bytes()
+        value = json.loads(raw)
+        if not isinstance(value, dict):
+            raise ValueError("invalid lock")
+        manifest_path = lock.parent / "composer.json"
+        if manifest_path.exists():
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if not isinstance(manifest, dict):
+                raise ValueError("invalid manifest")
+            if manifest.get("repositories"):
+                incomplete(c, "composer audit", lock,
+                           "isolated audit uses public Packagist only; custom-repository advisory coverage is incomplete")
+        with tempfile.TemporaryDirectory(prefix="security-scan-composer-") as tmp:
+            work = Path(tmp)
+            (work / "composer.lock").write_bytes(raw)
+            (work / "composer.json").write_text(json.dumps({
+                "name": "security-scan/isolated-audit",
+                "config": {"allow-plugins": False, "audit": {
+                    "ignore": [], "ignore-abandoned": [], "abandoned": "report"}}
+            }), encoding="utf-8")
+            home = work / "home"
+            home.mkdir()
+            env = {k: v for k, v in os.environ.items()
+                   if k.upper() != "COMPOSER" and not k.upper().startswith("COMPOSER_")}
+            env.update({"COMPOSER_HOME": str(home), "COMPOSER_CACHE_DIR": str(work / "cache"),
+                        "COMPOSER_NO_DEV": "0"})
+            return run([exe, "--no-plugins", "--no-scripts", "audit", "--format=json",
+                        "--locked", "--no-interaction", "--abandoned=report"], work, env=env)
+    except (OSError, ValueError, UnicodeError):
+        incomplete(c, "composer audit", lock, "could not prepare isolated audit input")
+        return None
+
+
 # ---------- per-ecosystem static checks ----------
 
 def check_lockfile(c, p):
     locks = LOCKS.get(p.name)
-    if locks and not any(safe_file(p.parent / l, c.root) for l in locks):
+    associated = matching_lockfiles(c, p) if locks else []
+    if locks and associated is not None and not associated:
         c.add("Medium", f"{p.name} has no lockfile", p,
               impact="Each install may resolve different, possibly compromised, versions",
               fix=f"Commit one of: {', '.join(locks)}")
@@ -313,11 +511,11 @@ def check_workflow(c, p):
                   confidence="Suspected",
                   impact="Runs with repository secrets on events from forks; dangerous if it checks out PR code",
                   fix="Do not check out or execute PR code in this workflow")
-        if "run:" in ln or ln.strip().startswith("- run") or re.match(r"^\s{2,}\S", ln):
-            if re.search(r"\$\{\{\s*github\.event\.(issue|pull_request|comment|review|head_commit|commits)\b[^}]*(title|body|message|name|ref|label)", ln):
-                c.add("Medium", "untrusted event text interpolated into a workflow", p, i, category=CAT_BUILD,
-                      impact="Text controlled by outsiders becomes part of a shell command",
-                      fix="Pass it through an env variable and quote it")
+    for i, script in workflow_run_lines(c, p, text):
+        if re.search(r"\$\{\{\s*github\.event\.(issue|pull_request|comment|review|head_commit|commits)\b[^}]*(title|body|message|name|ref|label)", script):
+            c.add("Medium", "untrusted event text interpolated into a workflow", p, i, category=CAT_BUILD,
+                  impact="Text controlled by outsiders becomes part of a shell command",
+                  fix="Pass it through an env variable and quote it")
 
 
 def check_dockerfile(c, p):
@@ -376,9 +574,9 @@ SEV_MAP = {"critical": "High", "high": "High", "moderate": "Medium", "medium": "
            "info": "Info", "unknown": "Medium"}
 
 
-def run(cmd, cwd, timeout=600):
+def run(cmd, cwd, timeout=600, env=None):
     try:
-        r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, env=env)
         return r.returncode, r.stdout, r.stderr
     except (OSError, subprocess.TimeoutExpired) as e:
         return None, "", str(e)
@@ -587,8 +785,10 @@ def audit_composer(c, root, lock, abandoned_only=False):
     if not exe:
         c.not_run.append({"tool": "composer audit", "reason": "composer not installed"})
         return
-    code, out, err = run([exe, "--no-plugins", "--no-scripts", "audit", "--format=json",
-                          "--locked", "--no-interaction"], lock.parent)
+    result = isolated_composer_audit(c, root, lock, exe)
+    if result is None:
+        return
+    code, out, err = result
     data = audit_json(c, "composer audit", lock, code, out, (0, 1, 2, 3))
     if data is None:
         return
@@ -639,7 +839,9 @@ def audit_npm(c, root, lock):
     if not exe:
         c.not_run.append({"tool": "npm audit", "reason": "npm not installed"})
         return
-    code, out, err = run([exe, "audit", "--json", "--package-lock-only"], lock.parent)
+    code, out, err = run([exe, "audit", "--json", "--package-lock-only",
+                          "--include=prod", "--include=dev", "--include=optional",
+                          "--include=peer", "--ignore-scripts"], lock.parent)
     data = audit_json(c, "npm audit", lock, code, out)
     if data is None:
         return
@@ -775,17 +977,18 @@ def audits(c, root, files):
             c.not_run.append({"tool": "Python lockfile audit", "reason": f"{c.rel(p)}: requires osv-scanner; "
                               "the scanner's Python environment is never used as a substitute"})
         elif p.name == "Cargo.lock" and p not in covered:
-            if not audit_input(c, root, p, ("Cargo.toml", ".cargo/config", ".cargo/config.toml")):
-                continue
-            audit_simple(c, root, "cargo audit", ["cargo", "audit", "--json"], p.parent, parse_cargo_audit)
+            incomplete(c, "cargo audit", p,
+                       "automatic Cargo fallback is disabled for read-only safety; requires osv-scanner")
         elif p.name == "Gemfile.lock" and p not in covered:
             c.not_run.append({"tool": "bundle-audit", "reason": "run `bundle-audit check --update` manually; no JSON parser here"})
         elif p.name == "go.sum" and p.parent / "go.mod" not in covered:
             c.not_run.append({"tool": "govulncheck", "reason": "run `govulncheck ./...` in the module manually"})
         elif p not in covered and (p.name in KNOWN_LOCKFILES or p.name in ECOSYSTEM
                                     or re.match(r"^requirements.*\.in$", p.name)):
-            if p.name in LOCKS and any(p.parent / name in files for name in LOCKS[p.name]):
-                continue  # The matching lockfile is audited or explicitly marked not_run.
+            if p.name in LOCKS:
+                associated = matching_lockfiles(c, p)
+                if associated is None or any(lock in files for lock in associated):
+                    continue  # Matching lock is audited/not_run, or ownership is incomplete.
             c.not_run.append({"tool": "dependency audit", "reason": f"{c.rel(p)}: "
                               "no supported audit completed for this input"})
 
