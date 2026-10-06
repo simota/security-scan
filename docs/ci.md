@@ -54,7 +54,6 @@ two stdlib `tomllib` ownership tests, which run on Python 3.12. For the required
 python3 -m venv /tmp/security-scan-ci-venv
 . /tmp/security-scan-ci-venv/bin/activate
 python -m pip install --only-binary=:all: -r scripts/ci/requirements.txt
-python -m playwright install-deps chromium
 # Debian/Ubuntu: install Poppler and Japanese fonts if they are not present.
 sudo apt-get install --yes --no-install-recommends fonts-noto-cjk poppler-utils
 fc-cache -f
@@ -114,8 +113,11 @@ cause. The selected browser must pass the preflight and full required suite on
 every run; the PR's checks and linked CI runs record the observed pass/fail status.
 Production renderer flags and all report assertions are unchanged.
 
-Ubuntu system packages come from the runner's configured distribution sources;
-those packages and the Python 3.12 patch version receive upstream updates rather
+Ubuntu system packages come from the runner's configured distribution sources.
+The installed Google Chrome package already supplies its runtime libraries.
+CI installs only the extra Japanese fonts and PDF inspection tools, with bounded
+APT network timeouts and a five-minute setup-step limit.
+Those packages and the Python 3.12 patch version receive upstream updates rather
 than being a byte-for-byte locked operating-system image. The application itself
 remains standard-library-only. When updating a pin, verify the official source
 again, update the corresponding documentation, and run the required suite.
