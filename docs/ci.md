@@ -13,10 +13,13 @@ inputs are the self-contained, synthetic report fixtures.
 A CI-only preflight first prints a tiny synthetic HTML file using the renderer's
 exact Chromium command-line flags. It stops within roughly 25 seconds and saves
 the browser version, command, stdout and stderr in the synthetic artifact. A
-failure prints the diagnostics and tries a fresh-profile comparison with only
-`--timeout=5000` added. If that also fails, a second fresh-profile comparison adds
-`--disable-background-networking` alongside the timeout. Each probe keeps the
-same roughly 25-second outer bound. Even if a diagnostic succeeds, the baseline
+failure prints the diagnostics and compares the runner's already installed
+Google Chrome using identical production flags and a fresh profile. An absent
+system Chrome is recorded as an unavailable comparison, not a success. A second
+diagnostic uses the originally selected Chromium with plain `--headless` and
+without the legacy `--disable-gpu` flag. Each probe keeps the same roughly
+25-second outer bound, with at most three probes total. No browser is installed
+or security setting changed by these comparisons. Even if a diagnostic succeeds, the baseline
 failure stops the job before four slow PDF retries. It does not change the renderer, browser sandbox protections or PDF engine.
 
 `scripts/ci/run_required_tests.py` enables browser/PDF tests before discovery,

@@ -3,13 +3,14 @@
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
 
 
-def run_preflight(chrome, output, timeout=20, extra_flags=()):
+def run_preflight(chrome, output, timeout=20, headless_flags=("--headless=new", "--disable-gpu")):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     html = output / "probe.html"
@@ -24,10 +25,10 @@ def run_preflight(chrome, output, timeout=20, extra_flags=()):
         (output / "version.txt").write_text(str(error), encoding="utf-8")
     succeeded = False
     with tempfile.TemporaryDirectory(prefix="security-scan-chrome-probe-") as profile:
-        # Keep the renderer's production flags unchanged so this diagnoses its path.
-        command = [chrome, "--headless=new", "--disable-gpu", "--no-pdf-header-footer",
+        # The baseline and system-browser comparison use the production flags.
+        command = [chrome, *headless_flags, "--no-pdf-header-footer",
                    f"--user-data-dir={profile}", f"--print-to-pdf={pdf.resolve()}",
-                   *extra_flags, html.resolve().as_uri()]
+                   html.resolve().as_uri()]
         (output / "command.txt").write_text("\n".join(command) + "\n", encoding="utf-8")
         with (output / "stdout.txt").open("w") as stdout, (output / "stderr.txt").open("w") as stderr:
             process = subprocess.Popen(command, stdout=stdout, stderr=stderr, start_new_session=True)
@@ -76,12 +77,18 @@ def main():
     if result:
         # A diagnostic-only comparison, never a replacement for the production
         # command or permission to consider the required PDF tests successful.
-        timeout_result = run_preflight(
-            chrome, Path(artifacts) / "chromium-timeout-diagnostic",
-            extra_flags=("--timeout=5000",))
-        if timeout_result:
-            run_preflight(chrome, Path(artifacts) / "chromium-background-diagnostic",
-                          extra_flags=("--timeout=5000", "--disable-background-networking"))
+        system_chrome = shutil.which("google-chrome") or shutil.which("google-chrome-stable")
+        comparison = Path(artifacts) / "system-chrome-diagnostic"
+        if system_chrome:
+            run_preflight(system_chrome, comparison)
+        else:
+            comparison.mkdir(parents=True, exist_ok=True)
+            message = "System Google Chrome comparison unavailable: executable not installed."
+            (comparison / "result.txt").write_text("available=False\n" + message + "\n", encoding="utf-8")
+            print(message, flush=True)
+        # A separate two-flag diagnostic for the originally selected binary.
+        run_preflight(chrome, Path(artifacts) / "chromium-plain-headless-diagnostic",
+                      headless_flags=("--headless",))
     return result
 
 
