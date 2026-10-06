@@ -74,7 +74,19 @@ Chrome installed. Write `<dir>` outside the audited repository unless asked.
 `meta.project`, `meta.date` and every finding's `id`, `title`, `severity`,
 `confidence` and `location` are required, and `id` must be unique. Every
 `perspectives` entry needs a `name`; use the names in `reference/perspectives.md`.
-Other fields may be empty. `status` defaults to `Open`; `validation.verdict`
+Required text fields must be nonblank strings. Optional text fields may be
+omitted or use an empty string; numbers, booleans, arrays, objects and `null`
+are not converted to text. `meta.source_url` also accepts `null` as an absent
+link. Report lists (`checked_ok`, `decisions`, `limitations`, `next_steps`)
+contain strings. Present `validation` and `previous_validation` values must be
+objects, `references` must be a list, and their documented text fields must be
+strings. An invalid value exits `2` with its field path (including list index)
+before creating report files. Text must be valid Unicode; locations cannot
+contain control characters, and source line numbers must be parseable by the
+Python runtime. Non-finite JSON numbers are rejected. Unknown extension fields
+are retained if their values can be represented safely in UTF-8/JSON output.
+
+`status` defaults to `Open`; `validation.verdict`
 defaults to `Unverified`. Findings marked `FalsePositive` or `NotApplicable` are
 left out of included totals and listed in a closing "excluded" section. The
 validation distribution intentionally includes all records; verdict

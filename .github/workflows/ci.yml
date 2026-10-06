@@ -1,0 +1,84 @@
+name: Offline tests and report artifacts
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: report-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: Standard library (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.12']
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Check out source without persistent credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Run standard-library regression and consistency checks
+        run: make check
+
+  reports:
+    name: Required Chromium and Japanese PDF checks
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Check out source without persistent credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Install pinned browser-test tooling
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: -r scripts/ci/requirements.txt
+      - name: Install Chromium and Japanese PDF dependencies
+        run: |
+          python -m playwright install --with-deps chromium
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends fonts-noto-cjk poppler-utils
+          fc-cache -f
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from playwright.sync_api import sync_playwright
+          with sync_playwright() as playwright:
+              chrome = Path(playwright.chromium.executable_path)
+              if not chrome.is_file():
+                  raise SystemExit("The required Playwright Chromium binary is missing")
+              with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+                  env.write(f"CHROME={chrome}\n")
+          PY
+      - name: Require real browser and PDF tests with zero skips
+        env:
+          SECURITY_SCAN_REPORT_ARTIFACTS: ${{ runner.temp }}/security-scan-report-artifacts
+        run: python scripts/ci/run_required_tests.py
+      - name: Retain synthetic browser and PDF evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: synthetic-report-evidence
+          path: ${{ runner.temp }}/security-scan-report-artifacts/
+          retention-days: 7
+          if-no-files-found: error

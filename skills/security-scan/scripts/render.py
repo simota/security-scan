@@ -10,6 +10,7 @@ Standard library only.
 import argparse
 import html
 import json
+import math
 import os
 import re
 import shutil
@@ -243,19 +244,65 @@ def http_url(value, field="url"):
     return value
 
 
+def text_field(obj, key, where, *, required=False, default=""):
+    """Validate before coercion, hashing, sorting, or rendering can hide bad input."""
+    value = obj.get(key, default)
+    field = f"{where}.{key}" if where else key
+    if not isinstance(value, str):
+        raise SchemaError(f"{field}: must be a string")
+    if required and not value.strip():
+        raise SchemaError(f"{field}: required nonblank string")
+    return value
+
+
+def validate_json_values(data):
+    """Reject values that UTF-8 HTML or the dashboard's JSON parser cannot read."""
+    pending = [("", data)]
+    while pending:
+        where, value = pending.pop()
+        if isinstance(value, str):
+            try:
+                value.encode("utf-8")
+            except UnicodeEncodeError:
+                raise SchemaError(f"{where or 'top level'}: must contain valid Unicode text") from None
+        elif isinstance(value, float) and not math.isfinite(value):
+            raise SchemaError(f"{where or 'top level'}: number must be finite")
+        elif isinstance(value, list):
+            pending.extend((f"{where}[{i}]", entry) for i, entry in enumerate(value))
+        elif isinstance(value, dict):
+            for key, entry in value.items():
+                # Validate the key before using it in an error message.
+                try:
+                    key.encode("utf-8")
+                except UnicodeEncodeError:
+                    raise SchemaError(f"{where or 'top level'}: invalid Unicode object key") from None
+                pending.append((f"{where}.{key}" if where else key, entry))
+
+
 def load(path):
+    def invalid_constant(value):
+        raise SchemaError(f"{path}: invalid JSON constant {value}")
+
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        data = json.loads(Path(path).read_text(encoding="utf-8"), parse_constant=invalid_constant)
     except json.JSONDecodeError as e:
         raise SchemaError(f"{path}: invalid JSON: {e}")
+    except UnicodeError:
+        raise SchemaError(f"{path}: must be UTF-8 text") from None
+    except ValueError:
+        raise SchemaError(f"{path}: invalid JSON numeric value") from None
+    except RecursionError:
+        raise SchemaError(f"{path}: JSON nesting is too deep") from None
+    validate_json_values(data)
     if not isinstance(data, dict):
         raise SchemaError("top level must be an object")
     meta = data.get("meta")
     if not isinstance(meta, dict):
         raise SchemaError("meta: required object")
     for k in ("project", "date"):
-        if not str(meta.get(k, "")).strip():
-            raise SchemaError(f"meta.{k}: required")
+        text_field(meta, k, "meta", required=True)
+    for k in ("assessor", "scope", "method", "commit"):
+        text_field(meta, k, "meta")
     if meta.get("source_url") not in (None, ""):
         meta["source_url"] = http_url(meta["source_url"], "meta.source_url")
     findings = data.get("findings")
@@ -270,8 +317,16 @@ def load(path):
         f.pop("source_link", None)
         f.pop("snippet", None)
         for k in ("id", "title", "severity", "confidence", "location"):
-            if not str(f.get(k, "")).strip():
-                raise SchemaError(f"{where}.{k}: required")
+            text_field(f, k, where, required=True)
+        if any(ord(char) < 32 or ord(char) == 127 for char in f["location"]):
+            raise SchemaError(f"{where}.location: must not contain control characters")
+        match = LOC_RE.match(f["location"].strip())
+        if match:
+            try:
+                int(match.group("start"))
+                int(match.group("end") or match.group("start"))
+            except ValueError:
+                raise SchemaError(f"{where}.location: line numbers cannot be parsed") from None
         if f["id"] in seen:
             raise SchemaError(f"{where}.id: duplicate {f['id']}")
         seen.add(f["id"])
@@ -279,28 +334,33 @@ def load(path):
             raise SchemaError(f"{where}.severity: one of {SEVERITIES}")
         if f["confidence"] not in CONFIDENCES:
             raise SchemaError(f"{where}.confidence: one of {CONFIDENCES}")
-        f.setdefault("status", "Open")
+        f["status"] = text_field(f, "status", where, default="Open")
         if f["status"] not in STATUSES:
             raise SchemaError(f"{where}.status: one of {STATUSES}")
         for k in ("category", "actor", "request", "impact", "fix"):
-            f[k] = str(f.get(k) or "")
+            f[k] = text_field(f, k, where)
         if not f["category"]:
             f["category"] = "Uncategorized"
-        val = f.get("validation") or {}
+        val = f.get("validation", {})
         if not isinstance(val, dict):
             raise SchemaError(f"{where}.validation: must be an object")
-        val.setdefault("verdict", "Unverified")
+        val["verdict"] = text_field(val, "verdict", f"{where}.validation", default="Unverified")
         if val["verdict"] not in VERDICTS:
             raise SchemaError(f"{where}.validation.verdict: one of {VERDICTS}")
-        evidence = val.get("evidence", "")
-        if not isinstance(evidence, str):
-            raise SchemaError(f"{where}.validation.evidence: must be a string")
+        evidence = text_field(val, "evidence", f"{where}.validation")
+        text_field(val, "method", f"{where}.validation")
         if val["verdict"] in ("Valid", "FalsePositive", "NotApplicable") and not evidence.strip():
             raise SchemaError(f"{where}.validation.evidence: required when verdict is {val['verdict']}")
         val["evidence"] = evidence
         f["validation"] = val
         f["verdict"] = val["verdict"]
-        refs = f.get("references") or []
+        if "previous_validation" in f:
+            previous = f["previous_validation"]
+            if not isinstance(previous, dict):
+                raise SchemaError(f"{where}.previous_validation: must be an object")
+            for k in ("verdict", "evidence", "method"):
+                text_field(previous, k, f"{where}.previous_validation")
+        refs = f.get("references", [])
         if not isinstance(refs, list):
             raise SchemaError(f"{where}.references: must be a list")
         clean = []
@@ -309,17 +369,29 @@ def load(path):
                 r = {"url": r}
             if not isinstance(r, dict):
                 raise SchemaError(f"{where}.references[{j}]: must be an object or URL")
-            http_url(r.get("url"), f"{where}.references[{j}].url")
-            clean.append({"type": str(r.get("type") or "web"), "url": r["url"], "title": str(r.get("title") or "")})
+            ref_where = f"{where}.references[{j}]"
+            http_url(r.get("url"), f"{ref_where}.url")
+            clean.append({"type": text_field(r, "type", ref_where) or "web", "url": r["url"],
+                          "title": text_field(r, "title", ref_where)})
         f["references"] = clean
     for k in ("checked_ok", "decisions", "limitations", "next_steps"):
         v = data.get(k, [])
         if not isinstance(v, list):
             raise SchemaError(f"{k}: must be a list")
-        data[k] = [str(x) for x in v]
+        for j, entry in enumerate(v):
+            if not isinstance(entry, str):
+                raise SchemaError(f"{k}[{j}]: must be a string")
+        data[k] = v
     lens = data.get("perspectives", [])
-    if not isinstance(lens, list) or not all(isinstance(p, dict) and p.get("name") for p in lens):
-        raise SchemaError("perspectives: list of objects with a name")
+    if not isinstance(lens, list):
+        raise SchemaError("perspectives: must be a list")
+    for j, perspective in enumerate(lens):
+        where = f"perspectives[{j}]"
+        if not isinstance(perspective, dict):
+            raise SchemaError(f"{where}: must be an object")
+        text_field(perspective, "name", where, required=True)
+        for k in ("result", "note"):
+            text_field(perspective, k, where)
     data["perspectives"] = lens
     rank = {s: i for i, s in enumerate(SEVERITIES)}
     # code findings before dependency advisories (D-*) at the same severity
@@ -995,15 +1067,22 @@ def main(argv=None):
     try:
         data = load(a.findings)
         attach_sources(data, a.repo)
+        L = LABELS[a.lang]
+        # Render before creating any output: nested extension data can fit the
+        # input decoder but exceed the encoder limit inside the report payload.
+        dashboard = render_dashboard(data, L, a.lang)
+        assessment = render_assessment_html(data, L, a.lang)
+    except RecursionError:
+        print("render.py: report: JSON nesting is too deep to render", file=sys.stderr)
+        return 2
     except (SchemaError, OSError) as e:
         print(f"render.py: {e}", file=sys.stderr)
         return 2
-    L = LABELS[a.lang]
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
-    (out / "dashboard.html").write_text(render_dashboard(data, L, a.lang), encoding="utf-8")
+    (out / "dashboard.html").write_text(dashboard, encoding="utf-8")
     html_path = out / "assessment.html"
-    html_path.write_text(render_assessment_html(data, L, a.lang), encoding="utf-8")
+    html_path.write_text(assessment, encoding="utf-8")
     print(f"wrote {out / 'dashboard.html'}")
     print(f"wrote {html_path}")
     if a.no_pdf:
