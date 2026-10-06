@@ -26,12 +26,14 @@ from verification import CLAIMS, derive_verification, validate_verification
 from verification_workflow import derive_workflow, validate_workflows
 from evidence_integrity import verify_evidence
 from three_pass import derive_three_pass
+from expert import derive_expert
 
 SEVERITIES = ["High", "Medium", "Low", "Info"]
 CONFIDENCES = ["Confirmed", "Environment-dependent", "Suspected"]
 STATUSES = ["Open", "Fixed", "Accepted"]
 VERDICTS = ["Valid", "Likely", "Unverified", "Unlikely", "FalsePositive", "NotApplicable"]
 EXCLUDED = {"FalsePositive", "NotApplicable"}
+CWE_RE = re.compile(r"^CWE-\d{1,5}$")
 
 LABELS = {
     "en": {
@@ -527,6 +529,53 @@ for _code, _source in {
         LABELS[_lang]["p_gap_" + _code] = LABELS[_lang]["p_gap_" + _source]
         LABELS[_lang]["w_gap_" + _code] = LABELS[_lang]["p_gap_" + _source]
 
+EXPERT_LABELS = {
+    "en": {
+        "e_title": "Assessment method and assurance", "e_status": "Expert-grade state", "cwe": "CWE",
+        "e_complete": "All expert-grade gates met (recorded process only)",
+        "e_held": "Held: expert-grade gates remain open",
+        "e_degraded": "Degraded: single-agent run, independent checks unavailable",
+        "e_mode": "Mode", "e_full": "full (independent workers)", "e_single": "single agent (declared)",
+        "e_engines": "Engines", "e_cross": "cross-engine", "e_mono": "single engine (declared)",
+        "e_workers": "Workers: {spawns} spawned within an approved ceiling of {ceiling}",
+        "e_recon": "Recon: {recon_actors} independent maps reconciled into {routes} entry points; {recon_disagreements} disagreements resolved by re-reading",
+        "e_discovery": "Discovery: {redundant_cells}/{cells} scope cells read by at least two reviewers from different angles ({discovery_passes} passes); {raw_candidates} raw candidates consolidated into {findings} findings",
+        "e_variants": "Variant analysis: {variant_hits} similar locations dispositioned; {variant_findings} findings added",
+        "e_omission": "Omission challenge: {omission_passes} independent pass(es) looking for a missing vulnerability class",
+        "e_panels": "Refutation panels: {panels} High/Medium findings attacked independently; attacks survived {skeptic_survived}, refuted {skeptic_refuted}, unproven {skeptic_unproven}",
+        "e_severity": "Severity: {raters_calibrated}/{raters} raters passed calibration; {rated}/{active} findings rated twice independently, {severity_agreed} without adjudication",
+        "e_reception": "Reception: {personas}/3 simulated cold reads (executive, engineer, auditor)",
+        "e_qa": "Non-participant QA audit: {qa}",
+        "e_gaps": "Open gates",
+        "e_note": "Every finding passed through independent discovery, condition tracing, refutation and calibrated severity rating by workers that did not produce it. The counts describe the recorded process.",
+        "e_safety": "Worker labels and records are declarations; their number does not certify independence or correctness, and no detection rate or guarantee that all vulnerabilities were found follows from them.",
+        "e_gap": "Gate not met",
+    },
+    "ja": {
+        "e_title": "診断の方法と品質保証", "e_status": "エキスパート品質の状態", "cwe": "CWE",
+        "e_complete": "エキスパート品質のゲートをすべて充足（記録された手順のみ）",
+        "e_held": "保留：未充足のゲートあり",
+        "e_degraded": "縮退：単一エージェント実行のため独立確認なし",
+        "e_mode": "実行形態", "e_full": "フル（独立ワーカー）", "e_single": "単一エージェント（申告）",
+        "e_engines": "エンジン", "e_cross": "複数エンジン", "e_mono": "単一エンジン（申告）",
+        "e_workers": "ワーカー：承認上限 {ceiling} のうち {spawns} を起動",
+        "e_recon": "攻撃面の把握：独立した {recon_actors} 件の調査を照合し、入口 {routes} 件に統合。食い違い {recon_disagreements} 件は再読で解消",
+        "e_discovery": "発見：対象 {cells} 件中 {redundant_cells} 件を異なる観点の2名以上が確認（{discovery_passes} パス）。候補 {raw_candidates} 件を指摘 {findings} 件に統合",
+        "e_variants": "類似箇所の調査：{variant_hits} 箇所を判定し、指摘 {variant_findings} 件を追加",
+        "e_omission": "見落としの検証：脆弱性の分類漏れを探す独立パス {omission_passes} 件",
+        "e_panels": "反証パネル：High/Medium の {panels} 件を独立に攻撃。耐えた {skeptic_survived}・反証 {skeptic_refuted}・未証明 {skeptic_unproven}",
+        "e_severity": "重大度：評価者 {raters} 名中 {raters_calibrated} 名が較正に合格。指摘 {active} 件中 {rated} 件を独立に2回評価し、{severity_agreed} 件は調停なしで一致",
+        "e_reception": "受け手による確認：経営層・開発者・監査人の模擬通読 {personas}/3",
+        "e_qa": "非参加者による QA 監査：{qa}",
+        "e_gaps": "未充足のゲート",
+        "e_note": "各指摘は、作成者以外のワーカーによる独立した発見・成立条件の追跡・反証・較正済みの重大度評価を経ています。数値は記録された手順を示します。",
+        "e_safety": "ワーカー名と記録は申告です。人数は独立性や正しさを保証せず、検出率やすべての脆弱性の発見を意味しません。",
+        "e_gap": "未充足",
+    },
+}
+for _lang, _labels in EXPERT_LABELS.items():
+    LABELS[_lang].update(_labels)
+
 _GAP_LABELS = {
     "legacy_details_missing": ("Detailed verification evidence was not recorded.", "詳細な検証根拠が記録されていません。"),
     "verdict_unresolved": ("The finding verdict has not been settled.", "指摘の妥当性判定がまだ確定していません。"),
@@ -677,6 +726,8 @@ def validate_data(data):
             raise SchemaError(f"{where}.status: one of {STATUSES}")
         for k in ("category", "actor", "request", "impact", "fix"):
             f[k] = text_field(f, k, where)
+        if "cwe" in f and not CWE_RE.match(text_field(f, "cwe", where)):
+            raise SchemaError(f"{where}.cwe: CWE-<number>")
         if not f["category"]:
             f["category"] = "Uncategorized"
         val = f.get("validation", {})
@@ -782,7 +833,7 @@ def display_finding(finding, state):
     public = {key: finding[key] for key in (
         "id", "title", "severity", "confidence", "location", "status", "category",
         "actor", "request", "impact", "fix", "validation", "verdict", "previous_validation",
-        "references", "source_link", "snippet") if key in finding}
+        "references", "source_link", "snippet", "cwe") if key in finding}
     public["_verification"] = public_verification_state(state)
     return public
 
@@ -847,6 +898,10 @@ ASSESSMENT_LABELS = {
         "a_limits": "Assessment limits",
         "a_limits_empty": "No limitations were recorded. Coverage completeness has not been established.",
         "a_queue": "Priority queue",
+        "a_cap_metrics": "Open findings by next action.",
+        "a_cap_queue": "Open findings in order of severity and readiness to fix; the full entry for each follows in the finding details.",
+        "a_cap_coverage": "Review perspectives with the recorded result and note for each.",
+        "a_cap_index": "All non-excluded findings with their recorded state and evidence basis.",
         "a_queue_note": "Open, non-excluded findings only. Ordered by severity, then ready-to-fix findings before findings needing validation, then ID. Planning a fix requires Valid, Confirmed and sufficient structured verification; legacy or incomplete evidence requires validation first.",
         "a_queue_empty": "No open, non-excluded findings are recorded. Review the coverage and limitations before drawing conclusions.",
         "a_finding": "Finding",
@@ -883,6 +938,10 @@ ASSESSMENT_LABELS = {
         "a_limits": "診断の制約",
         "a_limits_empty": "制約事項の記載はありません。診断範囲の網羅性は確認されていません。",
         "a_queue": "優先対応一覧",
+        "a_cap_metrics": "次の対応別の未解決指摘数。",
+        "a_cap_queue": "重大度と修正準備の順に並べた未解決指摘。各指摘の全文は指摘の詳細に続きます。",
+        "a_cap_coverage": "診断観点ごとの記録された結果と注記。",
+        "a_cap_index": "除外を除くすべての指摘と、記録された状態および根拠。",
         "a_queue_note": "未対応かつ除外されていない指摘のみを掲載しています。重大度、修正に進めるか検証が必要か、ID の順に並べています。修正に進む対象は Valid・Confirmed に加え構造化された検証根拠がそろった指摘です。従来形式や根拠不足の指摘は先に検証が必要です。",
         "a_queue_empty": "未対応かつ除外されていない指摘は記録されていません。結論を出す前に、診断範囲と制約を確認してください。",
         "a_finding": "指摘事項",
@@ -912,111 +971,126 @@ ASSESSMENT_LABELS = {
 
 ASSESSMENT_CSS = """
 @page{
-  size:A4;margin:17mm 16mm 19mm;
-  @bottom-left{content:"SECURITY ASSESSMENT";font:7.5pt sans-serif;color:#687582}
-  @bottom-right{content:counter(page) " / " counter(pages);font:8pt sans-serif;color:#687582}
+  size:A4;margin:22mm 22mm 24mm;
+  @bottom-left{content:"SECURITY ASSESSMENT";font:7.5pt "Hiragino Sans","Noto Sans CJK JP",sans-serif;color:#5a5a5a}
+  @bottom-right{content:counter(page) " / " counter(pages);font:7.5pt "Hiragino Sans","Noto Sans CJK JP",sans-serif;color:#5a5a5a}
 }
+:root{--ink:#1b1b1b;--muted:#5a5a5a;--rule:#1b1b1b;--hair:#dcd9d2;--high:#8a1c1c;--medium:#7a4800;--low:#24476e;--link:#1f3f66;--mark:#f3ecd6;
+  --serif:"Hiragino Mincho ProN","Noto Serif CJK JP","Yu Mincho",Georgia,serif;
+  --sans:"Hiragino Sans","Noto Sans CJK JP","Noto Sans JP","Yu Gothic",Arial,sans-serif;
+  --mono:"DejaVu Sans Mono",Menlo,Consolas,monospace}
 *{box-sizing:border-box}
 html{background:#fff}
-body{margin:0;color:#202a35;background:#fff;font:10pt/1.5 "Noto Sans CJK JP","Noto Sans JP","Hiragino Sans","Yu Gothic",Arial,sans-serif;overflow-wrap:anywhere;word-wrap:break-word}
-h1,h2,h3,h4{color:#000;font-weight:700;break-after:avoid;page-break-after:avoid}
-h1{font-size:25pt;line-height:1.18;margin:0 0 2.5mm;letter-spacing:-.35pt}
-h2{font-size:14.5pt;line-height:1.25;margin:7mm 0 3mm}
-h3{font-size:11.5pt;line-height:1.4;margin:5mm 0 2mm}
-h4{font-size:9pt;line-height:1.4;margin:3mm 0 1mm}
+body{margin:0;color:var(--ink);background:#fff;font:10pt/1.65 var(--serif);font-variant-numeric:lining-nums tabular-nums;overflow-wrap:anywhere;word-wrap:break-word;counter-reset:section table listing;hanging-punctuation:allow-end}
+h1,h2,h3,h4,h5{color:var(--ink);font-family:var(--serif);font-weight:700;break-after:avoid;page-break-after:avoid}
+h1{font-size:20pt;line-height:1.25;margin:0 0 2mm;letter-spacing:-.1pt}
+h2{font-size:13pt;line-height:1.3;margin:9mm 0 3mm}
+h3{font-size:11pt;line-height:1.4;margin:5mm 0 2mm}
+h4{font:700 7.8pt/1.4 var(--sans);letter-spacing:.08em;color:var(--muted);margin:3.5mm 0 1mm}
+h5{font-size:9.5pt;margin:3mm 0 1mm}
+main>section>h2{counter-increment:section}
+main>section>h2::before{content:counter(section);display:inline-block;min-width:8mm;font-weight:400}
 p{margin:0 0 2.5mm;orphans:3;widows:3}
 ul,ol{margin:1.5mm 0 3mm;padding-left:5mm}
 li{margin:0 0 1mm;orphans:2;widows:2}
-a{color:#174b70;text-decoration:underline;text-underline-offset:2px;overflow-wrap:anywhere;word-wrap:break-word}
-code{font:8.6pt/1.45 "DejaVu Sans Mono",Menlo,Consolas,monospace;overflow-wrap:anywhere;word-wrap:break-word;word-break:break-all}
-.report-header{margin-bottom:4mm}
-.kicker{font-size:8pt;font-weight:700;letter-spacing:1.2pt;text-transform:uppercase;color:#485968;margin:0 0 3mm}
-.project{font-size:17pt;line-height:1.3;font-weight:600;color:#000;margin:0 0 3mm}
-.meta-line{font-size:8.6pt;color:#516170;margin:0 0 1.3mm}
-.meta-line strong{font-weight:600;color:#293743}
-.lead{font-size:11.2pt;font-weight:600;line-height:1.5;color:#172632}
-.small,.section-note{font-size:8.5pt;line-height:1.5;color:#506171}
+a{color:var(--link);text-decoration:underline;text-decoration-thickness:.4pt;text-underline-offset:2px;overflow-wrap:anywhere;word-wrap:break-word}
+code{font:8.4pt/1.45 var(--mono);overflow-wrap:anywhere;word-wrap:break-word;word-break:break-all}
+.report-header{margin:0 0 8mm;padding:0 0 4mm;border-bottom:.6pt solid var(--rule)}
+.kicker{font:700 7.8pt/1.4 var(--sans);letter-spacing:.18em;color:var(--muted);margin:0 0 5mm;padding-bottom:2mm;border-bottom:1.2pt solid var(--rule)}
+.project{font-size:13pt;line-height:1.35;font-style:italic;color:var(--ink);margin:0 0 5mm}
+.meta-line{display:grid;grid-template-columns:30mm minmax(0,1fr);gap:0 4mm;font:8.6pt/1.5 var(--sans);color:var(--ink);margin:0;padding:1.1mm 0;border-top:.3pt solid var(--hair)}
+.meta-line strong{font-weight:600;color:var(--muted);letter-spacing:.04em}
+.lead{font-size:10.5pt;line-height:1.65;margin:2mm 6mm 4mm;padding:3mm 0;border-top:.6pt solid var(--rule);border-bottom:.6pt solid var(--rule)}
+.small,.section-note{font-size:8.5pt;line-height:1.55;color:var(--muted)}
 .section-note{margin-bottom:3mm}
-.summary-section>h2{margin-top:4mm}
-.metrics{table-layout:fixed;margin:3mm 0 3mm}
-.metrics th{background:#fff;color:#475866;font-size:8.2pt;font-weight:500;border:0;border-bottom:1px solid #d9dfe5;padding:1mm 2mm 1.5mm;text-align:left}
-.metrics td{border:0;padding:1mm 2mm 0;font-size:23pt;font-weight:700;color:#152b3e;line-height:1.25;vertical-align:top;font-variant-numeric:tabular-nums}
-.metrics .metric-urgent{color:#9b2529}
-.limit-heading{margin-top:3mm}
-.limits{margin-top:0;font-size:9pt}
-.limits strong{color:#000}
-table{width:100%;border-collapse:collapse;margin:2mm 0 4mm;table-layout:fixed;font-size:8.7pt;line-height:1.45}
-caption{text-align:left;font-weight:600;margin:0 0 2mm}
+.summary-section>h2{margin-top:0}
+.limit-heading{margin-top:5mm}
+.limits{margin-top:0;font-size:9.2pt}
+table{width:100%;border-collapse:collapse;margin:2mm 0 5mm;table-layout:fixed;font:8.6pt/1.5 var(--serif);border-top:1.2pt solid var(--rule);border-bottom:1.2pt solid var(--rule)}
+caption{caption-side:top;text-align:left;font:8.6pt/1.45 var(--serif);color:var(--ink);margin:0 0 1.6mm}
+caption::before{counter-increment:table;content:"Table " counter(table) ". ";font-weight:700}
+html[lang="ja"] caption::before{content:"表" counter(table) "　"}
 thead{display:table-header-group}
 tfoot{display:table-footer-group}
-th,td{border:1px solid #d9dfe5;padding:2.2mm 2.4mm;text-align:left;vertical-align:top;overflow-wrap:anywhere;word-wrap:break-word}
-th{background:#263b4d;color:#fff;font-size:8.2pt;font-weight:600;line-height:1.45}
-tbody tr:nth-child(even){background:#f5f7f9}
+th,td{border:0;padding:1.8mm 2.2mm;text-align:left;vertical-align:top;overflow-wrap:anywhere;word-wrap:break-word}
+th{background:none;color:var(--ink);font:700 7.6pt/1.4 var(--sans);letter-spacing:.06em;border-bottom:.6pt solid var(--rule)}
+tbody tr+tr td{border-top:.3pt solid var(--hair)}
 tr{break-inside:avoid;page-break-inside:avoid}
+.metrics{margin:3mm 0 3mm}
+.metrics td{font:400 18pt/1.2 var(--serif);padding:2mm 2.2mm 1.5mm}
+.metrics .metric-urgent{color:var(--high)}
 .queue .ref-col{width:17%}.queue .finding-col{width:43%}.queue .action-col{width:40%}
-.queue td:first-child{font-size:8.4pt}
-.queue-title{font-weight:600;color:#152b3e;margin-bottom:1mm}
-.queue-location{font-size:7.6pt;color:#526474}
-.queue-location code{font-size:7.6pt}
+.queue td:first-child{font:8.2pt/1.5 var(--mono)}
+.queue-title{font-weight:700;margin-bottom:.8mm}
+.queue-location,.queue-location code{font-size:7.4pt;color:var(--muted)}
 .queue-action{font-size:8.4pt}
-.queue-action strong{display:block;margin-bottom:1mm;color:#111}
-.badge{display:inline-block;font-size:7.6pt;font-weight:700;line-height:1.5;padding:.4mm 1.8mm;border:1px solid #bac6d1;border-radius:1mm;margin:1mm 0;color:#263b4d;background:#eef2f6;white-space:normal}
-.High{color:#8d2024;background:#fbeceb;border-color:#deb9ba}
-.Medium{color:#855009;background:#fff4dd;border-color:#e4cfab}
-.Low{color:#1f557f;background:#eaf2fa;border-color:#bfd2e3}
-.Info{color:#4d5c67;background:#eff2f4;border-color:#cad1d7}
+.queue-action strong{display:block;margin-bottom:.6mm;font:700 7.4pt/1.4 var(--sans);letter-spacing:.06em}
+.badge{display:inline-block;font:700 7.2pt/1.5 var(--sans);letter-spacing:.1em;padding:0;margin:.6mm 0;border:0;background:none;color:var(--muted);white-space:nowrap}
+.High{color:var(--high)}.Medium{color:var(--medium)}.Low{color:var(--low)}.Info{color:var(--muted)}
 .coverage .perspective-col{width:28%}.coverage .result-col{width:26%}.coverage .note-col{width:46%}
-.finding-register{margin-top:7mm}
-.finding-register>h2{margin-top:0}
 .index .finding-col{width:43%}.index .severity-col{width:12%}.index .status-col{width:14%}.index .evidence-col{width:31%}
-.index-title{display:block;font-weight:600}
-.index-id{font-size:8pt;color:#536675}
+.index-title{display:block;font-weight:700;text-decoration:none;color:var(--ink)}
+.index-id{font:7.6pt/1.4 var(--mono);color:var(--muted)}
 .evidence-cell{font-size:8pt}
-.evidence-cell div+div{margin-top:1mm}
-.evidence-cell span{color:#566977}
-.finding{margin:6mm 0 0;padding:4mm 0 0;border-top:1px solid #bac6d1;break-inside:auto;page-break-inside:auto}
+.evidence-cell div+div{margin-top:.8mm}
+.evidence-cell span{color:var(--muted)}
+#finding-details,.excluded-section{counter-reset:finding}
+.finding{counter-increment:finding;margin:7mm 0 0;padding:0 0 0 4mm;border-left:.6pt solid var(--hair);break-inside:auto;page-break-inside:auto}
+.finding.sev-High{border-left:2.4pt solid var(--high)}.finding.sev-Medium{border-left:1.2pt solid var(--medium)}.finding.sev-Low{border-left:.6pt solid var(--low)}
 .finding.compact{break-inside:avoid;page-break-inside:avoid}
-.three-pass-summary{margin:16px 0;overflow-wrap:anywhere;break-inside:auto!important;page-break-inside:auto}.three-pass-summary .prose{white-space:pre-wrap;overflow-wrap:anywhere}.three-pass-summary h4{margin:12px 0 4px}.three-pass-stage{break-inside:avoid}.verification-record,.workflow-record{margin:3mm 0;padding:3mm;border:1px solid #d9dfe5;break-inside:auto;page-break-inside:auto}.verification-record h5,.workflow-record h5{font-size:9pt;margin:3mm 0 1mm;break-after:avoid}.verification-record p,.workflow-record p{font-size:8.3pt;overflow-wrap:anywhere}.verification-level{font-weight:600}.verification-record section,.workflow-record section{break-inside:auto;page-break-inside:auto}
-.validation-method{break-before:avoid;page-break-before:avoid}
 .finding-header{break-inside:avoid;page-break-inside:avoid;break-after:avoid;page-break-after:avoid}
-.finding h3{font-size:13pt;margin:0 0 2.5mm}
-.finding-id{display:block;font-size:8.5pt;letter-spacing:.4pt;color:#506171;margin-bottom:1mm}
-.finding-state{table-layout:fixed;margin:0 0 2.5mm}
-.finding-state th{width:25%;background:#f0f3f6;color:#465967;font-size:7.7pt;padding:1.2mm 2mm;border-bottom:0}
-.finding-state td{font-size:8.5pt;padding:1.3mm 2mm;border-top:0;background:#fff}
+.finding h3{font-size:11.5pt;line-height:1.4;margin:0 0 2.5mm}
+.finding-id{display:block;font:400 8pt/1.4 var(--mono);color:var(--muted);margin-bottom:1mm}
+#finding-details .finding-id::before{content:counter(section) "." counter(finding);margin-right:2.5mm;font-family:var(--serif);color:var(--ink)}
+.finding-state{margin:0 0 2.5mm;border-top:.6pt solid var(--rule);border-bottom:.6pt solid var(--rule)}
+.finding-state th{width:25%;padding:1mm 2mm;border-bottom:.3pt solid var(--hair)}
+.finding-state td{font-size:8.5pt;padding:1.1mm 2mm}
 .finding-state .badge{margin:0}
-.finding-context{font-size:8.6pt;margin-bottom:1.6mm}
-.finding-context strong{font-weight:600;color:#465967}
+.finding-context{font-size:8.8pt;margin-bottom:1.4mm}
+.finding-context strong{font:600 7.6pt/1.4 var(--sans);letter-spacing:.05em;color:var(--muted);margin-right:1.5mm}
 .finding-field{margin:0 0 3mm;break-inside:auto;page-break-inside:auto}
-.finding-field h4{margin-bottom:1.3mm}
+.finding-field h4{margin-bottom:1mm}
 .prose{white-space:pre-wrap;overflow-wrap:anywhere;word-wrap:break-word}
-.empty-value{color:#687782;font-style:italic}
-.snippet{margin:1mm 0 3mm;padding:2.5mm;border:1px solid #d9dfe5;background:#f5f7f9;color:#202a35;font:7.7pt/1.55 "DejaVu Sans Mono",Menlo,Consolas,monospace;white-space:pre-wrap;overflow:visible;overflow-wrap:anywhere;word-wrap:break-word;word-break:break-all;max-width:100%;break-inside:auto;page-break-inside:auto}
+.empty-value{color:var(--muted);font-style:italic}
+.snippet{counter-increment:listing;margin:1mm 0 3.5mm;padding:2mm 0 2mm 3mm;border:0;border-left:.6pt solid var(--rule);background:none;color:var(--ink);font:7.6pt/1.55 var(--mono);white-space:pre-wrap;overflow:visible;overflow-wrap:anywhere;word-wrap:break-word;word-break:break-all;max-width:100%;break-inside:auto;page-break-inside:auto}
+.snippet::before{content:"Listing " counter(listing);display:block;font:700 7.4pt/1.4 var(--sans);letter-spacing:.06em;color:var(--muted);margin-bottom:1.2mm}
+html[lang="ja"] .snippet::before{content:"コード " counter(listing);letter-spacing:.02em}
 .snippet span{display:block;white-space:pre-wrap;overflow-wrap:anywhere;word-wrap:break-word;break-inside:avoid;page-break-inside:avoid}
-.snippet .hit{background:#fff0c5}.snippet b{color:#667685;font-weight:400}
-.refs{padding-left:5mm;margin:1mm 0 3mm;font-size:8.3pt;line-height:1.5}
-.refs li{overflow-wrap:anywhere;word-wrap:break-word;word-break:break-all}
-.refs a{overflow-wrap:anywhere;word-wrap:break-word;word-break:break-all}
-.rt{display:inline-block;min-width:15mm;color:#536575;font-size:7.5pt}
-.record-footer{break-before:avoid;page-break-before:avoid;font-size:7.7pt;margin:2mm 0 0;color:#6b7783}
-.excluded-section{margin-top:8mm}
+.snippet .hit{background:var(--mark)}.snippet b{color:var(--muted);font-weight:400}
+.refs{padding-left:5mm;margin:1mm 0 3mm;font-size:8.4pt;line-height:1.5}
+.refs li,.refs a{overflow-wrap:anywhere;word-wrap:break-word;word-break:break-all}
+.rt{display:inline-block;min-width:15mm;font:7.2pt/1.4 var(--sans);letter-spacing:.05em;color:var(--muted)}
+.record-footer{break-before:avoid;page-break-before:avoid;font:7.4pt/1.4 var(--sans);margin:2mm 0 0;color:var(--muted)}
+.record-footer a{color:var(--muted)}
+.excluded-section{margin-top:9mm}
 .excluded-section>.section-note{break-after:avoid;page-break-after:avoid}
+.expert-summary,.three-pass-summary,.integrity-summary{margin:5mm 0;padding:0 0 0 4mm;border-left:.6pt solid var(--rule);overflow-wrap:anywhere;break-inside:auto!important;page-break-inside:auto}
+.expert-summary h3,.three-pass-summary h3{margin-top:0}
+.expert-lines{padding-left:4mm;font-size:9pt}
+.three-pass-summary .prose{white-space:pre-wrap;overflow-wrap:anywhere}.three-pass-summary h4{margin:3mm 0 1mm}.three-pass-stage{break-inside:avoid}
+.verification-record,.workflow-record{margin:3mm 0;padding:0 0 0 3mm;border:0;border-left:.3pt solid var(--hair);break-inside:auto;page-break-inside:auto}
+.verification-record h5,.workflow-record h5{font-size:9pt;margin:3mm 0 1mm;break-after:avoid}
+.verification-record p,.workflow-record p{font-size:8.3pt;overflow-wrap:anywhere}
+.verification-level{font-weight:700}
+.verification-record section,.workflow-record section{break-inside:auto;page-break-inside:auto}
+.validation-method{break-before:avoid;page-break-before:avoid}
 @media screen{
-  html{background:#e9eef2}
-  body{max-width:210mm;margin:10mm auto;padding:17mm 16mm 19mm;box-shadow:0 2mm 8mm #263b4d20}
+  html{background:#efede7}
+  body{max-width:210mm;margin:10mm auto;padding:22mm 22mm 24mm;border:1px solid #dcd9d2}
 }
 @media screen and (max-width:600px){
+  body{margin:0;padding:8mm 5mm;border:0}
+  .meta-line{grid-template-columns:24mm minmax(0,1fr)}
+  .lead{margin:2mm 0 4mm}
   .index,.index tbody,.index tr,.index td{display:block;width:100%}
   .index colgroup,.index thead{display:none}
-  .index tr{margin:0 0 3mm;border:1px solid #d9dfe5}
-  .index td{border:0;padding:2mm 2.4mm}
-  .index td+td{border-top:1px solid #d9dfe5}
-  .index td::before{content:attr(data-label);display:block;font-size:8pt;font-weight:600;color:#465967;margin-bottom:1mm}
+  .index tr{margin:0 0 3mm;border-top:.6pt solid var(--rule)}
+  .index td{border:0!important;padding:1.5mm 0}
+  .index td::before{content:attr(data-label);display:block;font:600 7.6pt/1.4 var(--sans);letter-spacing:.05em;color:var(--muted);margin-bottom:.6mm}
 }
 @media print{
   *{-webkit-print-color-adjust:exact;print-color-adjust:exact}
   body{width:auto;max-width:none}
-  a{color:#174b70}
 }
 """
 
@@ -1450,6 +1524,36 @@ def three_pass_html(view, L):
             + details + f"<p class='small'>{esc(view['safety'])}</p></section>")
 
 
+def expert_view(data, lang, integrity=None):
+    """Curated expert-grade summary: derived status, counts and gate names only."""
+    state = derive_expert(data, SchemaError, integrity=integrity)
+    if not state["opted_in"]:
+        return None
+    L = LABELS[lang]
+    counts = state["counts"]
+    lines = [L["e_mode"] + ": " + (L["e_full"] if state["mode"] == "full" else L["e_single"]),
+             L["e_engines"] + ": " + (L["e_cross"] if state["cross_engine"] else L["e_mono"]) +
+             (" (" + ", ".join(redact(e) for e in state["engines"]) + ")" if state["engines"] else "")]
+    lines += [L[key].format(**counts) for key in ("e_workers", "e_recon", "e_discovery", "e_variants",
+                                                  "e_omission", "e_panels", "e_severity", "e_reception", "e_qa")]
+    gaps = [L["e_gap"] + ": " + redact(code) for code in state["gaps"]]
+    return {"status": L["e_" + state["status"]], "lines": lines, "gaps": gaps,
+            "note": L["e_note"], "safety": L["e_safety"]}
+
+
+def expert_html(view, L):
+    """One escaped HTML summary shared by the interactive and printable reports."""
+    if view is None:
+        return ""
+    lines = "".join(f"<li>{esc(line)}</li>" for line in view["lines"])
+    gaps = (f"<h4>{esc(L['e_gaps'])}</h4><ul class='expert-gaps'>" +
+            "".join(f"<li>{esc(g)}</li>" for g in view["gaps"]) + "</ul>") if view["gaps"] else ""
+    return (f"<section class='expert-summary panel' id='expert-summary'><h3>{esc(L['e_title'])}</h3>"
+            f"<p class='expert-status'><strong>{esc(L['e_status'])}:</strong> {esc(view['status'])}</p>"
+            f"<p>{esc(view['note'])}</p><ul class='expert-lines'>{lines}</ul>{gaps}"
+            f"<p class='small'>{esc(view['safety'])}</p></section>")
+
+
 def workflow_html(view, L):
     if view is None:
         return ""
@@ -1542,10 +1646,10 @@ def render_assessment_html(data, L, lang, integrity=None):
                ("a_fix_now", model["fix_now"], "metric-urgent"),
                ("a_verify_first", model["verify_first"], ""),
                ("open_hm", st["open_hm"], "metric-urgent"))
-    metrics_html = ("<table class='metrics'><thead><tr>" +
+    metrics_html = (f"<table class='metrics'><caption>{esc(L['a_cap_metrics'])}</caption><thead><tr>" +
                     "".join(f"<th scope='col'>{esc(L[label])}</th>" for label, _, _ in metrics) +
                     "</tr></thead><tbody><tr>" +
-                    "".join(f"<td class='{cls}' data-report-count='{key}'>{number}</td>"
+                    "".join(f"<td class='{cls if number else ''}' data-report-count='{key}'>{number}</td>"
                             for key, (_, number, cls) in zip(("open_count", "fix_now", "verify_first", "open_hm"), metrics)) +
                     "</tr></tbody></table>")
 
@@ -1563,7 +1667,7 @@ def render_assessment_html(data, L, lang, integrity=None):
             f"<td><div class='queue-title'>{esc(f['title'])}</div>"
             f"<div class='queue-location'><code>{esc(f['location'])}</code></div></td>"
             f"<td class='queue-action'><strong>{esc(L['a_' + action])}</strong>{esc(action_preview)}</td></tr>")
-    queue_html = (f"<table class='queue'><colgroup><col class='ref-col'><col class='finding-col'><col class='action-col'></colgroup>"
+    queue_html = (f"<table class='queue'><caption>{esc(L['a_cap_queue'])}</caption><colgroup><col class='ref-col'><col class='finding-col'><col class='action-col'></colgroup>"
                   f"<thead><tr><th scope='col'>ID / {esc(L['severity'])}</th><th scope='col'>{esc(L['a_finding'])}</th>"
                   f"<th scope='col'>{esc(L['a_next_action'])}</th></tr></thead><tbody>{''.join(queue_rows)}</tbody></table>"
                   if queue_rows else f"<p>{esc(L['a_queue_empty'])}</p>")
@@ -1572,7 +1676,7 @@ def render_assessment_html(data, L, lang, integrity=None):
     lens_rows = "".join(
         f"<tr><td>{esc(p.get('name'))}</td><td>{value(p.get('result'))}</td><td>{value(p.get('note'))}</td></tr>"
         for p in lens)
-    coverage_html = (f"<table class='coverage'><colgroup><col class='perspective-col'><col class='result-col'><col class='note-col'></colgroup>"
+    coverage_html = (f"<table class='coverage'><caption>{esc(L['a_cap_coverage'])}</caption><colgroup><col class='perspective-col'><col class='result-col'><col class='note-col'></colgroup>"
                      f"<thead><tr><th scope='col'>{esc(L['perspective'])}</th><th scope='col'>{esc(L['result'])}</th>"
                      f"<th scope='col'>{esc(L['note'])}</th></tr></thead><tbody>{lens_rows}</tbody></table>"
                      if lens else f"<p class='small'>{esc(L['a_coverage_empty'])}</p>")
@@ -1586,7 +1690,7 @@ def render_assessment_html(data, L, lang, integrity=None):
         f"<div>{esc(verification_views[f['id']]['level'])}</div>"
         + (f"<div class='workflow-status'>{esc(workflow_views[f['id']]['status'])}</div>"
            if f["id"] in workflow_views else "") + "</td></tr>" for f in fs)
-    index_html = (f"<table class='index'><colgroup><col class='finding-col'><col class='severity-col'><col class='status-col'><col class='evidence-col'></colgroup>"
+    index_html = (f"<table class='index'><caption>{esc(L['a_cap_index'])}</caption><colgroup><col class='finding-col'><col class='severity-col'><col class='status-col'><col class='evidence-col'></colgroup>"
                   f"<thead><tr><th scope='col'>{esc(L['a_finding'])}</th><th scope='col'>{esc(L['severity'])}</th>"
                   f"<th scope='col'>{esc(L['status'])}</th><th scope='col'>{esc(L['a_evidence_state'])}</th></tr></thead>"
                   f"<tbody>{index_rows}</tbody></table>"
@@ -1602,6 +1706,10 @@ def render_assessment_html(data, L, lang, integrity=None):
             action = f"<p class='finding-context'><strong>{esc(L['a_next_action'])}:</strong> {esc(L['a_' + action_kind(f, model['verification'][f['id']], model.get('workflows', {}).get(f['id']))])}</p>"
         context = (f"<p class='finding-context'><strong>{esc(L['location'])}:</strong> <code>{esc(f['location'])}</code></p>"
                    f"<p class='finding-context'><strong>{esc(L['category'])}:</strong> {value(f.get('category'))}</p>")
+        if f.get("cwe"):
+            number = f["cwe"].split("-", 1)[1]
+            context += (f"<p class='finding-context'><strong>{esc(L['cwe'])}:</strong> "
+                        f"<a href='https://cwe.mitre.org/data/definitions/{esc(number)}.html'>{esc(f['cwe'])}</a></p>")
         # Keep source statements in full. Long prose and source blocks may split
         # across pages; only headings and individual snippet lines stay together.
         content = field("impact", prose(f.get("impact")))
@@ -1655,6 +1763,7 @@ def render_assessment_html(data, L, lang, integrity=None):
 <p class="lead">{esc(summary)}</p>{metrics_html}<p class="small">{esc(accounting)}</p>
 <p class="small">{esc(L['a_status_note'])}</p>
 {verification_summary_html(model, L, integrity_summary_view(verification_states, fs, L))}
+{expert_html(expert_view(data, lang, integrity=integrity), L)}
 {three_pass_html(three_pass_view(data, lang, integrity=integrity), L)}
 <h3 class="limit-heading">{esc(L['a_limits'])}</h3><p class="small">{esc(L['a_uncertainty'])}</p>
 <div class="limits">{bullets(data.get('limitations', []), 'a_limits_empty')}</div></section>
@@ -1726,10 +1835,38 @@ DASHBOARD = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__TITLE__</title>
 <style>
-:root{color-scheme:light;--bg:#f3f5f7;--panel:#fff;--text:#172333;--muted:#526376;--line:#dce3eb;--soft:#eaf0f6;--high:#ae2530;--medium:#945005;--low:#1b5daf;--info:#536378;--accent:#194f90;--tint:#edf4fc;--warn:#fff6e8;--warn-line:#e9c58e}
-@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){color-scheme:dark;--bg:#111923;--panel:#192532;--text:#e8eef5;--muted:#acbacb;--line:#344456;--soft:#233445;--high:#ffaaa7;--medium:#f2c177;--low:#9dc6ff;--info:#b4c4d5;--accent:#a0c7ff;--tint:#20364c;--warn:#332b20;--warn-line:#76623e}}
-:root[data-theme="dark"]{color-scheme:dark;--bg:#111923;--panel:#192532;--text:#e8eef5;--muted:#acbacb;--line:#344456;--soft:#233445;--high:#ffaaa7;--medium:#f2c177;--low:#9dc6ff;--info:#b4c4d5;--accent:#a0c7ff;--tint:#20364c;--warn:#332b20;--warn-line:#76623e}
+:root{color-scheme:light;--bg:#f6f5f1;--panel:#fff;--text:#1b1b1b;--muted:#5a5a5a;--line:#dcd9d2;--soft:#ecebe5;--high:#8a1c1c;--medium:#7a4800;--low:#24476e;--info:#5a5a5a;--accent:#1f3f66;--tint:#efede6;--warn:#f6f5f1;--warn-line:#1b1b1b;--serif:"Hiragino Mincho ProN","Noto Serif CJK JP","Yu Mincho",Georgia,serif;--sans:system-ui,-apple-system,"Hiragino Sans","Noto Sans CJK JP","Noto Sans JP",sans-serif}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){color-scheme:dark;--bg:#17171a;--panel:#1f1f23;--text:#ece9e2;--muted:#b3aea4;--line:#3a3936;--soft:#2a2a2e;--high:#f2a19a;--medium:#e8bf7a;--low:#a9c3e6;--info:#b3aea4;--accent:#a9c3e6;--tint:#26252a;--warn:#17171a;--warn-line:#ece9e2}}
+:root[data-theme="dark"]{color-scheme:dark;--bg:#17171a;--panel:#1f1f23;--text:#ece9e2;--muted:#b3aea4;--line:#3a3936;--soft:#2a2a2e;--high:#f2a19a;--medium:#e8bf7a;--low:#a9c3e6;--info:#b3aea4;--accent:#a9c3e6;--tint:#26252a;--warn:#17171a;--warn-line:#ece9e2}
 *{box-sizing:border-box}[hidden]{display:none!important}html{scroll-behavior:smooth;scroll-padding-top:20px}body{margin:0;overflow-wrap:anywhere;background:var(--bg);color:var(--text);font:14px/1.65 system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif}main{max-width:1320px;margin:auto;padding:32px 28px 48px}a{color:var(--accent);text-underline-offset:3px}button,input,select{font:inherit}button,a,input,select,summary{-webkit-tap-highlight-color:transparent}:focus-visible{outline:3px solid var(--accent);outline-offset:3px}button{cursor:pointer}button,.button{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:8px 12px;text-decoration:none}button:hover,.button:hover{background:var(--soft)}.skip{position:absolute;left:20px;top:-100px}.skip:focus{top:8px;z-index:2}.masthead{display:flex;justify-content:space-between;align-items:center;gap:12px;border-bottom:1px solid var(--line);padding-bottom:18px;margin-bottom:26px}.brand{font-size:12px;font-weight:750;letter-spacing:.15em;color:var(--accent)}.tools{display:flex;gap:8px;flex-wrap:wrap}.hero{display:flex;justify-content:space-between;gap:24px;margin-bottom:20px}.hero h1{font-size:clamp(25px,3.5vw,38px);line-height:1.25;letter-spacing:-.04em;margin:3px 0 9px;overflow-wrap:anywhere}.eyebrow,.meta,.muted{color:var(--muted)}.eyebrow{font-size:13px}.meta{max-width:820px;overflow-wrap:anywhere}.hero-aside{align-self:flex-end;font-size:12px;text-align:right;max-width:280px}.summary-banner{padding:16px 20px;background:var(--tint);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;margin-bottom:16px}.summary-banner strong{display:block;font-size:18px}.summary-banner p{margin:5px 0 0}.cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:16px 0}.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px 20px;text-align:left}.card .n{font-size:32px;line-height:1.25;font-weight:750;letter-spacing:-.03em}.card .l{font-size:12px;color:var(--muted);display:block;margin-bottom:8px}.card .sub{font-size:12px;color:var(--muted);margin-top:6px}.card.urgent .n{color:var(--high)}.card.review .n{color:var(--medium)}.report-note{font-size:12px;color:var(--muted);margin:8px 0 22px}.section-head{display:flex;justify-content:space-between;gap:16px;align-items:baseline;margin:26px 0 12px}h2{font-size:19px;letter-spacing:-.02em;margin:0}h3{font-size:15px;margin:0 0 6px}.section-head p{margin:4px 0 0;color:var(--muted)}.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:20px}.priority-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,330px),1fr));gap:12px}.hero>div,.priority-item,.panel{min-width:0}.priority-item h3{overflow-wrap:anywhere}.priority-item{border-top:3px solid var(--line)}.priority-item.sev-High{border-top-color:var(--high)}.priority-item.sev-Medium{border-top-color:var(--medium)}.priority-top{display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:10px}.priority-item h3 a{text-decoration:none;color:var(--text)}.priority-item h3 a:hover{text-decoration:underline}.priority-item p{margin:8px 0;overflow-wrap:anywhere}.priority-item .action-label{font-size:12px;font-weight:700;color:var(--accent)}.priority-item .impact{color:var(--muted)}.priority-item .action{padding-top:10px;border-top:1px solid var(--line)}.priority-item .location{font-size:12px;color:var(--muted)}.badge{display:inline-block;border:1px solid currentColor;border-radius:5px;padding:1px 7px;font-size:11px;line-height:1.7;font-weight:750;white-space:nowrap}.High{color:var(--high)}.Medium{color:var(--medium)}.Low{color:var(--low)}.Info{color:var(--info)}.verdict{font-size:12px;color:var(--muted)}.section-note{font-size:12px;color:var(--muted);margin:10px 0}.coverage{margin:20px 0;background:var(--warn);border-color:var(--warn-line)}summary{cursor:pointer;font-weight:700}summary .small{font-weight:400;color:var(--muted);margin-left:10px}.coverage p{margin:10px 0}.scope-meta{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:5px 16px;margin:16px 0}.scope-meta dt{font-size:12px;color:var(--muted)}.scope-meta dd{margin:0;overflow-wrap:anywhere}.coverage-columns{display:grid;grid-template-columns:1fr 1fr;gap:24px}.coverage ul{margin:6px 0;padding-left:20px}.perspective{border-bottom:1px solid var(--warn-line);padding:9px 0}.perspective:last-child{border:0}.perspective strong{display:block}.perspective p{margin:3px 0;font-size:13px}.chart-section{margin:20px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:16px}.grid .panel{padding:16px}.grid h3{font-size:13px}.bar{display:grid;grid-template-columns:minmax(85px,46%) 1fr 26px;gap:8px;align-items:center;margin:7px 0;font-size:12px}.bar .t{overflow-wrap:anywhere}.bar .track{height:7px;background:var(--soft);border-radius:4px;overflow:hidden}.bar .fill{height:100%;background:var(--accent)}.bar .v{text-align:right;font-variant-numeric:tabular-nums}.filters{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.filters label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}.filters select,.filters input{width:100%;min-width:0;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:9px;font-size:13px}.filters .search{grid-column:span 2}.filter-bottom{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:14px}.result-count{font-size:12px;color:var(--muted);margin:0}.tablewrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;margin-top:12px}table{border-collapse:collapse;width:100%;table-layout:fixed}th,td{text-align:left;padding:12px;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}th{font-size:11px;color:var(--muted);font-weight:700;background:var(--soft)}th:nth-child(1){width:9%}th:nth-child(2){width:9%}th:nth-child(3){width:14%}th:nth-child(4){width:9%}th:nth-child(5){width:11%}th:nth-child(6){width:30%}th:nth-child(7){width:18%}tr.row{cursor:pointer}tr.row:hover{background:var(--tint)}.finding-toggle{border:0;border-radius:3px;padding:0;background:transparent;text-align:left;font-weight:650;color:var(--text);width:100%}.finding-toggle:hover{background:transparent;color:var(--accent)}.finding-toggle .toggle-label{font-size:11px;display:block;font-weight:400;color:var(--accent);margin-top:4px}.location{display:block;overflow-wrap:anywhere;margin-top:4px;font-size:11px;color:var(--muted)}tr.detail>td{background:var(--tint);padding:18px 24px}tr.detail dl{display:grid;grid-template-columns:150px minmax(0,1fr);gap:8px 18px;margin:12px 0}tr.detail dt{font-size:12px;color:var(--muted)}tr.detail dd{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}.detail-actions{display:flex;justify-content:space-between;gap:12px;align-items:center}.action-guidance{border-left:3px solid var(--accent);padding:8px 12px;background:var(--panel)}.action-guidance strong{display:block}.action-guidance p{margin:4px 0}.three-pass-summary{margin:16px 0;overflow-wrap:anywhere;break-inside:auto!important;page-break-inside:auto}.three-pass-summary .prose{white-space:pre-wrap;overflow-wrap:anywhere}.three-pass-summary h4{margin:12px 0 4px}.three-pass-stage{break-inside:avoid}.verification-record,.workflow-record{margin:16px 0;padding:16px;border:1px solid var(--line);border-radius:6px;min-width:0}.verification-record h4,.workflow-record h4{font-size:15px;margin:0 0 8px}.verification-record h5,.workflow-record h5{font-size:13px;margin:18px 0 6px}.verification-record .prose,.workflow-record .prose{white-space:pre-wrap;overflow-wrap:anywhere}.verification-level,.workflow-status,.workflow-next{display:block;font-size:12px;font-weight:600;margin-top:7px}.history{border:1px dashed var(--line);padding:12px;margin-top:16px}.history p{margin:5px 0;white-space:pre-wrap}.lists{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:12px;margin-top:24px}.lists h2{font-size:16px}.lists ul{margin:10px 0 0;padding-left:18px}.empty{color:var(--muted);padding:20px}.snippet{margin:0;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);overflow-x:auto;font:12px/1.6 ui-monospace,Menlo,monospace;white-space:pre}.snippet span{display:block}.snippet .hit{background:var(--warn)}.snippet b{color:var(--muted);font-weight:400}.refs{margin:0;padding-left:18px}.refs li{overflow-wrap:anywhere}.rt{display:inline-block;min-width:60px;color:var(--muted);font-size:12px}.footer{font-size:12px;color:var(--muted);border-top:1px solid var(--line);margin-top:32px;padding-top:16px}code{font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
+/* Academic layer (docs/report-design.md): serif argument, sans apparatus, booktabs rules, no boxes. */
+body{font-family:var(--serif);font-size:15px;line-height:1.7;font-variant-numeric:lining-nums tabular-nums}
+h1,h2,h3,h4{font-family:var(--serif);font-weight:700;letter-spacing:0}
+button,input,select,label,th,.badge,.brand,.eyebrow,.tools,.filters,.result-count,.card .l,.card .sub,.verdict,.location,.finding-toggle .toggle-label,.priority-item .action-label,.rt,tr.detail dt,.scope-meta dt,.bar,summary .small{font-family:var(--sans)}
+.brand{color:var(--muted);letter-spacing:.2em;font-size:11px}
+.masthead{border-bottom:1.5px solid var(--text)}
+.hero h1{font-size:clamp(26px,3.2vw,36px);letter-spacing:-.01em}
+.summary-banner{background:transparent;border:0;border-top:1px solid var(--text);border-bottom:1px solid var(--text);border-radius:0;padding:14px 4px}
+.summary-banner strong{font-size:17px}
+.cards{gap:28px}
+.card{background:transparent;border:0;border-top:1.5px solid var(--text);border-radius:0;padding:12px 2px 6px}
+.card .l{letter-spacing:.08em;font-size:11px}
+.card .n{font-family:var(--serif);font-weight:400;font-size:34px;letter-spacing:0}
+.panel{background:transparent;border:0;border-top:1px solid var(--line);border-radius:0;padding:18px 0}
+.priority-item{border-top-width:2px}
+.coverage{background:transparent;border:0;border-left:1px solid var(--text);border-radius:0;padding:4px 0 4px 18px}
+.perspective{border-bottom-color:var(--line)}
+.bar .fill{background:var(--text)}.bar .track{border-radius:0;height:5px}
+.tablewrap{background:transparent;border:0;border-top:1.5px solid var(--text);border-bottom:1.5px solid var(--text);border-radius:0}
+th{background:transparent;color:var(--text);letter-spacing:.06em;font-size:11px;border-bottom:1px solid var(--text)}
+.badge{border:0;padding:0;border-radius:0;letter-spacing:.1em;font-size:11px}
+button,.button,.filters select,.filters input{border-radius:2px}
+.action-guidance{background:transparent}
+.snippet{border:0;border-left:1px solid var(--text);border-radius:0;background:transparent}
+.verification-record,.workflow-record{border:0;border-left:1px solid var(--line);border-radius:0;padding:4px 0 4px 16px}
+.expert-summary h3,.three-pass-summary h3{margin-top:0}
+.footer{border-top:1.5px solid var(--text)}
+.snippet .hit{background:var(--tint)}
 @media(max-width:850px){main{padding:22px 18px}.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.hero{display:block}.hero-aside{text-align:left;max-width:none;margin-top:12px}.coverage-columns{grid-template-columns:1fr}.filters{grid-template-columns:repeat(2,minmax(0,1fr))}table,tbody,tr,td{display:block}thead{display:none}tr.row{padding:14px;border-bottom:1px solid var(--line);display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}tr.row td{border:0;padding:0;font-size:12px}tr.row td:before{content:attr(data-label);display:block;color:var(--muted);font-size:10px;margin-bottom:3px}tr.row td:nth-child(6){grid-column:1/-1;grid-row:1}.finding-toggle{font-size:15px}tr.row td:nth-child(7){grid-column:span 2}.detail-actions{align-items:flex-start}tr.detail>td{padding:16px}tr.detail dl{grid-template-columns:1fr;gap:3px}tr.detail dd{margin-bottom:10px}}
 @media(max-width:480px){main{padding:16px 12px}.masthead{align-items:flex-start;flex-direction:column;gap:12px}.tools{width:100%}.tools .button{flex:1}.card{padding:14px}.card .n{font-size:28px}.panel{padding:16px}.section-head{display:block}.filters{grid-template-columns:1fr 1fr;gap:10px}.filters label:first-child,.filters .search{grid-column:1/-1}.filter-bottom{align-items:flex-start;flex-direction:column}.scope-meta{grid-template-columns:1fr;gap:2px}.scope-meta dd{margin-bottom:8px}.priority-top{flex-wrap:wrap}}
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
@@ -1745,6 +1882,7 @@ DASHBOARD = r"""<!doctype html>
 <div class="cards" id="cards"></div><p class="report-note" data-l="counts_note"></p>
 <section aria-labelledby="priority-heading"><div class="section-head"><div><h2 id="priority-heading" data-l="priority"></h2><p data-l="priority_note"></p></div><a href="#findings" data-l="view_all"></a></div><div class="priority-list" id="priority"></div><p class="section-note" id="queue-note"></p></section>
 <section class="panel" id="verification-summary" aria-label="Verification summary"></section>
+__EXPERT__
 __THREE_PASS__
 <details class="panel coverage" id="coverage" open><summary><span data-l="coverage_heading"></span><span class="small" id="coverage-count"></span></summary><p data-l="coverage_note"></p><dl class="scope-meta" id="scope-meta"></dl><div class="coverage-columns"><section><h3 data-l="limitations"></h3><div id="limitations"></div></section><section><h3 data-l="perspectives"></h3><div id="perspectives"></div></section></div></details>
 <details class="chart-section"><summary data-l="overview"></summary><p class="section-note" data-l="count_basis"></p><div class="grid"><div class="panel"><h3 data-l="by_sev"></h3><div id="c-sev"></div></div><div class="panel"><h3 data-l="by_conf"></h3><div id="c-conf"></div></div><div class="panel"><h3 data-l="by_cat"></h3><div id="c-cat"></div></div><div class="panel"><h3 data-l="by_status"></h3><div id="c-status"></div></div><div class="panel"><h3 data-l="by_verdict"></h3><div id="c-verdict"></div><p class="section-note" data-l="excluded_note"></p></div></div></details>
@@ -1804,7 +1942,7 @@ function details(f,anchor){var dt=el('tr',{'class':'detail',id:anchor+'-detail'}
 var head=el('div',{'class':'detail-actions'});head.appendChild(el('strong',null,f.id+' · '+f.title));head.appendChild(el('a',{href:'#'+anchor},L.permalink));td.appendChild(head);
 if(f.status==='Open'&&!excluded(f)){var a=action(f),guidance=el('div',{'class':'action-guidance'});guidance.appendChild(el('strong',null,L[a]));guidance.appendChild(el('p',null,L[a+'_note']));td.appendChild(guidance);}else if(excluded(f)){td.appendChild(el('p',{'class':'muted'},L.excluded_note));}
 function field(label,value){dl.appendChild(el('dt',null,label));var dd=el('dd');if(value instanceof Node)dd.appendChild(value);else dd.textContent=value;dl.appendChild(dd);}
-field(L.location,f.location);['actor','request','impact'].forEach(function(k){if(f[k])field(L[k],f[k]);});field(L.fix,f.fix||(f.status==='Open'&&!excluded(f)?L.missing_fix:L.not_recorded));field(L.evidence,f.validation.evidence||L.missing_evidence);if(f.validation.method)field(L.validation_method,f.validation.method);
+field(L.location,f.location);if(f.cwe)field(L.cwe,f.cwe);['actor','request','impact'].forEach(function(k){if(f[k])field(L[k],f[k]);});field(L.fix,f.fix||(f.status==='Open'&&!excluded(f)?L.missing_fix:L.not_recorded));field(L.evidence,f.validation.evidence||L.missing_evidence);if(f.validation.method)field(L.validation_method,f.validation.method);
 if(f.snippet){var pre=el('pre',{'class':'snippet'});f.snippet.lines.forEach(function(text,i){var n=f.snippet.start+i,ln=el('span',{'class':n>=f.snippet.hit[0]&&n<=f.snippet.hit[1]?'hit':''});ln.appendChild(el('b',null,String(n).padStart(5,' ')+' '));ln.appendChild(document.createTextNode(text));pre.appendChild(ln);});field(L.snippet,pre);if(f.snippet.truncated)field(L.note,L.snippet_truncated);}
 var refs=(f.source_link?[{type:'source',url:f.source_link,title:L.source_link}]:[]).concat(f.references||[]);if(refs.length){var ul=el('ul',{'class':'refs'});refs.forEach(function(r){var li=el('li');li.appendChild(el('span',{'class':'rt'},r.type));li.appendChild(el('a',{href:r.url,target:'_blank',rel:'noopener noreferrer'},r.title||r.url));ul.appendChild(li);});field(L.references,ul);}td.appendChild(dl);var workflow=workflowNode(f);if(workflow)td.appendChild(workflow);td.appendChild(verificationNode(f));
 if(f.previous_validation&&typeof f.previous_validation==='object'){var history=el('aside',{'class':'history'});history.appendChild(el('strong',null,L.previous_validation));history.appendChild(el('p',null,L.history_note));['verdict','evidence','method'].forEach(function(k){if(typeof f.previous_validation[k]==='string')history.appendChild(el('p',null,f.previous_validation[k]));});td.appendChild(history);}dt.appendChild(td);return dt;}
@@ -1840,6 +1978,7 @@ def render_dashboard(data, L, lang, integrity=None):
         "meta": {key: data["meta"][key] for key in ("project", "date", "assessor", "scope", "method", "commit", "source_url")
                  if key in data["meta"]},
         **({"three_pass_view": three_pass_view(data, lang, integrity=integrity)} if "three_pass" in model else {}),
+        **({"expert_view": expert_view(data, lang, integrity=integrity)} if "expert" in data else {}),
         "workflow_views": {f["id"]: workflow_view(data, f, workflows[f["id"]], lang)
                            for f in data["findings"] if f["id"] in workflows},
         "findings": [display_finding(f, model["verification"][f["id"]]) for f in data["findings"]],
@@ -1858,9 +1997,10 @@ def render_dashboard(data, L, lang, integrity=None):
     title = html.escape(f"{L['dash_title']} - {data['meta']['project']}")
     replacements = {"__LANG__": lang, "__TITLE__": title, "__NOSCRIPT__": esc(L["no_script"]),
                     "__ASSESSMENT__": esc(L["assessment_link"]), "__DATA__": blob,
-                    "__THREE_PASS__": three_pass_html(payload.get("three_pass_view"), L)}
+                    "__THREE_PASS__": three_pass_html(payload.get("three_pass_view"), L),
+                    "__EXPERT__": expert_html(payload.get("expert_view"), L)}
     # Substitute only template tokens, not token-like strings inside report data.
-    return re.sub(r"__(?:LANG|TITLE|NOSCRIPT|ASSESSMENT|DATA|THREE_PASS)__",
+    return re.sub(r"__(?:LANG|TITLE|NOSCRIPT|ASSESSMENT|DATA|THREE_PASS|EXPERT)__",
                   lambda match: replacements[match.group(0)], DASHBOARD)
 
 

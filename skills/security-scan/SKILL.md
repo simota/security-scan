@@ -48,7 +48,7 @@ otherwise choose differently, the choice is fixed here, and
 | Dependencies | `deps_scan.py <repo> --audit --out deps.json` and `--into findings.json` (without `--audit` if the requester declines the advisory query; that lands in limitations). Never hand-write, merge or split `D-*`; per-package review goes into that finding's `validation`. Platform end of life is one `F-*` finding under *Dependencies and platform* |
 | Record format | `schema_version: 2`. `scripts/evidence_capture.py` pins the commit and writes the source evidence; every `F-*` finding carries an explicit `validation.verdict` and structured `verification` (four claims citing evidence IDs, at least one falsification check). Three-pass coverage, the sequential workflow, integrity receipts and reproduction bundles run only on request |
 | Severity | The table below, decided before confidence; confidence never raises or lowers it |
-| Outputs | Exactly `findings.json`, `deps.json`, `evidence/`, `dashboard.html`, `assessment.html`, `assessment.pdf`, in the requester's language. No README, summary PDF or extra audit dumps unless asked (`contract_check.py --allow NAME`) |
+| Outputs | Exactly `findings.json`, `deps.json`, `evidence/`, `dashboard.html`, `assessment.html`, `assessment.pdf` (plus `run/` at expert grade), in the requester's language. No README, summary PDF or extra audit dumps unless asked (`contract_check.py --allow NAME`) |
 | `meta.assessor` | Host and model, e.g. `Claude Code (<model>)`, `Codex (<model>)`, `Antigravity (<model>)` |
 | Read-only | `allowed-tools` above is enforced by Claude Code only. Elsewhere keep to it yourself: read, search and run this skill's scripts; write nothing inside the audited repository |
 
@@ -93,6 +93,7 @@ requester's language (`--lang ja|en`).
 |---|---|
 | Asked "what should we check" or "list the items" | RECON and CHECKLIST only, then stop and deliver the checklist |
 | Asked to check, audit or scan | All five phases |
+| Asked for an expert, commercial-grade, exhaustive or "no compromise" assessment | Expert grade: price the worker envelope, get consent to the ceiling, engines and data boundary, then run E0–E9 with independent workers for recon, discovery, variants, omission, conditions, refutation, calibrated severity, reception and QA (`reference/expert-mode.md`, `reference/engine-map.md`). Never label a run expert-grade unless `scripts/expert_audit.py` exits 0 |
 | Asked for three-pass assurance or discovery → conditions → challenge | Opt into the schema-version-2 `three_pass` coverage profile, reuse the manual workflow and require the aggregate audit; see `reference/three-pass-check.md`. Do not promise a numerical accuracy rate |
 | Tenancy is enforced by a default/global scope or a base query | List every model **without** it and every query path that **bypasses** it. That list is the cross-tenant hunt list |
 | A guard exists in one layer only (UI routes vs API routes, one middleware group vs another, list endpoint vs detail endpoint) | Check the other layer. Asymmetric guards are the most common real finding |
@@ -193,9 +194,11 @@ requester's language (`--lang ja|en`).
 
 ## Done when
 
-`scripts/contract_check.py` passes, every entry point reachable by a non-admin
-actor has been read, every perspective in `reference/perspectives.md` is
-recorded as applied, N/A or not checked, every High and Medium finding has a recorded verdict and explicit
-verification basis (or the first line names the outstanding validation and
-insufficient-evidence counts), and the report states its own blind spots. Record
-uncertainty honestly; a completed report need not claim every finding is verified.
+`scripts/contract_check.py` passes (and, at expert grade,
+`scripts/expert_audit.py`), every entry point reachable by a non-admin actor has
+been read, every perspective in `reference/perspectives.md` is recorded as
+applied, N/A or not checked, every High and Medium finding has a recorded
+verdict and explicit verification basis (or the first line names the outstanding
+validation and insufficient-evidence counts), and the report states its own
+blind spots. Record uncertainty honestly; a completed report need not claim
+every finding is verified.
