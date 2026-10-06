@@ -58,11 +58,12 @@ two stdlib `tomllib` ownership tests, which run on Python 3.12. For the required
 python3 -m venv /tmp/security-scan-ci-venv
 . /tmp/security-scan-ci-venv/bin/activate
 python -m pip install --only-binary=:all: -r scripts/ci/requirements.txt
-python -m playwright install --with-deps chromium
+python -m playwright install-deps chromium
 # Debian/Ubuntu: install Poppler and Japanese fonts if they are not present.
 sudo apt-get install --yes --no-install-recommends fonts-noto-cjk poppler-utils
 fc-cache -f
-export CHROME="$(python -c 'from playwright.sync_api import sync_playwright; p = sync_playwright().start(); print(p.chromium.executable_path); p.stop()')"
+# Point to Chrome for Testing 154.0.8037.57 installed from the official manifest.
+export CHROME="/path/to/chrome-linux64/chrome"
 export SECURITY_SCAN_REPORT_ARTIFACTS="/tmp/security-scan-report-artifacts"
 python scripts/ci/run_required_tests.py
 ```
@@ -94,7 +95,22 @@ exact versions in `scripts/ci/requirements.txt`, verified against PyPI:
 - [greenlet 3.5.5](https://pypi.org/project/greenlet/3.5.5/)
 - [typing_extensions 4.16.0](https://pypi.org/project/typing-extensions/4.16.0/)
 
-Playwright installs the Chromium revision associated with that package release.
+The workflow separately pins official Chrome for Testing **154.0.8037.57**, using
+its [official per-version manifest](https://googlechromelabs.github.io/chrome-for-testing/154.0.8037.57.json)
+and the manifest's Linux64 download. The archive and browser are extracted only
+under `runner.temp`. Installation checks the exact `--version` result and records
+the manifest, download URL, version and archive SHA-256 in the synthetic evidence.
+The SHA-256 is recorded for provenance, not compared with an upstream checksum.
+Playwright supplies the Python API and OS-library installation; its bundled
+Chromium 151 browser is not installed by this workflow.
+
+During CI diagnosis, bundled Chrome for Testing 151.0.7922.34 failed the bounded
+CLI PDF probe, while the runner's official Google Chrome 154.0.8037.57 passed the
+same production flags and retained English/Japanese text. The separately pinned
+Chrome for Testing 154.0.8037.57 still awaits its own preflight and complete-suite
+verification. Neither the system comparison nor a diagnostic variant can replace
+the selected browser's required pass. Production renderer flags are unchanged.
+
 Ubuntu system packages come from the runner's configured distribution sources;
 those packages and the Python 3.12 patch version receive upstream updates rather
 than being a byte-for-byte locked operating-system image. The application itself
