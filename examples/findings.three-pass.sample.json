@@ -1,0 +1,94 @@
+{
+  "schema_version": 2,
+  "meta": {
+    "project": "Synthetic three-pass candidate",
+    "date": "2026-10-06",
+    "commit": "1111111111111111111111111111111111111111",
+    "scope": "Fictional source-review records only. No application or model was executed."
+  },
+  "assessment": {
+    "repository": "synthetic/sample-app",
+    "commit": "1111111111111111111111111111111111111111",
+    "worktree": "clean"
+  },
+  "evidence": [
+    {
+      "id": "route-source",
+      "kind": "source",
+      "commit": "1111111111111111111111111111111111111111",
+      "location": "src/orders.py:12-24",
+      "summary": "Synthetic route registration and customer-controlled order ID trace.",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "id": "policy-source",
+      "kind": "source",
+      "commit": "1111111111111111111111111111111111111111",
+      "location": "src/policy.py:1-20",
+      "summary": "Synthetic query policy and response boundary trace for the candidate.",
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "id": "scope-source",
+      "kind": "source",
+      "commit": "1111111111111111111111111111111111111111",
+      "location": "src/routes.py:1-40",
+      "summary": "Synthetic list route has owner scoping; this fixture contains no admin route.",
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  ],
+  "three_pass": {
+    "version": 1,
+    "coverage": [
+      {"id": "order-detail", "perspective": "tenant authorization", "target": "GET /orders/{id}"},
+      {"id": "order-list", "perspective": "tenant authorization", "target": "GET /orders"},
+      {"id": "admin-route", "perspective": "privileged entrypoints", "target": "Admin route registration"}
+    ],
+    "discovery": {
+      "actor": "synthetic-discovery",
+      "summary": "Invented first-pass coverage; candidate still requires independent conditions and challenge passes.",
+      "checks": [
+        {
+          "coverage_id": "order-detail",
+          "status": "checked",
+          "reason": "Synthetic detail route produced one candidate.",
+          "evidence_ids": ["route-source", "policy-source"],
+          "finding_ids": ["F-001"]
+        },
+        {
+          "coverage_id": "order-list",
+          "status": "checked",
+          "reason": "Synthetic list route inspected with no candidate; challenge is still required.",
+          "evidence_ids": ["scope-source"],
+          "finding_ids": []
+        },
+        {
+          "coverage_id": "admin-route",
+          "status": "not_applicable",
+          "reason": "Synthetic route catalog has no admin entrypoint; independent scope challenge remains pending.",
+          "evidence_ids": ["scope-source"],
+          "finding_ids": []
+        }
+      ]
+    }
+  },
+  "findings": [
+    {
+      "id": "F-001",
+      "title": "Synthetic order detail may lack owner scoping",
+      "severity": "High",
+      "confidence": "Suspected",
+      "location": "src/orders.py:18",
+      "status": "Open",
+      "validation": {
+        "verdict": "Unverified",
+        "method": "Three-pass review pending",
+        "evidence": "Invented candidate, not a real security assessment."
+      }
+    }
+  ],
+  "limitations": [
+    "All findings, identities, hashes and source observations are invented fixtures, not detected vulnerabilities or executed application tests.",
+    "This pending example contains no generated journal. Structural validation does not establish artifact authenticity or reviewer independence."
+  ]
+}
