@@ -618,7 +618,8 @@ def render_dashboard(data, L, lang):
         "excluded_verdicts": sorted(EXCLUDED),
         **{k: data[k] for k in ("checked_ok", "decisions", "limitations", "next_steps", "perspectives")},
     }
-    blob = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
+    # Escape every less-than sign: <!-- and <script also change HTML parsing.
+    blob = json.dumps(payload, ensure_ascii=False).replace("<", "\\u003c")
     title = html.escape(f"{L['dash_title']} - {data['meta']['project']}")
     return DASHBOARD.replace("__LANG__", lang).replace("__TITLE__", title).replace("__DATA__", blob)
 

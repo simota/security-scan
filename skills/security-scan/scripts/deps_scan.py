@@ -29,12 +29,13 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 SKIP_DIRS = {".git", "node_modules", "vendor", ".venv", "venv", "dist", "build",
              "target", "__pycache__", ".next", ".nuxt", "bower_components", ".tox"}
 
 LOCKS = {
-    "package.json": ["package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", "npm-shrinkwrap.json"],
+    "package.json": ["package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb", "npm-shrinkwrap.json"],
     "composer.json": ["composer.lock"],
     "Gemfile": ["Gemfile.lock"],
     "go.mod": ["go.sum"],
@@ -51,6 +52,67 @@ CAT_DEP = "Dependencies and platform"
 CAT_BUILD = "Build and delivery"
 
 
+URL_RE = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^\s'\"<>]+")
+
+
+def redact_urls(text):
+    """Do not copy URL credentials, queries or fragments into generated reports."""
+    def clean(match):
+        try:
+            u = urlsplit(match.group())
+            if not u.hostname:
+                return "[redacted URL]"
+            u.port  # Validate the authority before retaining it.
+            return urlunsplit((u.scheme, u.netloc.rsplit("@", 1)[-1], u.path, "", ""))
+        except ValueError:
+            return "[redacted URL]"
+    return URL_RE.sub(clean, text)
+
+
+def safe_output(value):
+    """Sanitize all string fields, including inventory, references and history."""
+    if isinstance(value, str):
+        return redact_urls(value)
+    if isinstance(value, list):
+        return [safe_output(v) for v in value]
+    if isinstance(value, dict):
+        return {safe_output(k): safe_output(v) for k, v in value.items()}
+    return value
+
+
+def safe_file(path, root=None):
+    """Accept regular files only; optionally enforce the checkout boundary.
+
+    Symlinks (including in-checkout links) are deliberately not scan inputs.
+    Callers must use an unchanged checkout; this is not a filesystem sandbox.
+    """
+    path = Path(path)
+    try:
+        if root is not None:
+            root = Path(root).resolve()
+            path = Path(os.path.abspath(path))
+            parts = path.relative_to(root).parts
+            current = root
+            for part in parts:
+                current /= part
+                if current.is_symlink():
+                    return False
+            path.resolve(strict=True).relative_to(root)
+        return not path.is_symlink() and path.is_file()
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
+def audit_input(c, root, path, companions=()):
+    """Recheck file operands and optional project config before a subprocess."""
+    paths = [Path(path)] + [Path(path).parent / name for name in companions
+                            if os.path.lexists(Path(path).parent / name)]
+    if all(safe_file(p, root) for p in paths):
+        return True
+    c.not_run.append({"tool": "audit input", "reason": f"{c.rel(path)}: unsafe or missing input/config file"})
+    return False
+
+
 class Collector:
     def __init__(self, root):
         self.root = root
@@ -64,16 +126,36 @@ class Collector:
     def add(self, severity, title, path, line=None, impact="", fix="", confidence="Confirmed", category=CAT_DEP):
         loc = self.rel(path) + (f":{line}" if line else "")
         self.findings.append({
-            "id": f"D-{len(self.findings) + 1:03d}", "title": title, "severity": severity,
+            "id": f"D-{len(self.findings) + 1:03d}", "title": redact_urls(title), "severity": severity,
             "confidence": confidence, "category": category, "location": loc, "actor": "",
-            "request": "", "impact": impact, "fix": fix, "status": "Open"})
+            "request": "", "impact": redact_urls(impact), "fix": redact_urls(fix), "status": "Open"})
 
 
-def walk(root):
-    for d, dirs, files in os.walk(root):
-        dirs[:] = [x for x in dirs if x not in SKIP_DIRS and not x.startswith(".cache")]
-        for f in files:
-            yield Path(d) / f
+def walk(root, not_run=None):
+    root = Path(root).resolve()
+
+    def skipped(path):
+        if not_run is not None:
+            not_run.append({"tool": "file scan", "reason": f"{os.path.relpath(path, root)}: "
+                            "skipped symlink, non-regular or unreadable path"})
+
+    for d, dirs, files in os.walk(root, onerror=lambda e: skipped(e.filename or root)):
+        kept = []
+        for name in dirs:
+            if name in SKIP_DIRS or name.startswith(".cache"):
+                continue
+            path = Path(d) / name
+            if path.is_symlink():
+                skipped(path)
+            else:
+                kept.append(name)
+        dirs[:] = kept
+        for name in files:
+            path = Path(d) / name
+            if safe_file(path, root):
+                yield path
+            else:
+                skipped(path)
 
 
 def line_of(text, needle):
@@ -84,6 +166,8 @@ def line_of(text, needle):
 
 
 def read(p):
+    if not safe_file(p):
+        return ""
     try:
         return p.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -94,7 +178,7 @@ def read(p):
 
 def check_lockfile(c, p):
     locks = LOCKS.get(p.name)
-    if locks and not any((p.parent / l).exists() for l in locks):
+    if locks and not any(safe_file(p.parent / l, c.root) for l in locks):
         c.add("Medium", f"{p.name} has no lockfile", p,
               impact="Each install may resolve different, possibly compromised, versions",
               fix=f"Commit one of: {', '.join(locks)}")
@@ -131,7 +215,7 @@ def check_npm_lock(c, p):
         set(re.findall(r'^\s+resolved\s+"https?://([^/"]+)', text, re.M))
     default = {"registry.npmjs.org", "registry.yarnpkg.com"}
     for h in sorted(hosts - default):
-        c.add("Low", f"lockfile resolves packages from non-default host {h}", p, line_of(text, h),
+        c.add("Low", f"lockfile resolves packages from non-default host {h.rsplit('@', 1)[-1]}", p, line_of(text, h),
               impact="Packages come from a registry outside the public one; confirm it is trusted",
               fix="Confirm the host is an approved internal mirror", confidence="Suspected")
     if "integrity" not in text and p.name == "package-lock.json":
@@ -192,15 +276,15 @@ def check_requirements(c, p):
                   impact="A public package can shadow an internal one with the same name",
                   fix="Use a single index (a mirror that proxies PyPI) or pin hashes", category=CAT_BUILD)
         elif s.startswith("--index-url") or s.startswith("-i "):
-            c.add("Info", f"pip index overridden: {s}", p, i, impact="Confirm the index is trusted",
+            c.add("Info", "pip index overridden (see source location)", p, i, impact="Confirm the index is trusted",
                   category=CAT_BUILD)
         elif s.startswith("-") or s.startswith("."):
             continue
         elif re.match(r"^(git\+|https?://|hg\+|svn\+)", s) or " @ " in s:
-            c.add("Medium", f"Python dependency fetched from a URL: {s}", p, i,
+            c.add("Medium", "Python dependency fetched from a URL (see source location)", p, i,
                   impact="Bypasses index integrity and advisory coverage", fix="Pin to a released version")
         elif "==" not in s and "--hash" not in s:
-            c.add("Low", f"Python requirement not pinned: {s}", p, i,
+            c.add("Low", "Python requirement not pinned (see source location)", p, i,
                   impact="Installs whatever version is newest at install time",
                   fix="Pin with == (and --hash for reproducible installs) or use a lockfile")
 
@@ -209,10 +293,10 @@ def check_gemfile(c, p):
     text = read(p)
     for i, ln in enumerate(text.splitlines(), 1):
         if re.search(r"^\s*gem\s.*(git:|github:|path:)", ln):
-            c.add("Medium", f"gem fetched outside rubygems: {ln.strip()}", p, i,
+            c.add("Medium", "gem fetched outside rubygems (see source location)", p, i,
                   impact="Bypasses rubygems integrity and advisory coverage", fix="Use a released gem version")
         if re.search(r"^\s*source\s+['\"](?!https://rubygems\.org)", ln):
-            c.add("Info", f"additional gem source: {ln.strip()}", p, i, impact="Confirm the source is trusted",
+            c.add("Info", "additional gem source (see source location)", p, i, impact="Confirm the source is trusted",
                   category=CAT_BUILD)
 
 
@@ -298,7 +382,8 @@ def inventory_npm_lock(c, p):
 def inventory_generic(c, p):
     eco = ECOSYSTEM.get(p.name) or {"yarn.lock": "npm", "pnpm-lock.yaml": "npm", "Gemfile.lock": "bundler",
                                     "go.sum": "go", "Cargo.lock": "cargo", "poetry.lock": "python",
-                                    "uv.lock": "python", "Pipfile.lock": "python"}.get(p.name, "?")
+                                    "uv.lock": "python", "Pipfile.lock": "python", "pdm.lock": "python",
+                                    "bun.lock": "npm", "bun.lockb": "npm", "npm-shrinkwrap.json": "npm"}.get(p.name, "?")
     c.inventory.append({"ecosystem": eco, "lockfile": c.rel(p)})
 
 
@@ -343,10 +428,10 @@ REF_ORDER = {"advisory": 0, "fix": 1, "article": 2, "report": 3, "source": 4, "w
 def dedupe_refs(refs, limit=8):
     seen, out = set(), []
     for r in sorted(refs, key=lambda r: REF_ORDER.get(r.get("type"), 9)):
-        u = r.get("url")
+        u = redact_urls(r.get("url", ""))
         if u and u not in seen and u.startswith(("https://", "http://")):
             seen.add(u)
-            out.append({"type": r.get("type", "web"), "url": u, "title": r.get("title", "")})
+            out.append({"type": r.get("type", "web"), "url": u, "title": redact_urls(r.get("title", ""))})
     return out[:limit]
 
 
@@ -394,11 +479,15 @@ def vuln(c, sev, pkg, version, ids, summary, path, tool, fixed="", refs=None):
           fix=(f"Upgrade to {fixed}" if fixed else "Upgrade to a fixed version or remove the dependency"))
     c.findings[-1].update({"package": pkg, "version": version, "lockfile": str(path), "malicious": malicious,
                            "references": dedupe_refs(refs or []), "advisory_ids": advisory_ids})
+    c.findings[-1] = safe_output(c.findings[-1])
 
 
 OSV_LOCKFILES = {"composer.lock", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
                  "Gemfile.lock", "go.mod", "Cargo.lock", "poetry.lock", "Pipfile.lock", "uv.lock", "pdm.lock",
-                 "gradle.lockfile", "pom.xml", "pubspec.lock", "mix.lock", "packages.lock.json", "conan.lock"}
+                 "gradle.lockfile", "pom.xml", "pubspec.lock", "mix.lock", "packages.lock.json", "conan.lock", "bun.lock"}
+
+# One registry drives inventory and the catch-all for unsupported audit inputs.
+KNOWN_LOCKFILES = OSV_LOCKFILES | {name for names in LOCKS.values() for name in names} | {"go.sum"}
 
 
 def osv_severity(v, group_sev):
@@ -422,49 +511,95 @@ def osv_fixed(v, name):
     return ", ".join(dict.fromkeys(fixed))
 
 
-def audit_osv(c, root, files):
-    """Scan each lockfile with osv-scanner. Returns the set of lockfiles it covered.
+def parse_osv(c, data, root, lock):
+    """Validate one file's JSON result before granting audit coverage."""
+    if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+        raise ValueError("OSV results must be a list")
+    for res in data["results"]:
+        source = res["source"]
+        if not isinstance(source, dict) or not isinstance(source.get("path"), str):
+            raise ValueError("missing OSV source")
+        src = Path(source["path"])
+        if not src.is_absolute():
+            src = Path(root) / src
+        if src.resolve() != Path(lock).resolve():
+            raise ValueError("OSV returned a different source")
+        if not isinstance(res.get("packages"), list):
+            raise ValueError("OSV packages must be a list")
+        for pk in res["packages"]:
+            info = pk["package"]
+            if (not isinstance(info, dict) or not isinstance(info.get("name"), str)
+                    or not info["name"] or not isinstance(info.get("version", ""), str)):
+                raise ValueError("invalid OSV package")
+            groups = pk.get("groups", [])
+            vulnerabilities = pk.get("vulnerabilities", [])
+            if not isinstance(groups, list) or not isinstance(vulnerabilities, list):
+                raise ValueError("invalid OSV groups/vulnerabilities")
+            group_sev = {}
+            for g in groups:
+                ids, aliases = g.get("ids", []), g.get("aliases", [])
+                if not isinstance(ids, list) or not isinstance(aliases, list):
+                    raise ValueError("invalid OSV group IDs")
+                for identifier in ids + aliases:
+                    if not isinstance(identifier, str):
+                        raise ValueError("invalid OSV group ID")
+                    group_sev[identifier] = g.get("max_severity", "")
+            for v in vulnerabilities:
+                if (not isinstance(v, dict) or not isinstance(v.get("id"), str) or not v["id"]
+                        or not isinstance(v.get("summary", ""), str)):
+                    raise ValueError("invalid OSV vulnerability")
+                aliases = v.get("aliases", [])
+                if not isinstance(aliases, list) or not all(isinstance(a, str) for a in aliases):
+                    raise ValueError("invalid OSV aliases")
+                aliases = [a for a in aliases if a.startswith("CVE-")][:2]
+                vuln(c, osv_severity(v, group_sev), info["name"], info.get("version", ""),
+                     [v["id"]] + aliases, v.get("summary", ""), lock, "osv-scanner",
+                     osv_fixed(v, info["name"]), osv_refs(v))
 
-    Lockfiles are passed explicitly with -L: directory scanning is not used
-    because some osv-scanner builds stop at the root without walking it.
+
+def audit_osv(c, root, files):
+    """Scan explicit files independently, using an auditor-owned empty config.
+
+    A single-file invocation makes clean output attributable to that input;
+    one malformed result must not mark other inputs as audited.
     """
     exe = shutil.which("osv-scanner")
     if not exe:
-        c.not_run.append({"tool": "osv-scanner",
-                          "reason": "not installed (covers every ecosystem and OpenSSF malicious-package reports)"})
+        c.not_run.append({"tool": "osv-scanner", "reason": "not installed"})
         return set()
     locks = [p for p in files if p.name in OSV_LOCKFILES or re.match(r"^requirements.*\.txt$", p.name)]
+    covered = set()
     if not locks:
-        return set()
-    cmd = [exe, "scan", "source", "--format", "json"]
-    for p in locks:
-        cmd += ["-L", str(p)]
-    code, out, err = run(cmd, root)
-    # 0 = clean, 1 = vulnerabilities found; anything else is a failure
-    try:
-        data = json.loads(out) if code in (0, 1) else None
-    except json.JSONDecodeError:
-        data = None
-    if data is None:
-        c.not_run.append({"tool": "osv-scanner", "reason": f"exit {code}: " + (err or "no JSON output").strip()[-300:]})
-        return set()
-    for res in data.get("results", []):
-        src = Path(res.get("source", {}).get("path", root))
-        for pk in res.get("packages", []):
-            info = pk.get("package", {})
-            group_sev = {}
-            for g in pk.get("groups", []):
-                for i in (g.get("ids") or []) + (g.get("aliases") or []):
-                    group_sev[i] = g.get("max_severity", "")
-            for v in pk.get("vulnerabilities", []):
-                aliases = [a for a in (v.get("aliases") or []) if a.startswith("CVE-")][:2]
-                vuln(c, osv_severity(v, group_sev), info.get("name"), info.get("version", ""),
-                     [v.get("id")] + aliases, v.get("summary", ""), src, "osv-scanner",
-                     osv_fixed(v, info.get("name")), osv_refs(v))
-    return {Path(p) for p in locks}
+        return covered
+    with tempfile.TemporaryDirectory(prefix="security-scan-osv-") as tmp:
+        config = Path(tmp) / "osv-scanner.toml"
+        # --config overrides per-directory configs, including package exclusions.
+        config.write_text("# Independent audit: no vulnerability or package exclusions.\n", encoding="utf-8")
+        for lock in locks:
+            if not audit_input(c, root, lock):
+                continue
+            code, out, _ = run([exe, "scan", "source", "--format", "json",
+                                "--config", str(config), "-L", str(lock)], root)
+            data = audit_json(c, "osv-scanner", lock, code, out)
+            if data is None:
+                continue
+            start = len(c.findings)
+            try:
+                parse_osv(c, data, root, lock)
+                if (code == 1) != (len(c.findings) > start):
+                    raise ValueError("OSV exit code disagrees with findings")
+            except (ValueError, AttributeError, TypeError, KeyError, OSError, RuntimeError):
+                del c.findings[start:]
+                c.not_run.append({"tool": "osv-scanner", "reason": f"{c.rel(lock)}: "
+                                  "invalid or inconsistent result schema"})
+                continue
+            covered.add(lock)
+    return covered
 
 
 def audit_composer(c, root, lock, abandoned_only=False):
+    if not audit_input(c, root, lock, ("composer.json", "auth.json")):
+        return
     exe = shutil.which("composer")
     if not exe:
         c.not_run.append({"tool": "composer audit", "reason": "composer not installed"})
@@ -512,7 +647,9 @@ def audit_composer(c, root, lock, abandoned_only=False):
 
 
 def audit_npm(c, root, lock):
-    if lock.name != "package-lock.json":
+    if not audit_input(c, root, lock, ("package.json", ".npmrc")):
+        return
+    if lock.name not in ("package-lock.json", "npm-shrinkwrap.json"):
         c.not_run.append({"tool": "npm audit", "reason": f"{c.rel(lock)} is not an npm lockfile; use the matching package manager's audit"})
         return
     exe = shutil.which("npm")
@@ -604,6 +741,8 @@ def audit_requirements(c, root, path):
     A temporary normalized input also prevents the original file changing into
     executable input between validation and invocation.
     """
+    if not audit_input(c, root, path):
+        return
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
@@ -632,17 +771,19 @@ def audit_requirements(c, root, path):
 
 
 def audits(c, root, files):
+    # The top-level walk rejects links. Recheck operands immediately before use.
+    files = [p for p in files if audit_input(c, root, p)]
     covered = audit_osv(c, root, files)
     # Ecosystem tools fill what osv-scanner did not cover; composer audit also
     # reports abandoned packages, which OSV does not.
     for p in files:
         if p.name == "composer.lock":
             audit_composer(c, root, p, abandoned_only=p in covered)
-        elif p.name == "package-lock.json" and p not in covered:
+        elif p.name in ("package-lock.json", "npm-shrinkwrap.json") and p not in covered:
             audit_npm(c, root, p)
-        elif p.name in ("yarn.lock", "pnpm-lock.yaml", "bun.lockb") and p not in covered:
+        elif p.name in ("yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb") and p not in covered:
             tool = {"yarn.lock": "yarn npm audit (Berry) / yarn audit (v1)", "pnpm-lock.yaml": "pnpm audit",
-                    "bun.lockb": "bun audit"}[p.name]
+                    "bun.lock": "bun audit", "bun.lockb": "bun audit"}[p.name]
             c.not_run.append({"tool": tool, "reason": f"{c.rel(p)} not audited; run it in that directory "
                                                       "or install osv-scanner"})
         elif re.match(r"^requirements.*\.txt$", p.name) and p not in covered:
@@ -651,11 +792,19 @@ def audits(c, root, files):
             c.not_run.append({"tool": "Python lockfile audit", "reason": f"{c.rel(p)}: requires osv-scanner; "
                               "the scanner's Python environment is never used as a substitute"})
         elif p.name == "Cargo.lock" and p not in covered:
+            if not audit_input(c, root, p, ("Cargo.toml", ".cargo/config", ".cargo/config.toml")):
+                continue
             audit_simple(c, root, "cargo audit", ["cargo", "audit", "--json"], p.parent, parse_cargo_audit)
         elif p.name == "Gemfile.lock" and p not in covered:
             c.not_run.append({"tool": "bundle-audit", "reason": "run `bundle-audit check --update` manually; no JSON parser here"})
         elif p.name == "go.sum" and p.parent / "go.mod" not in covered:
             c.not_run.append({"tool": "govulncheck", "reason": "run `govulncheck ./...` in the module manually"})
+        elif p not in covered and (p.name in KNOWN_LOCKFILES or p.name in ECOSYSTEM
+                                    or re.match(r"^requirements.*\.in$", p.name)):
+            if p.name in LOCKS and any(p.parent / name in files for name in LOCKS[p.name]):
+                continue  # The matching lockfile is audited or explicitly marked not_run.
+            c.not_run.append({"tool": "dependency audit", "reason": f"{c.rel(p)}: "
+                              "no supported audit completed for this input"})
 
 
 # ---------- validation (triage) of dependency findings ----------
@@ -767,8 +916,9 @@ def triage(c, root):
 # ---------- main ----------
 
 def scan(root, audit):
+    root = Path(root).resolve()
     c = Collector(root)
-    files = sorted(walk(root))
+    files = sorted(walk(root, c.not_run))
     for p in files:
         n = p.name
         if n in LOCKS:
@@ -795,8 +945,7 @@ def scan(root, audit):
             inventory_composer_lock(c, p)
         elif n == "package-lock.json":
             inventory_npm_lock(c, p)
-        elif n in ("yarn.lock", "pnpm-lock.yaml", "Gemfile.lock", "go.sum", "Cargo.lock", "poetry.lock",
-                   "uv.lock", "Pipfile.lock"):
+        elif n in KNOWN_LOCKFILES:
             inventory_generic(c, p)
     if audit:
         audits(c, root, files)
@@ -807,7 +956,7 @@ def scan(root, audit):
     c.findings.sort(key=lambda f: (rank[f["severity"]], f["location"]))
     for i, f in enumerate(c.findings, 1):
         f["id"] = f"D-{i:03d}"
-    return {"inventory": c.inventory, "findings": c.findings, "not_run": c.not_run}
+    return safe_output({"inventory": c.inventory, "findings": c.findings, "not_run": c.not_run})
 
 
 def finding_key(f):
@@ -839,7 +988,7 @@ def merge_into(path, result):
     lim = [x for x in data.get("limitations", []) if not x.startswith("Dependency audit not run:")]
     lim += [f"Dependency audit not run: {n['tool']} - {n['reason']}" for n in result["not_run"]]
     data["limitations"] = lim
-    Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    Path(path).write_text(json.dumps(safe_output(data), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def main(argv=None):
@@ -856,7 +1005,7 @@ def main(argv=None):
     if not os.path.isdir(root):
         print(f"deps_scan.py: {a.repo} is not a directory", file=sys.stderr)
         return 2
-    result = scan(root, a.audit)
+    result = safe_output(scan(root, a.audit))
     blob = json.dumps(result, ensure_ascii=False, indent=2)
     if a.out:
         Path(a.out).write_text(blob + "\n", encoding="utf-8")
