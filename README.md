@@ -88,6 +88,7 @@ evidence from `evidence_capture.py`, one severity table, and a fixed output set.
 `contract_check.py` enforces the mechanical parts before the summary:
 
 ```sh
+python3 skills/security-scan/scripts/findings.py merge out/findings.json frag-001.json   # fragments, never heredocs
 python3 skills/security-scan/scripts/evidence_capture.py /path/to/repo --findings out/findings.json src/a.py src/b.py
 python3 skills/security-scan/scripts/deps_scan.py /path/to/repo --audit --out out/deps.json --into out/findings.json
 python3 skills/security-scan/scripts/render.py out/findings.json --out out --repo /path/to/repo
@@ -434,6 +435,7 @@ skills/security-scan/
   reference/engine-map.md      the only place host spawn tools and preflights are named
   reference/findings-schema.md findings.json and the render command
   scripts/deps_scan.py         dependency inventory, supply-chain checks, audits (stdlib only)
+  scripts/findings.py          merges JSON fragments into findings.json; refuses literal attack strings
   scripts/evidence_capture.py  assessed-revision source -> evidence/ and schema-2 records
   scripts/contract_check.py    run-contract gate shared by every host
   scripts/expert.py            expert-grade gate derivation (independence, redundancy, panels, calibration)

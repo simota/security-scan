@@ -27,6 +27,29 @@ named), `3` no PDF engine found (the HTML outputs are still written). A
 sandboxed shell may block the browser; rerun outside it if `3` appears with
 Chrome installed. Write `<dir>` outside the audited repository unless asked.
 
+## Writing the file
+
+Build `findings.json` from fragments, never from a heredoc or a generated
+script (those embed finding text in a shell command, which host safety checks
+can refuse and which leaves no reviewable record):
+
+```
+# 1. file-write tool: <scratch>/frag-001.json = {"meta": {...}, "findings": [...], "perspectives": [...]}
+python3 scripts/findings.py merge <out>/findings.json <scratch>/frag-001.json
+# 2. pin the revision and capture cited source
+python3 scripts/evidence_capture.py <repo> --findings <out>/findings.json <paths>…
+# 3. file-write tool: <scratch>/frag-002.json = {"findings": [{"id": "F-001", "verification": {...}}]}
+python3 scripts/findings.py merge <out>/findings.json <scratch>/frag-002.json
+```
+
+A fragment holds `meta`, `findings`, `evidence`, `perspectives`, `checked_ok`,
+`decisions`, `limitations` and `next_steps`. Records with a known `id` are
+updated key by key; list sections are appended without duplicates. The merge is
+refused (exit 1) when a finding's `title`, `actor`, `request`, `impact` or `fix`
+holds a literal attack string — describe the weakness and use a placeholder for
+the value — and nothing is written unless the merged file passes the schema
+check (exit 2).
+
 ## Common report shape and legacy compatibility
 
 The following fields apply to both formats. Omitting `schema_version` retains
