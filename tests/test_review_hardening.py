@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -15,7 +16,8 @@ def load_script(name):
     path = Path(__file__).resolve().parents[1] / "skills/security-scan/scripts" / (name + ".py")
     spec = importlib.util.spec_from_file_location("review_" + name, path)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    with patch.object(sys, "path", [str(path.parent)] + sys.path):
+        spec.loader.exec_module(module)
     return module
 
 
@@ -124,6 +126,105 @@ class ReviewHardeningTests(unittest.TestCase):
         url = "https://github.com/advisories/GHSA-FIXTURE"
         self.assertEqual(self.deps.redact_urls(url), url)
         self.assertNotIn("SYNTHETIC_SECRET", self.deps.redact_urls("https://u:SYNTHETIC_SECRET@[broken"))
+
+    def test_review_4192003348_apostrophe_urls_redact_complete_token(self):
+        # https://github.com/simota/security-scan/pull/2#discussion_r4192003348
+        secret = "SYNTHETIC_BEFORE'SYNTHETIC_AFTER"
+        cases = [
+            (f"https://user:{secret}@example.invalid/path", "https://example.invalid/path"),
+            (f"https://{secret}:password@example.invalid/path", "https://example.invalid/path"),
+            (f"https://user:123'{secret}@example.invalid/path", "https://example.invalid/path"),
+            (f"https://example.invalid/path?token={secret}", "https://example.invalid/path"),
+            (f"https://example.invalid/path#{secret}", "https://example.invalid/path"),
+            (f"git+https://user:{secret}@example.invalid/repo.git", "git+https://example.invalid/repo.git"),
+            (f"https://user:{secret}@[::1]:8443/path", "https://[::1]:8443/path"),
+            (f"https://user:{secret}@[broken", "[redacted URL]"),
+        ]
+        for url, expected in cases:
+            with self.subTest(url=url):
+                actual = self.deps.redact_urls(url)
+                self.assertEqual(actual, expected)
+                self.assertNotIn("SYNTHETIC_BEFORE", actual)
+                self.assertNotIn("SYNTHETIC_AFTER", actual)
+                self.assertEqual(self.deps.redact_urls(actual), actual)
+
+    def test_url_redaction_preserves_plain_paths_and_quoted_context(self):
+        plain = "https://example.invalid/releases/it's-ready"
+        encoded = "https://user:SYNTHETIC%27SECRET@example.invalid/path?token=SYNTHETIC#fragment"
+        secret = "https://user:SYNTHETIC_BEFORE'SYNTHETIC_AFTER@example.invalid/path?token=fixture"
+        invalid = "https://user:SYNTHETIC_BEFORE'SYNTHETIC_AFTER@[broken"
+        for url, expected in ((plain, plain), (encoded, "https://example.invalid/path"),
+                              (secret, "https://example.invalid/path"), (invalid, "[redacted URL]")):
+            for quote in ("", "'", '"'):
+                with self.subTest(url=url, quote=quote):
+                    actual = self.deps.redact_urls(f"See {quote}{url}{quote} next")
+                    self.assertEqual(actual, f"See {quote}{expected}{quote} next")
+                    self.assertEqual(self.deps.redact_urls(actual), actual)
+        self.assertEqual(self.deps.redact_urls("https://example.invalid/path'"),
+                         "https://example.invalid/path'")
+
+    def test_apostrophe_credentials_never_reach_json_or_html(self):
+        secret = "SYNTHETIC_BEFORE'SYNTHETIC_AFTER"
+        url = f"https://user:{secret}@packages.invalid/archive?token={secret}#{secret}"
+        self.write(".npmrc", "registry=" + url + "\n")
+        self.write("package.json", json.dumps({"dependencies": {"fixture": url}}))
+        self.write("composer.json", json.dumps({"repositories": [{"type": "vcs", "url": url}]}))
+        result = self.deps.scan(self.root, False)
+        self.assertTrue(any(f["location"].startswith(".npmrc:") for f in result["findings"]))
+        self.assertTrue(any("fetched outside the registry" in f["title"] for f in result["findings"]))
+        self.assertTrue(any("composer repository" in f["title"] for f in result["findings"]))
+        data = self.report(result["findings"])
+        self.renderer.attach_sources(data, self.root)
+        outputs = [json.dumps(result)]
+        for lang in ("ja", "en"):
+            for render in (self.renderer.render_dashboard, self.renderer.render_assessment_html):
+                outputs.append(render(data, self.renderer.LABELS[lang], lang))
+        for output in outputs:
+            self.assertNotIn("SYNTHETIC_BEFORE", output)
+            self.assertNotIn("SYNTHETIC_AFTER", output)
+
+    def test_apostrophe_urls_are_sanitized_in_references_and_history(self):
+        secret = "SYNTHETIC_BEFORE'SYNTHETIC_AFTER"
+        url = f"https://user:{secret}@advisories.invalid/fixture?key={secret}#{secret}"
+        c = self.collector()
+        lock = self.write("package-lock.json")
+        self.deps.vuln(c, "high", "fixture", "1", ["GHSA-FIXTURE"], url, lock, "fixture",
+                       refs=[{"url": url, "title": url}])
+        self.assertTrue(c.findings[0]["references"])
+        self.assertEqual(c.findings[0]["references"][0]["url"], "https://advisories.invalid/fixture")
+        generated = json.dumps(c.findings)
+        path = self.base / "findings.json"
+        old = copy.deepcopy(c.findings[0])
+        old["validation"] = {"verdict": "Valid", "method": "review", "evidence": url}
+        path.write_text(json.dumps({"findings": [old]}), encoding="utf-8")
+        self.deps.merge_into(path, {"findings": c.findings, "not_run": []})
+        merged = json.loads(path.read_text())
+        self.assertIn("previous_validation", merged["findings"][0])
+        for output in (generated, path.read_text()):
+            self.assertNotIn("SYNTHETIC_BEFORE", output)
+            self.assertNotIn("SYNTHETIC_AFTER", output)
+
+    def test_apostrophe_urls_are_sanitized_in_nested_output(self):
+        url = "https://example.invalid/path?token=SYNTHETIC_BEFORE'SYNTHETIC_AFTER"
+        data = {url: [url, {"inventory": url}], "count": 1}
+        expected = {"https://example.invalid/path": ["https://example.invalid/path",
+                    {"inventory": "https://example.invalid/path"}], "count": 1}
+        self.assertEqual(self.deps.safe_output(data), expected)
+        self.assertEqual(self.deps.safe_output(expected), expected)
+
+    def test_source_excerpt_redacts_complete_apostrophe_urls(self):
+        secret = "SYNTHETIC_BEFORE'SYNTHETIC_AFTER"
+        for url in (f"https://user:{secret}@example.invalid/path",
+                    f"https://example.invalid/path?token={secret}",
+                    f"https://example.invalid/path#{secret}"):
+            for quote in ("", "'", '"'):
+                with self.subTest(url=url, quote=quote):
+                    line = f"url = {quote}{url}{quote}"
+                    actual = self.renderer.redact(line)
+                    self.assertEqual(actual, f"url = {quote}https://example.invalid/path{quote}")
+                    self.assertNotIn("SYNTHETIC_BEFORE", actual)
+                    self.assertNotIn("SYNTHETIC_AFTER", actual)
+                    self.assertEqual(self.renderer.redact(actual), actual)
 
     def test_symlink_requirements_never_read_outside_checkout(self):
         outside = self.base / "outside.txt"

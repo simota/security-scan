@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import sys
 import tempfile
 from types import ModuleType
 import unittest
@@ -17,7 +18,8 @@ def import_module(path: Path, name: str) -> ModuleType:
     if spec is None or spec.loader is None:
         raise ImportError(f"Cannot load {path}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    with patch.object(sys, "path", [str(path.parent)] + sys.path):
+        spec.loader.exec_module(module)
     return module
 
 

@@ -20,6 +20,7 @@ import time
 from collections import Counter
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote, urlsplit
+from url_redaction import redact_urls
 
 SEVERITIES = ["High", "Medium", "Low", "Info"]
 CONFIDENCES = ["Confirmed", "Environment-dependent", "Suspected"]
@@ -257,7 +258,6 @@ SENSITIVE_NAMES = {".npmrc", ".yarnrc", ".yarnrc.yml", ".pypirc", ".netrc", ".gi
                    "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"}
 SENSITIVE_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".jks", ".keystore"}
 PRIVATE_KEY_RE = re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----")
-URL_CREDENTIAL_RE = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://)[^/\s'\"<>]+@")
 QUOTED_SECRET_RE = re.compile(
     r"(?i)((?:password|passwd|secret|token|api[_-]?key|private[_-]?key|access[_-]?key|credential)"
     r"[\w.-]*['\"]?\s*(?:=>|:=|[:=])\s*)(['\"])(?:\\.|(?!\2).)*\2")
@@ -272,7 +272,7 @@ def sensitive_path(path):
 
 
 def redact(line):
-    line = URL_CREDENTIAL_RE.sub(lambda m: m.group(1) + "********@", line)
+    line = redact_urls(line)
     line = QUOTED_SECRET_RE.sub(lambda m: m.group(1) + m.group(2) + "********" + m.group(2), line)
     return SECRET_RE.sub(lambda m: m.group(1) + "********", line)
 
