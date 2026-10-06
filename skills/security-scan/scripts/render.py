@@ -384,7 +384,7 @@ def render_assessment_html(data, L, lang):
             items.append(("references", refs_html(f)))
         dl = "".join(f"<dt>{esc(L[k])}</dt><dd>{v}</dd>" for k, v in items)
         return (f"<div class='finding sev-{f['severity']}'><h3>{esc(f['id'])} "
-                f"<span class='badge {f['severity']}'>{esc(f['severity'])}</span> {esc(f['title'])}</h3><dl>{dl}</div>")
+                f"<span class='badge {f['severity']}'>{esc(f['severity'])}</span> {esc(f['title'])}</h3><dl>{dl}</dl></div>")
 
     details = [card(f) for f in fs]
     excluded_html = (f"<h2>{esc(L['excluded'])}</h2>" + "".join(card(f) for f in excluded)) if excluded else ""
