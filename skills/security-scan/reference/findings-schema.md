@@ -42,9 +42,39 @@ python3 scripts/evidence_capture.py <repo> --findings <out>/findings.json <paths
 python3 scripts/findings.py merge <out>/findings.json <scratch>/frag-002.json
 ```
 
-A fragment holds `meta`, `findings`, `evidence`, `perspectives`, `checked_ok`,
-`decisions`, `limitations` and `next_steps`. Records with a known `id` are
-updated key by key; list sections are appended without duplicates. The merge is
+A fragment holds `meta`, `findings`, `evidence`, `test_runs`, `expert`,
+`three_pass`, `evidence_integrity`, `perspectives`, `checked_ok`, `decisions`,
+`limitations` and `next_steps`. First capture source to create the version-2
+assessment pin; only then merge extension profiles or test runs. For example,
+write a new scratch fragment containing `{"evidence_integrity":{"required":true}}`
+or the `three_pass`/`expert` declarations documented in their references, and
+use the same `findings.py merge` command. Run records are observations only;
+the writer never executes their `command` fields.
+
+Merge semantics are explicit:
+
+- `findings`, `evidence` and `test_runs` match by nonblank `id`: existing records
+  are updated key by key; new IDs append. Duplicate IDs within one fragment
+  are refused. Omitted IDs are retained, including exclusions and old runs.
+- `meta`, `expert`, `three_pass` and `evidence_integrity` update their immediate
+  keys. Nested objects and lists replace the whole previous value, rather than
+  merging recursively. To update `expert.spawns` or `three_pass.discovery`,
+  supply the complete new list/object for that field. Other profile fields stay
+  unchanged. An empty list explicitly clears that field where its schema allows.
+- The ordinary `perspectives`, `checked_ok`, `decisions`, `limitations` and
+  `next_steps` lists append without duplicates.
+
+The combined result must have valid shapes and evidence/run references. An
+initial expert profile needs its E0 `version`, `mode`, `host` and `consent`;
+later phase lists can be absent while those gates remain held. Passing the
+writer does not mean three-pass or expert completion. Completion still requires
+their audits. `schema_version`, `assessment` and `meta.commit` belong exclusively
+to capture. Workflow journals, their seals and internal/derived fields cannot
+be supplied in fragments; use `verification_workflow.py` for journal changes.
+Ordinary profile, evidence, run or finding edits leave the journal untouched,
+so relevant input changes become stale instead of silently resealing old work.
+
+The merge is
 refused (exit 1) when a finding's `title`, `actor`, `request`, `impact` or `fix`
 holds a literal attack string — describe the weakness and use a placeholder for
 the value — and nothing is written unless the merged file passes the schema
@@ -154,6 +184,26 @@ a path whose checked-out bytes differ), copies it to `evidence/source/<path>`
 beside `findings.json`, sets `schema_version`, `assessment` and `meta.commit`,
 appends one `SRC-NNN` record per new path and prints the path → ID map. Edit
 the generic `summary` into the sanitized observation when it matters.
+
+Capture requires stable, owned local inputs and POSIX no-follow file operations.
+Caller-selected repository/output roots are canonicalized once, supporting
+aliases such as macOS `/tmp`; child paths must not contain symlinks, hardlinks,
+non-regular files, traversal, backslashes, control characters or Git/URL-style
+colon selectors. Both the checkout and commit entry must be regular files.
+FIFO and device inputs are refused without reading their contents. Git object
+size is checked before its body is read, and streamed output is separately
+bounded. Limits are 16 MiB per file/object, 64 MiB cumulative source/artifact
+reads, 512 paths/evidence records, 5 seconds per Git command and 30 seconds
+overall. The findings record has a separate 16 MiB size bound. Unsupported
+inputs fail instead of producing verification credit; no source is executed.
+
+Repeated capture verifies the existing record's pin, path and digest plus the
+actual artifact bytes. A missing or changed artifact is an error, not a no-op
+success. Output children are created with no-follow checks, existing files are
+never truncated, and findings are atomically replaced only after all captures
+succeed. Existing clean assessment metadata and workflow journals are preserved.
+Keep files unchanged during capture: these checks are not a hostile-filesystem
+sandbox or an atomic snapshot of an entire repository.
 
 `assessment` is required in version 2:
 
