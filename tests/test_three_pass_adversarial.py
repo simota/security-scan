@@ -199,7 +199,7 @@ class ThreePassIntegrityAdversarialTests(_ThreePassFixture, unittest.TestCase):
         super().setUp()
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         self.repository = self.root / "repository"
         self.repository.mkdir()
         self.artifacts = self.root / "artifacts"

@@ -259,7 +259,7 @@ class ExpertAuditIntegrityTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="expert-integrity-")
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.repo, self.out = self.root / "repo", self.root / "out"
         self.repo.mkdir()
         (self.out / "evidence").mkdir(parents=True)

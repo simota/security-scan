@@ -25,7 +25,7 @@ class ReproductionTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.findings = self.root / "findings.json"
         self.findings.write_bytes((ROOT / "examples/findings.workflow.sample.json").read_bytes())
         self.plan = json.loads((ROOT / "examples/reproduction.plan.sample.json").read_text())

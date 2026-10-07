@@ -34,7 +34,7 @@ class ReproductionAdversarialTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.findings = self.root / "findings.json"
         self.data = json.loads((ROOT / "examples/findings.workflow.sample.json").read_text())
         self.findings.write_text(json.dumps(self.data), encoding="utf-8")

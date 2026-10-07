@@ -26,7 +26,7 @@ class EvidenceAdversarialTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="evidence-adversarial-")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         self.repo, self.artifacts = self.root / "repository", self.root / "artifacts"
         self.repo.mkdir()
         self.artifacts.mkdir()

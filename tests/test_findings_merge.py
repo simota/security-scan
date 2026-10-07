@@ -24,7 +24,7 @@ class FindingsMergeTests(unittest.TestCase):
         cls.tool = import_module(SCRIPTS / "findings.py", "tested_findings_merge")
 
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="security-scan-merge-"))
+        self.tmp = Path(tempfile.mkdtemp(prefix="security-scan-merge-")).resolve()
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.out = self.tmp / "findings.json"
 

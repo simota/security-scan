@@ -89,7 +89,7 @@ class ReportOutputTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory(prefix="security-scan-reports-")
         self.addCleanup(tmp.cleanup)
-        self.root = Path(tmp.name)
+        self.root = Path(tmp.name).resolve()
 
     def finding(self, id="F-001", severity="High", confidence="Confirmed",
                 status="Open", verdict="Unverified", **fields):
