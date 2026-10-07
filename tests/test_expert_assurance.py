@@ -150,6 +150,33 @@ class ExpertActorAssuranceTests(unittest.TestCase):
             dict(self.data["expert"]["spawns"][-1], id="S-extra", actor=" QA-1 ", role="persona"))
         self.assert_held("actor_reused_across_roles:qa-1", "qa_not_independent")
 
+    def test_aliases_cannot_supply_independent_recon_or_severity_votes(self):
+        mutations = (
+            ("recon_not_redundant", lambda record: record["recon"][1].update(actor=" RECON-A ")),
+            ("severity_not_double_rated:F-001", lambda record: record["ratings"][1].update(rater=" RATER-1 ")),
+        )
+        for gap, mutate in mutations:
+            with self.subTest(gap=gap):
+                self.data = fixture.complete_data()
+                mutate(self.data["expert"])
+                self.assert_held(gap)
+
+    def test_normalized_actor_cannot_supply_cross_engine_independence(self):
+        record = self.data["expert"]
+        record["consent"]["engines"].append("codex")
+        record["preflight"].append({"engine": "codex", "exit": 0, "record": "run/gate.md"})
+        entry = next(spawn for spawn in record["spawns"] if spawn["actor"] == "disc-entry")
+        record["spawns"].append(dict(entry, id="S-extra", actor=" DISC-ENTRY ", engine="codex"))
+        for row in record["discovery"]:
+            row["actor"] = "disc-entry" if row["angle"] == "entry-first" else " DISC-ENTRY "
+        self.assert_held("actor_reused_across_roles:disc-entry", "cell_not_redundant:order-detail")
+
+    def test_duplicate_persona_record_is_not_extra_reception_credit(self):
+        reception = self.data["expert"]["reception"]
+        reception.append(copy.deepcopy(reception[0]))
+        with self.assertRaisesRegex(ValueError, "duplicate persona"):
+            expert.derive_expert(self.data)
+
 
 class ExpertPanelAssuranceTests(unittest.TestCase):
     def setUp(self):
@@ -219,6 +246,13 @@ class ExpertPanelAssuranceTests(unittest.TestCase):
         state = expert.derive_expert(self.data)
         self.assertEqual(state["status"], "complete")
         self.assertEqual(state["counts"]["skeptic_unproven"], 1)
+
+    def test_panel_evidence_rejects_a_different_worktree_pin(self):
+        record = dict(self.data["evidence"][0], id="other-worktree", diff_sha256="a" * 64)
+        self.data["evidence"].append(record)
+        self.data["expert"]["panels"][0]["skeptics"][0]["evidence_ids"] = [record["id"]]
+        with self.assertRaisesRegex(ValueError, "required commit/worktree pin"):
+            expert.derive_expert(self.data)
 
 
 class ExpertAuditIntegrityTests(unittest.TestCase):
@@ -327,7 +361,7 @@ class ExpertAuditIntegrityTests(unittest.TestCase):
         code, result, _ = self.audit_cli()
         self.assertEqual((code, result["status"]), (3, "held"))
 
-    def test_evidence_used_only_by_skeptics_also_requires_fresh_integrity(self):
+    def add_panel_only_source(self):
         record = dict(self.data["evidence"][0], id="panel-only-source",
                       location="evidence/panel-only-source.txt")
         payload = (self.out / self.data["evidence"][0]["location"]).read_bytes()
@@ -336,6 +370,10 @@ class ExpertAuditIntegrityTests(unittest.TestCase):
         self.data["expert"]["panels"][0]["skeptics"][0]["evidence_ids"] = [record["id"]]
         checked = evidence_integrity.verify_evidence(self.data, self.out, repository=self.repo)
         complete_round(self.data, integrity=checked)
+        return record
+
+    def test_evidence_used_only_by_skeptics_also_requires_fresh_integrity(self):
+        record = self.add_panel_only_source()
         self.save_and_render()
         self.assertEqual(self.audit_cli()[0], 0)
         (self.out / record["location"]).write_text("Changed panel-only bytes\n")
@@ -343,6 +381,28 @@ class ExpertAuditIntegrityTests(unittest.TestCase):
         self.assertEqual((code, result["status"]), (3, "held"))
         self.assertIn("skeptic_evidence_integrity_failed:F-001:skeptic-defense", stderr)
         self.assertNotIn("three_pass_incomplete", stderr)
+
+    def test_partial_integrity_context_cannot_cover_panel_only_evidence(self):
+        record = self.add_panel_only_source()
+        selected = [item["id"] for item in self.data["evidence"] if item["id"] != record["id"]]
+        checked = evidence_integrity.verify_evidence(self.data, self.out, repository=self.repo,
+                                                    evidence_ids=selected)
+        state = expert.derive_expert(self.data, integrity=checked)
+        self.assertEqual(state["status"], "held")
+        self.assertIn("skeptic_evidence_integrity_failed:F-001:skeptic-defense", state["gaps"])
+        self.assertNotIn("three_pass_incomplete", state["gaps"])
+
+    def test_observed_panel_failure_holds_without_required_integrity(self):
+        record = self.add_panel_only_source()
+        self.data.pop("evidence_integrity")
+        complete_round(self.data)
+        self.assertEqual(expert.derive_expert(self.data)["status"], "complete")
+        (self.out / record["location"]).unlink()
+        checked = evidence_integrity.verify_evidence(self.data, self.out, repository=self.repo)
+        state = expert.derive_expert(self.data, integrity=checked)
+        self.assertEqual(state["status"], "held")
+        self.assertIn("skeptic_evidence_integrity_failed:F-001:skeptic-defense", state["gaps"])
+        self.assertNotIn("three_pass_incomplete", state["gaps"])
 
     def test_participant_qa_holds_with_fresh_integrity_and_rendered_report(self):
         complete_round(self.data, {"falsification": "qa-1"}, integrity=self.checked)

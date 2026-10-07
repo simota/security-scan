@@ -111,6 +111,14 @@ class FindingsExtensionTests(unittest.TestCase):
             self.assertEqual(self.merge(fragment), 2)
             self.assertEqual(self.out.read_bytes(), before)
 
+    def test_unknown_expert_evidence_cannot_overwrite_the_report(self):
+        self.out.write_text(json.dumps(expert_fixture.complete_data()))
+        before = self.out.read_bytes()
+        panels = copy.deepcopy(self.data()["expert"]["panels"])
+        panels[0]["skeptics"][0]["evidence_ids"] = ["missing-evidence"]
+        self.assertEqual(self.merge({"expert": {"panels": panels}}), 2)
+        self.assertEqual(self.out.read_bytes(), before)
+
     def remap(self, value, mapping):
         if isinstance(value, dict):
             return {key: [mapping.get(item, item) for item in item_value] if key == "evidence_ids"
