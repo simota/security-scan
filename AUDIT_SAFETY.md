@@ -88,11 +88,15 @@ Python 3.11+ (`tomllib`); Python 3.9/3.10 remain usable, but unresolved ownershi
 is recorded in `not_run`. Implicit Cargo path-dependency membership, explicit
 `package.workspace` pointers and pnpm YAML membership need manual validation.
 
-Shell interpolation checks inspect ordinary block-style `steps[*].run` scalars,
-not neighboring `env`/`with` values or examples inside non-run scalar blocks.
-The parser is a conservative YAML subset, not a complete YAML implementation.
-Recognized aliases, tags and flow-style step structures are marked incomplete
-rather than treated as proof that the workflow is safe.
+Shell interpolation checks inspect each ordinary block-style `steps[*].run`
+scalar separately, including multiline expressions and static dot/bracket access
+inside functions or wildcard paths. Neighboring `env`/`with` values and examples
+inside non-run scalar blocks are not direct shell interpolation. Dynamic event
+selectors, unresolved event subtrees and quoted YAML escapes are recorded in
+`not_run` when the scanner cannot establish their meaning. The parser is a
+conservative YAML subset, not a complete YAML implementation. Recognized aliases,
+tags and flow-style step structures are marked incomplete rather than treated as
+proof that the workflow is safe.
 
 ## Regression tests
 
