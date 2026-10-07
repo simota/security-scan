@@ -9,10 +9,65 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills/security-scan/scripts"))
 import render
+import deps_scan
 from url_redaction import redact_urls
 
 
 class UrlRedactionTests(unittest.TestCase):
+    def test_no_path_lock_urls_keep_only_hosts_in_scans_and_reports(self):
+        markers = ("SYNTHETIC_LOCK_USERINFO", "SYNTHETIC_LOCK_QUERY", "SYNTHETIC_LOCK_FRAGMENT")
+        urls = [
+            "https://mirror.invalid?token=" + markers[1] + "#" + markers[2],
+            "https://mirror.invalid#" + markers[2],
+            "https://user:" + markers[0] + "@mirror.invalid:8443?token=" + markers[1],
+            "https://user:" + markers[0] + "@[::1]:8443?token=" + markers[1] + "#" + markers[2],
+        ]
+        for filename in ("package-lock.json", "npm-shrinkwrap.json", "yarn.lock"):
+            for url in urls:
+                with self.subTest(filename=filename, url=url), tempfile.TemporaryDirectory() as directory:
+                    base = Path(directory)
+                    repository = base / "repository"
+                    repository.mkdir()
+                    quoted = json.dumps(url)
+                    text = ('fixture@1.0.0:\n  resolved ' + quoted + '\n' if filename == "yarn.lock"
+                            else '{"dependencies":{"fixture":{"resolved":' + quoted + '}}}')
+                    (repository / filename).write_text(text, encoding="utf-8")
+                    result = deps_scan.scan(repository, False)
+                    host_findings = [f for f in result["findings"] if "non-default host" in f["title"]]
+                    self.assertEqual(len(host_findings), 1)
+                    host = "::1" if "[::1]" in url else "mirror.invalid"
+                    self.assertTrue(host_findings[0]["title"].endswith("host " + host))
+                    for marker in markers:
+                        self.assertNotIn(marker, json.dumps(result))
+                    findings = base / "findings.json"
+                    findings.write_text(json.dumps({
+                        "meta": {"project": "Synthetic lock URLs", "date": "2026-10-07"},
+                        "findings": result["findings"],
+                    }), encoding="utf-8")
+                    data = render.load(findings)
+                    render.attach_sources(data, repository)
+                    for language in ("ja", "en"):
+                        for renderer in (render.render_dashboard, render.render_assessment_html):
+                            html = renderer(data, render.LABELS[language], language)
+                            self.assertIn(host, html)
+                            for marker in markers:
+                                self.assertNotIn(marker, html)
+
+    def test_lock_url_host_parsing_handles_json_escapes_and_invalid_authorities(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lock = root / "package-lock.json"
+            lock.write_text('{"resolved":"https:\\/\\/REGISTRY.NPMJS.ORG?token=SYNTHETIC_QUERY"}',
+                            encoding="utf-8")
+            result = deps_scan.scan(root, False)
+            self.assertFalse(any("non-default host" in f["title"] for f in result["findings"]))
+            self.assertNotIn("SYNTHETIC_QUERY", json.dumps(result))
+            for authority in ("[broken", "mirror.invalid:bad", "mirror.invalid%3Ftoken=SYNTHETIC_QUERY"):
+                lock.write_text(json.dumps({"resolved": "https://" + authority}), encoding="utf-8")
+                result = deps_scan.scan(root, False)
+                self.assertTrue(any(n["tool"] == "lockfile URL scan" for n in result["not_run"]))
+                self.assertNotIn("SYNTHETIC_QUERY", json.dumps(result))
+
     def test_adjacent_quoted_urls_do_not_leak_later_credentials(self):
         marker = "SYNTHETIC_SECOND_CREDENTIAL"
         for separator in ("','", "';'", "'),('", ",", " "):

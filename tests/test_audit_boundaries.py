@@ -68,7 +68,82 @@ class AuditBoundaryTests(unittest.TestCase):
         for kind in ("prod", "dev", "optional", "peer"):
             self.assertIn("--include=" + kind, argv)
         self.assertIn("--ignore-scripts", argv)
+        self.assertIn("--workspaces=null", argv)
+        self.assertIn("--package-lock=true", argv)
+        self.assertIn("--prefix=" + str(self.root), argv)
         self.assertFalse(c.not_run)
+
+    def test_npm_shared_workspaces_are_explicitly_incomplete_without_invoking_npm(self):
+        for version in (1, 2, 3):
+            for config in ("", "workspace=safe-workspace\n", "workspaces=false\n"):
+                with self.subTest(version=version, config=config):
+                    payload = {"lockfileVersion": version, "packages": {
+                        "": {"workspaces": ["apps/*"], "dependencies": {"root-dep": "1.0.0"}},
+                        "apps/safe": {"name": "safe-workspace", "dependencies": {"safe-dep": "1.0.0"}},
+                        "node_modules/safe-workspace": {"link": True, "resolved": "apps/safe"},
+                        "node_modules/root-dep": {"version": "1.0.0"},
+                        "node_modules/safe-dep": {"version": "1.0.0"}}}
+                    if version == 1:
+                        payload.pop("packages")
+                        payload["dependencies"] = {
+                            "root-dep": {"version": "1.0.0"},
+                            "safe-workspace": {"version": "file:apps/safe", "dependencies": {
+                                "safe-dep": {"version": "1.0.0"}}}}
+                    lock = self.write("package-lock.json", payload)
+                    self.write("package.json", {"workspaces": ["apps/*"]})
+                    self.write(".npmrc", config)
+                    c = self.collector()
+                    with patch.dict(os.environ, {"NPM_CONFIG_WORKSPACE": "safe-workspace",
+                                                 "npm_config_workspaces": "false"}), \
+                         patch.object(self.deps, "audit_osv", return_value=set()), \
+                         patch.object(self.deps, "run") as run:
+                        self.deps.audits(c, self.root, [lock])
+                    run.assert_not_called()
+                    self.assertTrue(any(n["tool"] == "npm audit" and "whole-lock coverage" in n["reason"]
+                                        for n in c.not_run))
+
+    def test_npm_lock_workspace_metadata_is_checked_without_project_manifest(self):
+        for packages in ({"": {"workspaces": ["apps/*"]}},
+                         {"apps/safe": {"name": "safe-workspace", "version": "1.0.0"}},
+                         {"node_modules/safe-workspace": {"link": True, "resolved": "apps/safe"}}):
+            with self.subTest(packages=packages):
+                lock = self.write("npm-shrinkwrap.json", {"lockfileVersion": 3, "packages": packages})
+                c = self.collector()
+                with patch.object(self.deps, "run") as run:
+                    self.deps.audit_npm(c, self.root, lock)
+                run.assert_not_called()
+                self.assertTrue(any("whole-lock coverage" in n["reason"] for n in c.not_run))
+
+    def test_npm_legacy_linked_inputs_are_explicitly_incomplete(self):
+        lock = self.write("package-lock.json", {"lockfileVersion": 1, "dependencies": {
+            "fixture": {"version": "1.0.0", "dependencies": {
+                "linked-fixture": {"version": "file:apps/fixture"}}}}})
+        c = self.collector()
+        with patch.object(self.deps, "run") as run:
+            self.deps.audit_npm(c, self.root, lock)
+        run.assert_not_called()
+        self.assertTrue(any("whole-lock coverage" in n["reason"] for n in c.not_run))
+
+    def test_osv_covered_npm_workspace_needs_no_fallback(self):
+        lock = self.write("package-lock.json", {"lockfileVersion": 3, "packages": {
+            "": {"workspaces": ["apps/*"]}}})
+        self.write("package.json", {"workspaces": ["apps/*"]})
+        c = self.collector()
+        with patch.object(self.deps, "audit_osv", return_value={lock}), patch.object(self.deps, "run") as run:
+            self.deps.audits(c, self.root, [lock])
+        run.assert_not_called()
+        self.assertFalse(c.not_run)
+
+    def test_npm_invalid_scope_metadata_fails_closed(self):
+        for content in ("[]", '{"packages": []}', '{"packages": {"node_modules/example": null}}',
+                        '{"dependencies": [1]}', '{"dependencies": {"example": null}}'):
+            with self.subTest(content=content):
+                lock = self.write("package-lock.json", content)
+                c = self.collector()
+                with patch.object(self.deps, "run") as run:
+                    self.deps.audit_npm(c, self.root, lock)
+                run.assert_not_called()
+                self.assertTrue(c.not_run)
 
     def test_composer_project_and_environment_exclusions_are_not_inherited(self):
         lock = self.write("composer.lock", {"packages": [], "packages-dev": []})
