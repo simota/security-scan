@@ -3,7 +3,11 @@
 This validates submitted observations. It neither discovers vulnerabilities nor
 runs reviewers, recorded commands, application code, or network requests.
 """
+import re
+
 from verification import CLAIMS, _Validator, integrity_state
+
+CODE_ID = re.compile(r"^F-\d{3}$")
 
 REASONS = (
     "three_pass_discovery_incomplete", "three_pass_candidates_untracked",
@@ -105,8 +109,9 @@ def discovery_state(data, integrity=None, error_type=ValueError):
     checked = {row["coverage_id"] for row in checks if row["status"] != "not_checked"}
     planned = {row["id"] for row in policy["coverage"]}
     tracked = {ref for row in checks if row["status"] == "checked" for ref in row["finding_ids"]}
+    code_findings = [f for f in data["findings"] if CODE_ID.match(str(f.get("id", "")))]
     missing = sorted(planned - checked)
-    untracked = sorted({finding["id"] for finding in data["findings"]} - tracked)
+    untracked = sorted({finding["id"] for finding in code_findings} - tracked)
     evidence_ids = sorted({ref for row in checks for ref in row["evidence_ids"]})
     reasons = (["three_pass_discovery_incomplete"] if missing else [])
     if untracked:
@@ -170,14 +175,15 @@ def derive_three_pass(data, error_type=ValueError, integrity=None):
     if discovery is None:
         return {"opted_in": False, "status": "not_requested", "reasons": [], "passes": [], "findings": {}}
     from verification_workflow import derive_workflow
-    workflows = {finding["id"]: derive_workflow(data, finding, error_type, integrity) for finding in data["findings"]}
+    code_findings = [f for f in data["findings"] if CODE_ID.match(str(f.get("id", "")))]
+    workflows = {finding["id"]: derive_workflow(data, finding, error_type, integrity) for finding in code_findings}
     reasons = list(discovery["reasons"])
     if not workflows:
         reasons.append("three_pass_no_candidates")
     if any(state["status"] != "complete" for state in workflows.values()):
         reasons.append("three_pass_workflows_incomplete")
     rows, accepted_rows = [], []
-    for finding in data["findings"]:
+    for finding in code_findings:
         state = workflows[finding["id"]]
         if state["status"] != "stale" and any(stage["stage"] == "falsification" for stage in state["stages"]):
             observed = validate_coverage_checks(data, finding.get("verification", {}).get("coverage_checks", []), error_type)
