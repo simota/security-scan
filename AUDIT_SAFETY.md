@@ -52,11 +52,22 @@ safe. `Cargo.lock` requires OSV coverage; otherwise the Cargo audit is explicitl
 incomplete. No Cargo lockfile generation or target toolchain invocation is used
 as a fallback.
 
-npm uses `--package-lock-only`, explicitly includes prod/dev/optional/peer
-packages and sets `--ignore-scripts`. This prevents production-only `omit`
-settings from silently narrowing the dependency kinds under review. Registry
-configuration is still used; this is not a general sandbox for npm or a guarantee
-that a custom registry provides complete advisories.
+npm uses `--package-lock-only` and `--package-lock=true`, explicitly includes
+prod/dev/optional/peer packages and sets `--ignore-scripts`. This prevents
+production-only `omit` settings from silently narrowing the dependency kinds
+under review. The fallback is limited to single-project locks: workspace
+declarations, workspace lock entries and linked-package entries require OSV and
+are explicitly incomplete without it. npm has no supported CLI reset for
+inherited workspace selection, and disabling workspaces on a shared lock would
+silently omit members. Single-project invocations pin `--prefix` to the lock's
+directory and reset the workspace mode with `--workspaces=null`, avoiding the
+root-only dependency filter applied by `--workspaces=false`. An inherited
+workspace selection cannot match members in these validated single-project
+inputs and fails the audit rather than narrowing it. Registry/auth configuration
+is still used and never copied into diagnostic text. This is not a general
+sandbox for npm or a guarantee that a custom registry provides complete
+advisories. A version that rejects the required flags is a failed audit, not a
+clean result.
 
 Composer audits a temporary copy of `composer.lock` with an auditor-owned
 manifest and an empty `COMPOSER_HOME`. The scanner strips inherited `COMPOSER`
@@ -77,11 +88,15 @@ Python 3.11+ (`tomllib`); Python 3.9/3.10 remain usable, but unresolved ownershi
 is recorded in `not_run`. Implicit Cargo path-dependency membership, explicit
 `package.workspace` pointers and pnpm YAML membership need manual validation.
 
-Shell interpolation checks inspect ordinary block-style `steps[*].run` scalars,
-not neighboring `env`/`with` values or examples inside non-run scalar blocks.
-The parser is a conservative YAML subset, not a complete YAML implementation.
-Recognized aliases, tags and flow-style step structures are marked incomplete
-rather than treated as proof that the workflow is safe.
+Shell interpolation checks inspect each ordinary block-style `steps[*].run`
+scalar separately, including multiline expressions and static dot/bracket access
+inside functions or wildcard paths. Neighboring `env`/`with` values and examples
+inside non-run scalar blocks are not direct shell interpolation. Dynamic event
+selectors, unresolved event subtrees and quoted YAML escapes are recorded in
+`not_run` when the scanner cannot establish their meaning. The parser is a
+conservative YAML subset, not a complete YAML implementation. Recognized aliases,
+tags and flow-style step structures are marked incomplete rather than treated as
+proof that the workflow is safe.
 
 ## Regression tests
 
@@ -92,9 +107,15 @@ python3 -m unittest discover -s tests -p 'test_audit_boundaries.py' -v
 # Optional real-browser smoke test (Playwright + installed Chrome/Chromium):
 SECURITY_SCAN_BROWSER_TEST=1 make test
 # Set CHROME=/absolute/path/to/chrome if it is not on PATH.
+# Optional trusted-npm lock parser test (no advisory queries or network):
+python3 scripts/ci/check_npm_audit_scope.py -v
 ```
 
-All advisory subprocesses are mocked. The optional browser test aborts network
+Default tests mock advisory subprocesses. The optional npm test invokes a
+trusted installed npm, mocks its advisory layer, blocks network calls and
+checks the actual package payload for lockfile versions 1, 2 and 3. It also
+checks that inherited workspace selectors fail before advisory I/O.
+The optional browser test aborts network
 requests and renders only an inert local fixture. It verifies that HTML-like
 finding titles and source snippets survive JSON decoding and that the dashboard
 actually draws. The default tests require only Python's standard library.

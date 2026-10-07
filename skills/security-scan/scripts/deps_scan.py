@@ -30,6 +30,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from urllib.parse import urlsplit
 from url_redaction import redact_urls
 
 SKIP_DIRS = {".git", "node_modules", "vendor", ".venv", "venv", "dist", "build",
@@ -271,14 +272,14 @@ def matching_lockfiles(c, manifest):
     return []
 
 
-def workflow_run_lines(c, path, text):
-    """Read ordinary block-style steps[*].run scalars, retaining source lines.
+def workflow_run_blocks(c, path, text):
+    """Read separate block-style steps[*].run scalars with source line numbers.
 
     This is a conservative YAML subset, not a general YAML parser. Aliases,
     flow collections and unsupported forms are explicitly incomplete.
     """
     mapping = re.compile(r'''^( *)(- +)?(?:([A-Za-z0-9_.-]+)|"([A-Za-z0-9_.-]+)"|'([A-Za-z0-9_.-]+)')\s*:\s*(.*)$''')
-    stack, block = [], None
+    stack, block, run_lines = [], None, []
     if text.lstrip().startswith(("{", "[")):
         incomplete(c, "workflow run scan", path, "flow-style workflow requires manual review")
     for number, line in enumerate(text.splitlines(), 1):
@@ -287,9 +288,12 @@ def workflow_run_lines(c, path, text):
             level, is_run = block
             if not line.strip() or indent > level:
                 if is_run:
-                    yield number, line
+                    run_lines.append((number, line))
                 continue
             block = None
+            if run_lines:
+                yield run_lines
+                run_lines = []
         stripped = line.lstrip()
         if not stripped or stripped.startswith("#"):
             continue
@@ -307,6 +311,9 @@ def workflow_run_lines(c, path, text):
                 continue
         if "\t" in line[:len(line) - len(stripped)] or stripped.startswith(("<<:", "*", "&")):
             incomplete(c, "workflow run scan", path, "alias, merge or indentation requires manual review")
+        quoted_key = re.match(r'^(?:- +)?("(?:[^"\\]|\\.)*")\s*:', stripped)
+        if quoted_key and "\\" in quoted_key[1]:
+            incomplete(c, "workflow run scan", path, "escaped mapping key requires manual review")
         match = mapping.match(line)
         if not match:
             continue
@@ -320,7 +327,7 @@ def workflow_run_lines(c, path, text):
                 or value.startswith(("{", "[")) and (key == "jobs" or stack and stack[-1][1] == "jobs")):
             incomplete(c, "workflow run scan", path, "non-block steps or tagged/aliased values require manual review")
         if is_run:
-            yield number, value
+            run_lines.append((number, value))
         # Skip the contents of every scalar block, not just run: script examples
         # in with/env values must not be mistaken for step definitions.
         if is_run or re.match(r"^[|>][0-9+-]*(?:\s|$)", value):
@@ -328,6 +335,95 @@ def workflow_run_lines(c, path, text):
         elif value.startswith(("'", '"')) and not value.rstrip().endswith(value[0]):
             block = (level, False)
         stack.append((level, key))
+    if run_lines:
+        yield run_lines
+
+def workflow_run_lines(c, path, text):
+    """Compatibility iterator over the individual lines of each run scalar."""
+    for block in workflow_run_blocks(c, path, text):
+        yield from block
+
+def workflow_expressions(c, path, script):
+    """Extract expressions across lines, respecting quoted strings and braces."""
+    cursor = 0
+    while True:
+        start = script.find("${{", cursor)
+        if start < 0:
+            return
+        index, quoted = start + 3, False
+        while index < len(script):
+            if script[index] == "'":
+                if quoted and script[index:index + 2] == "''":
+                    index += 2  # GitHub expressions escape a quote by doubling it.
+                    continue
+                quoted = not quoted
+            elif not quoted and script[index:index + 2] == "}}":
+                yield start, script[start + 3:index]
+                cursor = index + 2
+                break
+            index += 1
+        else:
+            incomplete(c, "workflow run scan", path, "unterminated expression requires manual review")
+            return
+
+def untrusted_workflow_expression(c, path, expression):
+    """Find event reads inside functions and static dot/index access.
+
+    This does not evaluate expressions. Literal strings are inert; dynamic
+    property selectors whose source cannot be resolved are explicitly incomplete.
+    """
+    tokens = re.findall(r"'(?:[^']|'')*'|[A-Za-z_][A-Za-z0-9_-]*|[0-9]+|[^\s]", expression)
+    events = {"issue", "pull_request", "comment", "review", "head_commit", "commits"}
+    fields = {"title", "body", "message", "name", "ref", "label"}
+    safe_event_paths = {
+        ("event", "number"),
+        ("event", "issue", "id"), ("event", "issue", "number"),
+        ("event", "pull_request", "id"), ("event", "pull_request", "number"),
+        ("event", "comment", "id"), ("event", "review", "id"),
+    }
+    untrusted = False
+    for index, token in enumerate(tokens):
+        if token.lower() != "github" or index and tokens[index - 1] == ".":
+            continue
+        parts, dynamic, cursor = [], False, index + 1
+        while cursor < len(tokens):
+            if tokens[cursor] == "." and cursor + 1 < len(tokens):
+                part = tokens[cursor + 1]
+                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*|\*", part):
+                    break
+                parts.append(part.lower())
+                cursor += 2
+            elif tokens[cursor] == "[":
+                end, depth = cursor + 1, 1
+                while end < len(tokens) and depth:
+                    depth += (tokens[end] == "[") - (tokens[end] == "]")
+                    end += 1
+                if depth:
+                    incomplete(c, "workflow run scan", path, "unclosed property selector requires manual review")
+                    break
+                selector = tokens[cursor + 1:end - 1]
+                if len(selector) == 1 and selector[0].startswith("'"):
+                    parts.append(selector[0][1:-1].replace("''", "'").lower())
+                elif len(selector) == 1 and selector[0].isdigit():
+                    parts.append(selector[0])
+                else:
+                    parts.append("?")
+                    dynamic = True
+                cursor = end
+            else:
+                break
+        risky = (not parts or parts[0] in {"head_ref", "*"}
+                 or parts[0] == "event" and (len(parts) == 1
+                    or parts[1] in events | {"*"} and (len(parts) == 2 or any(p in fields for p in parts[2:]))))
+        untrusted = untrusted or risky
+        if dynamic and not risky:
+            incomplete(c, "workflow run scan", path, "dynamic github property selector requires manual review")
+        elif parts and parts[0] == "event" and not risky and tuple(parts) not in safe_event_paths:
+            # An object/array read (for example toJSON(issue.labels)) can expose
+            # nested attacker-controlled strings. Do not treat unrecognized
+            # subtrees as safe scalars without knowing their event schema.
+            incomplete(c, "workflow run scan", path, "unresolved github event property source requires manual review")
+    return untrusted
 
 
 def isolated_composer_audit(c, root, lock, exe):
@@ -404,11 +500,32 @@ def check_npm(c, p):
 
 def check_npm_lock(c, p):
     text = read(p)
-    hosts = set(re.findall(r'"resolved":\s*"https?://([^/"]+)', text)) | \
-        set(re.findall(r'^\s+resolved\s+"https?://([^/"]+)', text, re.M))
+    # Parse the complete quoted URL before discarding its scheme. Otherwise an
+    # empty-path URL can turn its query/fragment into bare "host" text that the
+    # final URL sanitizer no longer recognizes.
+    hosts = {}
+    resolved = re.compile(r'"resolved"\s*:\s*("(?:[^"\\]|\\.)*")'
+                          r'|^\s+resolved\s+("(?:[^"\\]|\\.)*")', re.M)
+    for match in resolved.finditer(text):
+        try:
+            url = json.loads(match[1] or match[2])
+            parsed = urlsplit(url)
+            if parsed.scheme.lower() not in ("http", "https"):
+                continue
+            host = parsed.hostname
+            parsed.port  # Reject malformed ports/authorities before reporting.
+            if (not host or any(ch.isspace() for ch in url)
+                    or "\\" in parsed.netloc
+                    or not re.fullmatch(r"[a-zA-Z0-9._:-]+", host)):
+                raise ValueError("invalid resolved URL host")
+        except (ValueError, UnicodeError):
+            incomplete(c, "lockfile URL scan", p, "invalid resolved URL; host requires manual review")
+            continue
+        if host not in hosts:
+            hosts[host] = text.count("\n", 0, match.start()) + 1
     default = {"registry.npmjs.org", "registry.yarnpkg.com"}
-    for h in sorted(hosts - default):
-        c.add("Low", f"lockfile resolves packages from non-default host {h.rsplit('@', 1)[-1]}", p, line_of(text, h),
+    for h in sorted(hosts.keys() - default):
+        c.add("Low", f"lockfile resolves packages from non-default host {h}", p, hosts[h],
               impact="Packages come from a registry outside the public one; confirm it is trusted",
               fix="Confirm the host is an approved internal mirror", confidence="Suspected")
     if "integrity" not in text and p.name == "package-lock.json":
@@ -523,12 +640,25 @@ def check_workflow(c, p):
                   confidence="Suspected",
                   impact="Runs with repository secrets on events from forks; dangerous if it checks out PR code",
                   fix="Do not check out or execute PR code in this workflow")
-    for i, script in workflow_run_lines(c, p, text):
-        if re.search(r"\$\{\{\s*github\.(?:head_ref\b|event\."
-                     r"(issue|pull_request|comment|review|head_commit|commits)\b[^}]*(title|body|message|name|ref|label))", script):
-            c.add("Medium", "untrusted event text interpolated into a workflow", p, i, category=CAT_BUILD,
-                  impact="Text controlled by outsiders becomes part of a shell command",
-                  fix="Pass it through an env variable and quote it")
+    for block in workflow_run_blocks(c, p, text):
+        script = "\n".join(line for _, line in block)
+        scalar_start = next((line.lstrip() for _, line in block
+                             if line.strip() and not line.lstrip().startswith("#")), "")
+        if scalar_start.startswith('"') and "\\" in script:
+            # YAML double-quoted scalars decode escapes before GitHub evaluates
+            # expressions; raw text could hide both an opener and a source name.
+            incomplete(c, "workflow run scan", p, "double-quoted run escapes require manual review")
+            continue
+        reported = set()
+        for start, expression in workflow_expressions(c, p, script):
+            if untrusted_workflow_expression(c, p, expression):
+                line = block[script.count("\n", 0, start)][0]
+                if line in reported:
+                    continue
+                reported.add(line)
+                c.add("Medium", "untrusted event text interpolated into a workflow", p, line, category=CAT_BUILD,
+                      impact="Text controlled by outsiders becomes part of a shell command",
+                      fix="Pass it through an env variable and quote it")
 
 
 def check_dockerfile(c, p):
@@ -848,13 +978,51 @@ def audit_npm(c, root, lock):
     if lock.name not in ("package-lock.json", "npm-shrinkwrap.json"):
         c.not_run.append({"tool": "npm audit", "reason": f"{c.rel(lock)} is not an npm lockfile; use the matching package manager's audit"})
         return
+    # npm's workspace selection is inherited from project/user configuration
+    # and the environment. There is no supported CLI reset for that list, and
+    # disabling workspaces would silently omit members of a shared lock. Keep
+    # this fallback single-project only instead of claiming partial coverage.
+    try:
+        data = json.loads(lock.read_text(encoding="utf-8"))
+        manifest = lock.parent / "package.json"
+        project = json.loads(manifest.read_text(encoding="utf-8")) if manifest.exists() else {}
+        if not isinstance(data, dict) or not isinstance(project, dict):
+            raise ValueError("invalid npm input")
+        packages = data.get("packages", {})
+        if not isinstance(packages, dict) or not all(isinstance(v, dict) for v in packages.values()):
+            raise ValueError("invalid npm lock packages")
+        dependencies = data.get("dependencies", {})
+        if not isinstance(dependencies, dict):
+            raise ValueError("invalid npm lock dependencies")
+        legacy = list(dependencies.values())
+        linked = False
+        while legacy:
+            item = legacy.pop()
+            if not isinstance(item, dict):
+                raise ValueError("invalid npm lock dependency")
+            linked = linked or bool(item.get("link")) or str(item.get("version", "")).startswith("file:")
+            children = item.get("dependencies", {})
+            if not isinstance(children, dict):
+                raise ValueError("invalid npm nested dependencies")
+            legacy.extend(children.values())
+        if (linked or "workspaces" in project or "workspaces" in packages.get("", {})
+                or any(v.get("link") or (name and not name.startswith("node_modules/"))
+                       for name, v in packages.items())):
+            incomplete(c, "npm audit", lock,
+                       "workspace or linked-package lock requires osv-scanner; "
+                       "npm fallback cannot guarantee whole-lock coverage")
+            return
+    except (OSError, ValueError, UnicodeError):
+        incomplete(c, "npm audit", lock, "could not validate single-project audit input")
+        return
     exe = shutil.which("npm")
     if not exe:
         c.not_run.append({"tool": "npm audit", "reason": "npm not installed"})
         return
     code, out, err = run([exe, "audit", "--json", "--package-lock-only",
                           "--include=prod", "--include=dev", "--include=optional",
-                          "--include=peer", "--ignore-scripts"], lock.parent)
+                          "--include=peer", "--ignore-scripts", "--package-lock=true",
+                          "--workspaces=null", "--prefix=" + str(lock.parent)], lock.parent)
     data = audit_json(c, "npm audit", lock, code, out)
     if data is None:
         return

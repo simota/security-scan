@@ -63,6 +63,16 @@ class FindingsMergeTests(unittest.TestCase):
         self.assertEqual(self.merge(self.fragment("a.json", {"findings": [FINDING]})), 2)
         self.assertFalse(self.out.exists())
 
+    def test_malformed_existing_container_is_a_schema_error(self):
+        fragment = self.fragment("update.json", {"findings": [{"id": "F-001", "fix": "scope by tenant"}]})
+        for data in ([], {"meta": META, "findings": {}},
+                     {"meta": META, "findings": [{"id": []}]}):
+            with self.subTest(data=data):
+                self.out.write_text(json.dumps(data))
+                before = self.out.read_bytes()
+                self.assertEqual(self.merge(fragment), 2)
+                self.assertEqual(self.out.read_bytes(), before)
+
 
 if __name__ == "__main__":
     unittest.main()

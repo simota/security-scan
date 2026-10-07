@@ -102,6 +102,119 @@ class WorkflowScanRegressionTests(unittest.TestCase):
                 self.assertEqual(findings[0]["location"], f".github/workflows/test.yml:{line}")
                 self.assertFalse(c.not_run)
 
+    def test_event_reads_through_index_access_and_function_arguments_are_detected(self):
+        expressions = (
+            "github.event['issue']['title']",
+            "github['event']['pull_request'].body",
+            "github['head_ref']",
+            "github.event.commits[0]['message']",
+            "format('{0}', github.event.issue.title)",
+            "format('}} {0}', github.event.issue.title)",
+            "format('it''s {0}', github.event.issue.title)",
+            "join(github.event.issue.labels.*.name, ', ')",
+            "join(github.event.*.title, ' ')",
+            "toJSON(github.event.*)",
+            "toJSON(github.event)",
+        )
+        for expression in expressions:
+            with self.subTest(expression=expression):
+                c = self.workflow('      - run: |\n          echo "${{ ' + expression + ' }}"\n')
+                findings = self.injection_findings(c)
+                self.assertEqual(len(findings), 1)
+                self.assertEqual(findings[0]["location"], ".github/workflows/test.yml:8")
+                self.assertFalse(c.not_run)
+
+    def test_multiline_expression_is_detected_at_its_opening_line(self):
+        c = self.workflow('''      - run: |
+          echo "${{
+            format('{0}',
+              github.event['issue']['title'])
+          }}"
+''')
+        findings = self.injection_findings(c)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["location"], ".github/workflows/test.yml:8")
+        self.assertFalse(c.not_run)
+
+    def test_event_strings_and_safe_env_handoffs_are_not_source_reads(self):
+        c = self.workflow('''      - name: safe
+        env:
+          TITLE: ${{ format('{0}', github.event['issue']['title']) }}
+          BODY: ${{
+            github.event.issue.body
+            }}
+        run: |
+          printf '%s\\n' "$TITLE" "$BODY"
+          echo "${{ format('{0}', 'github.event.issue.title') }}"
+          echo "${{ 'github[''event''][''issue''][''title'']' }}"
+          echo "${{ github.event.issue.number }}"
+          echo "${{ github.sha }}"
+''')
+        self.assertFalse(self.injection_findings(c))
+        self.assertFalse(c.not_run)
+
+    def test_dynamic_event_selector_is_incomplete_instead_of_clean(self):
+        c = self.workflow('      - run: echo "${{ github.event[inputs.kind][inputs.field] }}"\n')
+        self.assert_incomplete(c)
+        self.assertFalse(self.injection_findings(c))
+
+    def test_unresolved_event_subtrees_are_incomplete_instead_of_clean(self):
+        for expression in ("toJSON(github.event.pull_request.head)",
+                           "toJSON(github.event.issue.labels)",
+                           "toJSON(github.event.inputs)"):
+            with self.subTest(expression=expression):
+                c = self.workflow('      - run: echo "${{ ' + expression + ' }}"\n')
+                self.assert_incomplete(c)
+
+    def test_double_quoted_yaml_escapes_are_incomplete_instead_of_clean(self):
+        for step in (
+                r'''      - run: "echo '${{ \u0067ithub.event.issue.title }}'"''',
+                r'''      - run: "echo '${{\ngithub.event.issue.title\n}}'"''',
+                r'''      - run: "echo '\u0024{{ github.event.issue.title }}'"''',
+                '''      - run: "echo '${{\n          \\u0067ithub.event.issue.title }}'"''',
+                '''      - run:\n          "echo '${{ \\u0067ithub.event.issue.title }}'"''',
+                '''      - run: # scalar below\n\n          # comment\n          "echo '${{ \\u0067ithub.event.issue.title }}'"'''):
+            with self.subTest(step=step):
+                self.assert_incomplete(self.workflow(step + "\n"))
+
+    def test_plain_and_block_shell_escapes_do_not_require_yaml_decoding(self):
+        for step in (r'''      - run: printf '%s\\n' "$TITLE"''',
+                     '''      - run: |\n          printf '%s\\n' "$TITLE"'''):
+            with self.subTest(step=step):
+                c = self.workflow(step + "\n")
+                self.assertFalse(self.injection_findings(c))
+                self.assertFalse(c.not_run)
+
+    def test_escaped_workflow_mapping_keys_are_incomplete_instead_of_clean(self):
+        text = ("name: test\non: pull_request\njobs:\n  test:\n"
+                "    runs-on: ubuntu-latest\n    steps:\n"
+                '      - run: echo "${{ github.head_ref }}"\n')
+        for original, escaped in (("run:", r'"r\u0075n":'),
+                                  ("steps:", r'"st\u0065ps":'),
+                                  ("jobs:", r'"j\u006fbs":')):
+            with self.subTest(key=original):
+                self.path.write_text(text.replace(original, escaped), encoding="utf-8")
+                c = self.deps.Collector(self.root)
+                self.deps.check_workflow(c, self.path)
+                self.assert_incomplete(c)
+
+    def test_expressions_cannot_continue_into_a_separate_run_step(self):
+        c = self.workflow('''      - run: echo "${{ github.event.issue.number
+      - run: echo "github.event.issue.title }}"
+''')
+        self.assert_incomplete(c)
+        self.assertFalse(self.injection_findings(c))
+
+    def test_multiple_expressions_keep_one_finding_per_script_line(self):
+        c = self.workflow('''      - run: |
+          echo "${{ github.event.issue.title }} ${{ github['head_ref'] }}"
+          echo "${{ format('{0}', github.event.issue.body) }}"
+''')
+        findings = self.injection_findings(c)
+        self.assertEqual([f["location"] for f in findings],
+                         [".github/workflows/test.yml:8", ".github/workflows/test.yml:9"])
+        self.assertFalse(c.not_run)
+
 
 if __name__ == "__main__":
     unittest.main()

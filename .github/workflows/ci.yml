@@ -61,9 +61,9 @@ jobs:
           sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 \
             install --yes --no-install-recommends fonts-noto-cjk poppler-utils
           fc-cache -f
-      - name: Verify the runner's exact Google Chrome distribution
+      - name: Verify the runner's approved Google Chrome distribution
         env:
-          CHROME_VERSION: '154.0.8037.57'
+          CHROME_VERSIONS: '154.0.8037.57,154.0.8037.97'
         run: |
           python - <<'PYTHON'
           import hashlib
@@ -80,8 +80,8 @@ jobs:
           print(f"Browser: {version}\nPackage: google-chrome-stable {package}", flush=True)
           (evidence / "version.txt").write_text(version + "\n")
           (evidence / "package-version.txt").write_text("google-chrome-stable " + package + "\n")
-          expected = os.environ["CHROME_VERSION"]
-          if version != f"Google Chrome {expected}":
+          expected = {f"Google Chrome {v.strip()}" for v in os.environ["CHROME_VERSIONS"].split(",") if v.strip()}
+          if version not in expected:
               raise SystemExit("Runner Chrome changed: revalidate the new image version before updating the explicit CI guard")
           wrapper = chrome.resolve(strict=True)
           files = subprocess.run(["dpkg-query", "-L", "google-chrome-stable"], capture_output=True, text=True, check=True, timeout=5).stdout.splitlines()

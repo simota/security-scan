@@ -97,6 +97,10 @@ python3 skills/security-scan/scripts/contract_check.py out      # exit 1 lists e
 
 The check covers shape and provenance markers, not whether a finding is true;
 hosts can still find different issues, but no longer report them differently.
+After source capture, fragments can also add `test_runs`, `three_pass`,
+`evidence_integrity` and incremental `expert` records. Profile fields merge one
+level deep; nested lists are replaced explicitly. Assessment pins and workflow
+journals stay owned by their respective capture/workflow commands.
 
 ### Expert grade
 
@@ -114,6 +118,9 @@ passes:
 
 ```sh
 python3 skills/security-scan/scripts/expert_audit.py out   # 0 complete, 3 held/degraded
+# If fresh evidence integrity is required, check it in the audit process too:
+python3 skills/security-scan/scripts/expert_audit.py out \
+  --evidence-root out --evidence-repository /path/to/repo
 ```
 
 The records prove the process was recorded, not that every vulnerability was
@@ -366,6 +373,10 @@ recorded in `not_run` rather than running Cargo against the target checkout.
 
 npm explicitly includes prod, dev, optional and peer dependencies, even when
 `.npmrc` or the environment omits them, and disables lifecycle scripts.
+The npm fallback now requires a single-project lock. Shared workspace or linked
+package locks require OSV coverage; otherwise they are explicitly incomplete.
+Single-project auditing neutralizes inherited workspace mode without changing
+registry or authentication configuration.
 Composer runs with `--no-plugins --no-scripts` against a temporary copy of the
 lockfile, an auditor-owned manifest and an empty Composer home. Project/global
 exclusions and `COMPOSER*` environment overrides are not inherited; abandoned

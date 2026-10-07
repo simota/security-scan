@@ -75,7 +75,7 @@ python -m pip install --only-binary=:all: -r scripts/ci/requirements.txt
 # Debian/Ubuntu: install Poppler and Japanese fonts if they are not present.
 sudo apt-get install --yes --no-install-recommends fonts-noto-cjk poppler-utils
 fc-cache -f
-# CI requires the runner-provided Google Chrome 154.0.8037.57 distribution.
+# CI accepts only the listed runner-provided Google Chrome distributions.
 export CHROME="/usr/bin/google-chrome"
 export SECURITY_SCAN_REPORT_ARTIFACTS="/tmp/security-scan-report-artifacts"
 python scripts/ci/run_required_tests.py
@@ -109,19 +109,24 @@ exact versions in `scripts/ci/requirements.txt`, verified against PyPI:
 - [greenlet 3.5.5](https://pypi.org/project/greenlet/3.5.5/)
 - [typing_extensions 4.16.0](https://pypi.org/project/typing-extensions/4.16.0/)
 
-The workflow uses the GitHub runner's already-installed official **Google Chrome
-154.0.8037.57**, launched through `/usr/bin/google-chrome` and its normal package
-wrapper. It requires the exact browser identification/version and records the
+The workflow uses the GitHub runner's already-installed official **Google Chrome**,
+launched through `/usr/bin/google-chrome` and its normal package wrapper. The
+bounded version list contains only **154.0.8037.57** and **154.0.8037.97**, observed
+on different Ubuntu 22.04 runners during the same image rollout. It requires an
+exact browser identification/version match to that list and records the
 installed `google-chrome-stable` package version as evidence without assuming a
 Debian revision suffix. It records SHA-256 hashes of the package wrapper and browser executable in
 the synthetic evidence. No alternative browser is downloaded or installed.
 Playwright provides the pinned Python API and OS-library installation only.
 
-This is an explicit image-version guard rather than a reproducible browser
-archive install. When GitHub updates the runner image, CI deliberately fails if
-the installed browser version changes. Revalidate the new distribution with the
-unchanged preflight and complete real browser/PDF suite before updating the guard.
-Do not silently switch browsers, remove the version guard or alter sandbox settings.
+This is an explicit, bounded image-version guard rather than a reproducible
+browser archive install. Unknown versions still fail. The selected distribution
+must pass the unchanged preflight and complete zero-skip real browser/PDF suite
+on every run; a version-list match alone is never a successful check. Record the
+actual version from that run and do not imply that another listed version ran.
+Review any version-list change, keep the list small during runner rollouts, and
+retire the older entry when the rollout settles. Do not use a broad version
+range, silently switch browsers, remove the guard or alter sandbox settings.
 
 During diagnosis, Chrome for Testing 151.0.7922.34 and 154.0.8037.57 both failed the
 bounded production-flag CLI PDF probe. The runner's standard Google Chrome
