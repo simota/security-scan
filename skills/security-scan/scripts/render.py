@@ -531,44 +531,44 @@ for _code, _source in {
 
 EXPERT_LABELS = {
     "en": {
-        "e_title": "Assessment method and assurance", "e_status": "Expert-grade state", "cwe": "CWE",
-        "e_complete": "All expert-grade gates met (recorded process only)",
-        "e_held": "Held: expert-grade gates remain open",
+        "e_title": "Assessment method and assurance", "e_status": "Expert record gate state", "cwe": "CWE",
+        "e_complete": "Declared expert record gates met; final audit not established here",
+        "e_held": "Held: declared expert record gates remain open",
         "e_degraded": "Degraded: single-agent run, independent checks unavailable",
-        "e_mode": "Mode", "e_full": "full (independent workers)", "e_single": "single agent (declared)",
+        "e_mode": "Mode", "e_full": "full (declared worker roles)", "e_single": "single agent (declared)",
         "e_engines": "Engines", "e_cross": "cross-engine", "e_mono": "single engine (declared)",
-        "e_workers": "Workers: {spawns} spawned within an approved ceiling of {ceiling}",
-        "e_recon": "Recon: {recon_actors} independent maps reconciled into {routes} entry points; {recon_disagreements} disagreements resolved by re-reading",
-        "e_discovery": "Discovery: {redundant_cells}/{cells} scope cells read by at least two reviewers from different angles ({discovery_passes} passes); {raw_candidates} raw candidates consolidated into {findings} findings",
-        "e_variants": "Variant analysis: {variant_hits} similar locations dispositioned; {variant_findings} findings added",
-        "e_omission": "Omission challenge: {omission_passes} independent pass(es) looking for a missing vulnerability class",
-        "e_panels": "Refutation panels: {panels} High/Medium findings attacked independently; attacks survived {skeptic_survived}, refuted {skeptic_refuted}, unproven {skeptic_unproven}",
-        "e_severity": "Severity: {raters_calibrated}/{raters} raters passed calibration; {rated}/{active} findings rated twice independently, {severity_agreed} without adjudication",
-        "e_reception": "Reception: {personas}/3 simulated cold reads (executive, engineer, auditor)",
-        "e_qa": "Non-participant QA audit: {qa}",
+        "e_workers": "Recorded workers: {spawns}; declared approved ceiling: {ceiling}",
+        "e_recon": "Recon records: {recon_actors} actors; {routes} reconciled entry points; {recon_disagreements} disagreements",
+        "e_discovery": "Discovery records: {redundant_cells}/{cells} scope cells meet redundancy checks; {discovery_passes} passes, {raw_candidates} raw candidates, {findings} findings",
+        "e_variants": "Variant records: {variant_hits} similar locations; {variant_findings} added findings",
+        "e_omission": "Omission challenge records: {omission_passes} pass(es) looking for a missing vulnerability class",
+        "e_panels": "Refutation panel records: {panels} findings; survived {skeptic_survived}, refuted {skeptic_refuted}, unproven {skeptic_unproven}",
+        "e_severity": "Severity records: {raters_calibrated}/{raters} raters meet calibration checks; {rated}/{active} findings have two ratings, {severity_agreed} without adjudication",
+        "e_reception": "Reception records: {personas}/3 personas (executive, engineer, auditor)",
+        "e_qa": "Recorded QA result: {qa}",
         "e_gaps": "Open gates",
-        "e_note": "Every finding passed through independent discovery, condition tracing, refutation and calibrated severity rating by workers that did not produce it. The counts describe the recorded process.",
+        "e_note": "The status and counts describe declared records for discovery, condition tracing, refutation and severity review. They do not establish whether the final audit of run files and report outputs passed.",
         "e_safety": "Worker labels and records are declarations; their number does not certify independence or correctness, and no detection rate or guarantee that all vulnerabilities were found follows from them.",
         "e_gap": "Gate not met",
     },
     "ja": {
-        "e_title": "診断の方法と品質保証", "e_status": "エキスパート品質の状態", "cwe": "CWE",
-        "e_complete": "エキスパート品質のゲートをすべて充足（記録された手順のみ）",
-        "e_held": "保留：未充足のゲートあり",
+        "e_title": "診断の方法と品質保証", "e_status": "エキスパート宣言レコードのゲート状態", "cwe": "CWE",
+        "e_complete": "宣言レコードのゲートを充足：最終監査の合否はこの表示では未検証",
+        "e_held": "保留：宣言レコードに未充足のゲートあり",
         "e_degraded": "縮退：単一エージェント実行のため独立確認なし",
-        "e_mode": "実行形態", "e_full": "フル（独立ワーカー）", "e_single": "単一エージェント（申告）",
+        "e_mode": "実行形態", "e_full": "フル（ワーカーの役割を申告）", "e_single": "単一エージェント（申告）",
         "e_engines": "エンジン", "e_cross": "複数エンジン", "e_mono": "単一エンジン（申告）",
-        "e_workers": "ワーカー：承認上限 {ceiling} のうち {spawns} を起動",
-        "e_recon": "攻撃面の把握：独立した {recon_actors} 件の調査を照合し、入口 {routes} 件に統合。食い違い {recon_disagreements} 件は再読で解消",
-        "e_discovery": "発見：対象 {cells} 件中 {redundant_cells} 件を異なる観点の2名以上が確認（{discovery_passes} パス）。候補 {raw_candidates} 件を指摘 {findings} 件に統合",
-        "e_variants": "類似箇所の調査：{variant_hits} 箇所を判定し、指摘 {variant_findings} 件を追加",
-        "e_omission": "見落としの検証：脆弱性の分類漏れを探す独立パス {omission_passes} 件",
-        "e_panels": "反証パネル：High/Medium の {panels} 件を独立に攻撃。耐えた {skeptic_survived}・反証 {skeptic_refuted}・未証明 {skeptic_unproven}",
-        "e_severity": "重大度：評価者 {raters} 名中 {raters_calibrated} 名が較正に合格。指摘 {active} 件中 {rated} 件を独立に2回評価し、{severity_agreed} 件は調停なしで一致",
-        "e_reception": "受け手による確認：経営層・開発者・監査人の模擬通読 {personas}/3",
-        "e_qa": "非参加者による QA 監査：{qa}",
+        "e_workers": "ワーカーの記録：{spawns} 件、申告された承認上限 {ceiling}",
+        "e_recon": "攻撃面調査の記録：実施者 {recon_actors} 名、統合後の入口 {routes} 件、食い違い {recon_disagreements} 件",
+        "e_discovery": "発見の記録：対象 {cells} 件中 {redundant_cells} 件が重複確認の条件を充足。{discovery_passes} パス、候補 {raw_candidates} 件、指摘 {findings} 件",
+        "e_variants": "類似箇所調査の記録：{variant_hits} 箇所、追加指摘 {variant_findings} 件",
+        "e_omission": "見落とし検証の記録：脆弱性の分類漏れを探すパス {omission_passes} 件",
+        "e_panels": "反証パネルの記録：指摘 {panels} 件。耐えた {skeptic_survived}・反証 {skeptic_refuted}・未証明 {skeptic_unproven}",
+        "e_severity": "重大度の記録：評価者 {raters} 名中 {raters_calibrated} 名が較正条件を充足。指摘 {active} 件中 {rated} 件に2件の評価、{severity_agreed} 件は調停なしで一致",
+        "e_reception": "受け手確認の記録：経営層・開発者・監査人の役割 {personas}/3",
+        "e_qa": "記録された QA の結果：{qa}",
         "e_gaps": "未充足のゲート",
-        "e_note": "各指摘は、作成者以外のワーカーによる独立した発見・成立条件の追跡・反証・較正済みの重大度評価を経ています。数値は記録された手順を示します。",
+        "e_note": "状態と数値は、発見・成立条件の追跡・反証・重大度評価についての申告記録を示します。実行記録ファイルとレポート出力を対象とする最終監査の合格を示すものではありません。",
         "e_safety": "ワーカー名と記録は申告です。人数は独立性や正しさを保証せず、検出率やすべての脆弱性の発見を意味しません。",
         "e_gap": "未充足",
     },
@@ -1107,9 +1107,11 @@ SENSITIVE_NAMES = {".npmrc", ".yarnrc", ".yarnrc.yml", ".pypirc", ".netrc", ".gi
                    "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"}
 SENSITIVE_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".jks", ".keystore"}
 PRIVATE_KEY_RE = re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----")
+# The ordinary-character branch must exclude backslashes: otherwise an
+# unterminated quoted value explores exponentially many escape combinations.
 QUOTED_SECRET_RE = re.compile(
     r"(?i)((?:password|passwd|secret|token|api[_-]?key|private[_-]?key|access[_-]?key|credential)"
-    r"[\w.-]*['\"]?\s*(?:=>|:=|[:=])\s*)(['\"])(?:\\.|(?!\2).)*\2")
+    r"[\w.-]*['\"]?\s*(?:=>|:=|[:=])\s*)(['\"])(?:\\.|(?!\2)[^\\\n])*\2")
 
 
 def sensitive_path(path):
@@ -1525,7 +1527,7 @@ def three_pass_html(view, L):
 
 
 def expert_view(data, lang, integrity=None):
-    """Curated expert-grade summary: derived status, counts and gate names only."""
+    """Declared expert record gates; the final run-file audit is a separate check."""
     state = derive_expert(data, SchemaError, integrity=integrity)
     if not state["opted_in"]:
         return None
