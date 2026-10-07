@@ -558,6 +558,38 @@ class ReportOutputTests(unittest.TestCase):
         self.assertEqual(errors, [])
 
     @unittest.skipUnless(os.environ.get("SECURITY_SCAN_BROWSER_TEST") == "1", "opt-in Chromium interaction test")
+    def test_browser_copies_finding_details_as_markdown(self):
+        page = self.start_browser()
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        finding = self.finding("F-001", cwe="CWE-639", references=[
+            {"type": "doc", "url": "https://example.test/advisory", "title": "Advisory"}])
+        data = self.report([finding])
+        data["findings"][0]["snippet"] = {"start": 11, "hit": [12, 12], "lines": ["def view():", "    return ```row```"]}
+        for lang in ("en", "ja"):
+            with self.subTest(lang=lang):
+                labels = self.renderer.LABELS[lang]
+                page.goto("about:blank")
+                page.set_content(self.renderer.render_dashboard(data, labels, lang), wait_until="domcontentloaded")
+                # about:blank is not a secure context, so this exercises the execCommand fallback.
+                page.evaluate("document.addEventListener('copy', e => { window.copied = e.target.value; })")
+                page.locator("tr.row").click()
+                button = page.get_by_role("button", name=labels["copy_llm"], exact=True)
+                button.click()
+                page.get_by_role("button", name=labels["copied"], exact=True).wait_for()
+                # The copy button must not collapse the detail row it lives in.
+                self.assertTrue(page.locator("tr.detail").is_visible())
+                text = page.evaluate("window.copied")
+                self.assertTrue(text.startswith("## F-001 · Synthetic finding F-001\n"))
+                for expected in ("- " + labels["severity"] + ": High", "- " + labels["cwe"] + ": CWE-639",
+                                 "- " + labels["location"] + ": src/fixture.py:12", "### " + labels["impact"],
+                                 "Synthetic fix direction", "Synthetic evidence for Unverified",
+                                 "````\n    11 def view():\n>   12     return ```row```\n````",
+                                 "- [doc] Advisory — https://example.test/advisory", "### " + labels["v_title"]):
+                    self.assertIn(expected, text)
+        self.assertEqual(errors, [])
+
+    @unittest.skipUnless(os.environ.get("SECURITY_SCAN_BROWSER_TEST") == "1", "opt-in Chromium interaction test")
     def test_browser_keyboard_filters_reset_excluded_categories_and_hash_navigation(self):
         page = self.start_browser()
         errors = []
