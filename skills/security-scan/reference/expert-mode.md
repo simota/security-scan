@@ -75,6 +75,11 @@ assessment (`spawns_over_ceiling`).
   personas get the rendered report only
 - Ask every worker to return file:line evidence for each claim; a return
   without locations is re-run, not paraphrased into a finding
+- Keep each worker's return to one line per candidate (location, the missing
+  control, parameter names, suggested severity, CWE), with longer working notes
+  in scratch. A worker whose write is refused saves what it has, reports which
+  candidates were not recorded, and stops; the orchestrator records that gap in
+  `limitations` instead of re-briefing the same content
 - Spend the high-reasoning tier (`reference/engine-map.md`) on verifiers,
   skeptics, raters and QA — the steps whose output is the judgment
 - The orchestrator may consolidate, re-read and resolve; it never supplies a
