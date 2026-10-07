@@ -75,7 +75,7 @@ python -m pip install --only-binary=:all: -r scripts/ci/requirements.txt
 # Debian/Ubuntu: install Poppler and Japanese fonts if they are not present.
 sudo apt-get install --yes --no-install-recommends fonts-noto-cjk poppler-utils
 fc-cache -f
-# CI requires the runner-provided Google Chrome 154.0.8037.57 distribution.
+# CI requires the runner-provided Google Chrome 154.0.8037.97 distribution.
 export CHROME="/usr/bin/google-chrome"
 export SECURITY_SCAN_REPORT_ARTIFACTS="/tmp/security-scan-report-artifacts"
 python scripts/ci/run_required_tests.py
@@ -110,7 +110,7 @@ exact versions in `scripts/ci/requirements.txt`, verified against PyPI:
 - [typing_extensions 4.16.0](https://pypi.org/project/typing-extensions/4.16.0/)
 
 The workflow uses the GitHub runner's already-installed official **Google Chrome
-154.0.8037.57**, launched through `/usr/bin/google-chrome` and its normal package
+154.0.8037.97**, launched through `/usr/bin/google-chrome` and its normal package
 wrapper. It requires the exact browser identification/version and records the
 installed `google-chrome-stable` package version as evidence without assuming a
 Debian revision suffix. It records SHA-256 hashes of the package wrapper and browser executable in
