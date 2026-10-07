@@ -59,7 +59,7 @@ otherwise choose differently, the choice is fixed here, and
 | `meta.assessor` | Host and model, e.g. `Claude Code (<model>)`, `Codex (<model>)`, `Antigravity (<model>)` |
 | Budget | When the budget runs short, close units in risk order (non-admin reach and crown jewels first) instead of thinning every unit. Each unreached ledger entry is `holds on N/M, rest not read`; `limitations` gives the count of unreached units, entry points and entries |
 | Scratch | A new, empty directory for working records (recon map, ledger, trace rows, fragments), outside both the audited repository and the output directory: the host's session scratch or temp directory when it names one (Claude Code: the scratchpad directory; Codex and Antigravity: a fresh directory under the system temp directory, e.g. `$TMPDIR`), otherwise a sibling of the output directory. Name its path in the chat summary |
-| Writing the record | Never build `findings.json` or any scratch record with a shell heredoc, `echo`/`printf` redirection, an inline `python -c` or a generated script. Write each batch of results as a JSON fragment with the host's file-write tool into scratch (not the output directory), then `scripts/findings.py merge <out>/findings.json <fragment>…`. On a host without a `Write` tool, its file-edit tool (e.g. `apply_patch` adding a new file) is the file-write tool. The first fragment carries `meta`; `scripts/evidence_capture.py` then pins the record, and later fragments add `verification`, `test_runs` and requested `three_pass`/`expert`/`evidence_integrity`/`invariant_ledger` profiles. Nested profile lists/objects replace whole values; see `reference/findings-schema.md`. Workflow journals are written only by `scripts/verification_workflow.py` |
+| Writing the record | Never build `findings.json` or any scratch record with a shell heredoc, `echo`/`printf` redirection, an inline `python -c` or a generated script. Write each batch of results as a JSON fragment with the host's file-write tool into scratch (not the output directory), then `scripts/findings.py merge <out>/findings.json <fragment>…`. Keep a batch to one to five findings and merge each batch before writing the next, so a refused write loses at most that batch. On a host without a `Write` tool, its file-edit tool (e.g. `apply_patch` adding a new file) is the file-write tool. The first fragment carries `meta`; `scripts/evidence_capture.py` then pins the record, and later fragments add `verification`, `test_runs` and requested `three_pass`/`expert`/`evidence_integrity`/`invariant_ledger` profiles. Nested profile lists/objects replace whole values; see `reference/findings-schema.md`. Workflow journals are written only by `scripts/verification_workflow.py` |
 | Read-only | `allowed-tools` above is enforced by Claude Code only. Elsewhere keep to it yourself: read, search and run this skill's scripts; the file-write tool is for scratch records and finding fragments only; write nothing inside the audited repository |
 
 | Severity | When |
@@ -92,7 +92,9 @@ the run continues.
 3. If the sanctioned shape is refused too, drop that step only: add it to
    `limitations` (what was not recorded and why), continue every phase that does
    not depend on it, and name the blocked step and the exact command in the chat
-   summary so the requester can run it themselves
+   summary so the requester can run it themselves. When the refused step is one
+   finding's record, list that finding's `path:line` alone in `limitations` and
+   move on to the next finding; do not retry it in other words
 4. Never end the run silently on a refusal. "Cannot proceed in this session" is
    only a valid report when no remaining phase can be done
 
