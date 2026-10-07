@@ -85,6 +85,10 @@ not sufficient on its own.
   Record their identity, the evidence they inspected, disagreements and how
   those disagreements were resolved. Reviewer count is not a vote; re-read the
   disputed path and keep the finding incomplete while a material issue remains
+- On a host with no subagents or second reviewer, record `reviews: []`, keep
+  each High finding verification-incomplete, and name that in the chat
+  summary's first line. Never invent a reviewer identity or record the same
+  agent under a second name
 - Store only sanitized observations. Never store secrets, real credentials,
   unnecessary personal data or working exploit payloads in evidence or logs
 

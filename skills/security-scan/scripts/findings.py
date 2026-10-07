@@ -5,7 +5,8 @@
 
 A fragment is a JSON file written with the host's file-write tool (never a
 shell heredoc or a generated script). It holds any of these top-level keys:
-`meta` is merged key by key; `findings` and `evidence` records are matched by
+`meta` and the opt-in `invariant_ledger` are merged key by key (send the
+ledger's whole `entries` list in one fragment); `findings` and `evidence` records are matched by
 `id`, a known record updated key by key (so a later fragment can add just
 `verification` to F-003) and a new one appended; the list sections (`perspectives`, `checked_ok`, `decisions`,
 `limitations`, `next_steps`) are appended without duplicates. FINDINGS is
@@ -32,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import render  # noqa: E402
 
 LISTS = ("perspectives", "checked_ok", "decisions", "limitations", "next_steps")
-OBJECTS = ("meta",)
+OBJECTS = ("meta", "invariant_ledger")
 RECORDS = ("findings", "evidence")
 PROSE = ("title", "actor", "request", "impact", "fix")
 # Literal attack strings, not descriptions of them. Prose names the weakness

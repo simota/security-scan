@@ -43,7 +43,7 @@ registry, and this top-level object (IDs below are illustrative):
     "version": 1,
     "coverage": [
       {"id": "tenant-api", "perspective": "Actor and tenant", "target": "API detail routes"},
-      {"id": "upload-api", "perspective": "Uploads", "target": "Upload routes and storage"}
+      {"id": "upload-api", "perspective": "Files and content", "target": "Upload routes and storage"}
     ],
     "discovery": {
       "actor": "discovery-reviewer",

@@ -25,13 +25,46 @@ Everything that accepts input from outside the process:
 - Webhooks and callbacks from third parties
 - Queue consumers, scheduled jobs and CLI commands that read external data
 - WebSocket channels, GraphQL resolvers, file watchers
+- Every **version and host** of the API (`/v1` and `/v2`, a mobile or partner
+  API, an internal admin host), plus docs, monitoring, debug and test routes.
+  A version kept alive for old clients often lacks guards added later
+- Routes declared **outside the application code**: infrastructure-as-code,
+  serverless function definitions, API gateway or reverse-proxy route and
+  rewrite config (e.g. an OpenAPI file with gateway extensions, a serverless
+  manifest, an ingress resource). Each declared route is a row; a route the
+  gateway exposes that the application treats as internal is a lead
+- **Event-driven consumers**: message-queue, stream, storage-event and
+  scheduled triggers wired in IaC or serverless config, not only in code
 
 ## 3. Route inventory
 
-One row per route. The columns are what make the later review mechanical:
+One row per entry point: every route, and every queue consumer or scheduled
+job, import format and channel message type from §2 (for those, *Method* is
+`job`, `import` or `message` and *Path* is the job, format or message name).
+The columns are what make the later review mechanical:
 
-| Method | Path | Authn | Role guard | Handler | Notes |
-|---|---|---|---|---|---|
+| Method | Path | Authn | Role guard | Handler | Record-naming inputs | Notes |
+|---|---|---|---|---|---|---|
+
+Build it from the route registrations themselves (search every routing call or
+decorator), then reconcile it against every other list of the surface: API
+description files (OpenAPI, GraphQL schema), client code (front end, mobile),
+tests, feature flags, the previous API version, and gateway, proxy and IaC
+route config. A route in one list and not another is a row to resolve, not to
+drop: registered but absent from client and docs (forgotten, debug, legacy or
+test), exposed by the gateway while the app treats it as internal, or an old
+version still registered after a newer one added a guard. *Authn* and *Role
+guard* name the check and where the route inherits it (route group, base
+controller, decorator, or a gateway/IaC authorizer — e.g. a gateway JWT
+authorizer, a serverless function's auth setting) with `path:line`. A
+gateway/IaC authorizer counts as an inherited check only for the routes that
+config actually binds it to, and only when the app is not also reachable
+around the gateway (a public load balancer, a function URL, another ingress);
+when that cannot be read from the repo, the cell is `UNKNOWN`. *Record-naming inputs* lists every parameter that
+names a record, file or tenant (path, query, body, nested IDs, job payload
+fields, import columns, message fields); each becomes an
+object-reference trace row (`reference/invariants.md` §3a) and is the count the
+close-check uses.
 
 Then flag:
 
@@ -64,6 +97,15 @@ Then flag:
 - **Bypass list**: raw query builders, scope-removal calls, joins and eager loads
   into unscoped models, background jobs running without a user context
 
+**Several services.** When the repo holds more than one deployable service,
+build one inventory per service and record for each: how it authenticates calls
+from other services (mTLS, a signed service token, a shared secret, network
+position only), whether it re-derives the end user and tenant or trusts a
+forwarded header or claim, and its own tenancy mechanism (§5 per service). An
+internal endpoint that trusts a forwarded user or tenant ID is reachable by
+anything that can reach the service; network position alone is `UNKNOWN`, not
+a control.
+
 ## 6. Data sinks
 
 Where input can change meaning: raw SQL fragments, ORDER BY and column names,
@@ -92,3 +134,20 @@ The audit command for each ecosystem present (`composer audit`, `npm audit` /
 `cargo audit`, `osv-scanner`). They need network access to vulnerability
 databases; if that is unavailable, record the versions and say the audit was not
 run.
+
+## 10. Rules the app enforces — input to the invariant ledger
+
+Record what the later invariant hunt needs (`reference/invariants.md`):
+
+- **Role matrix** — one row per role (including anonymous and each tenant-side
+  role), one column per sensitive action (read, create, change, delete, export,
+  invite, change role, impersonate, approve, refund…). Fill each cell from the
+  declared guards and policies with `path:line`; a blank cell is a question
+- **Ownership chain** — for each tenant-data model, the field or relation that
+  ties it to its owner or tenant, including children reached through a parent
+- **State machines** — every status/stage field, its allowed transitions, who
+  may make each one and where that is checked
+- **Quantities** — every price, total, balance, quota, limit, counter and
+  discount: where it is computed, stored and decremented
+- **Identifiers** — how IDs are generated (sequential, random) and where they
+  are exposed to other actors (shared links, exports, emails, errors)
