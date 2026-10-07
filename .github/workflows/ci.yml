@@ -63,7 +63,7 @@ jobs:
           fc-cache -f
       - name: Verify the runner's exact Google Chrome distribution
         env:
-          CHROME_VERSION: '154.0.8037.57'
+          CHROME_VERSION: '154.0.8037.97'
         run: |
           python - <<'PYTHON'
           import hashlib
