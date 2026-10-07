@@ -186,6 +186,21 @@ nonblank strings; malformed types are rejected before output, rather than
 coerced into text or allowed to cause a traceback. Optional text can be omitted
 or empty. See the schema for object/list fields and the absent source-URL case.
 
+### Filing and reporting findings
+
+`skills/security-scan/templates/` holds Markdown templates whose fields map to
+`findings.json` (`ja` and `en`):
+
+| Template | Use |
+|---|---|
+| `issue.<lang>.md` | One finding as one issue: classification, static reproduction, evidence, fix direction, done-when checklist |
+| `report.<lang>.md` | One report to an owner or security contact: counts, scope, priority findings, dependencies, sound items, limits, decisions |
+
+Do not file an unfixed High or Medium as a public issue on a public repository;
+use a private tracker or a GitHub Security Advisory. Templates carry the same
+rules as the report: no working payloads, no secret values, and no source
+excerpts for readers who cannot already see the repository.
+
 ### Optional three-pass assurance
 
 For a recorded **discovery → conditions → independent challenge and decision**
@@ -457,6 +472,8 @@ skills/security-scan/
   scripts/verification_workflow.py ordered local review handoffs, progress and lineage
   scripts/reproduction.py      generate, verify and run isolated synthetic bundles
   scripts/reproduction_runtime.py trusted standalone seed/repro/cleanup runtime
+  templates/issue.{ja,en}.md     one finding as one issue
+  templates/report.{ja,en}.md    findings report to an owner or security contact
 examples/findings.sample.json  fictional legacy sample for make demo / make check
 examples/findings.verification.sample.json  synthetic structured-verification example
 examples/reproduction.plan.sample.json      deterministic SQLite owner-scope demo plan
