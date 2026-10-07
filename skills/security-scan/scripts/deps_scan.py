@@ -30,6 +30,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from urllib.parse import urlsplit
 from url_redaction import redact_urls
 
 SKIP_DIRS = {".git", "node_modules", "vendor", ".venv", "venv", "dist", "build",
@@ -404,11 +405,32 @@ def check_npm(c, p):
 
 def check_npm_lock(c, p):
     text = read(p)
-    hosts = set(re.findall(r'"resolved":\s*"https?://([^/"]+)', text)) | \
-        set(re.findall(r'^\s+resolved\s+"https?://([^/"]+)', text, re.M))
+    # Parse the complete quoted URL before discarding its scheme. Otherwise an
+    # empty-path URL can turn its query/fragment into bare "host" text that the
+    # final URL sanitizer no longer recognizes.
+    hosts = {}
+    resolved = re.compile(r'"resolved"\s*:\s*("(?:[^"\\]|\\.)*")'
+                          r'|^\s+resolved\s+("(?:[^"\\]|\\.)*")', re.M)
+    for match in resolved.finditer(text):
+        try:
+            url = json.loads(match[1] or match[2])
+            parsed = urlsplit(url)
+            if parsed.scheme.lower() not in ("http", "https"):
+                continue
+            host = parsed.hostname
+            parsed.port  # Reject malformed ports/authorities before reporting.
+            if (not host or any(ch.isspace() for ch in url)
+                    or "\\" in parsed.netloc
+                    or not re.fullmatch(r"[a-zA-Z0-9._:-]+", host)):
+                raise ValueError("invalid resolved URL host")
+        except (ValueError, UnicodeError):
+            incomplete(c, "lockfile URL scan", p, "invalid resolved URL; host requires manual review")
+            continue
+        if host not in hosts:
+            hosts[host] = text.count("\n", 0, match.start()) + 1
     default = {"registry.npmjs.org", "registry.yarnpkg.com"}
-    for h in sorted(hosts - default):
-        c.add("Low", f"lockfile resolves packages from non-default host {h.rsplit('@', 1)[-1]}", p, line_of(text, h),
+    for h in sorted(hosts.keys() - default):
+        c.add("Low", f"lockfile resolves packages from non-default host {h}", p, hosts[h],
               impact="Packages come from a registry outside the public one; confirm it is trusted",
               fix="Confirm the host is an approved internal mirror", confidence="Suspected")
     if "integrity" not in text and p.name == "package-lock.json":
@@ -848,13 +870,51 @@ def audit_npm(c, root, lock):
     if lock.name not in ("package-lock.json", "npm-shrinkwrap.json"):
         c.not_run.append({"tool": "npm audit", "reason": f"{c.rel(lock)} is not an npm lockfile; use the matching package manager's audit"})
         return
+    # npm's workspace selection is inherited from project/user configuration
+    # and the environment. There is no supported CLI reset for that list, and
+    # disabling workspaces would silently omit members of a shared lock. Keep
+    # this fallback single-project only instead of claiming partial coverage.
+    try:
+        data = json.loads(lock.read_text(encoding="utf-8"))
+        manifest = lock.parent / "package.json"
+        project = json.loads(manifest.read_text(encoding="utf-8")) if manifest.exists() else {}
+        if not isinstance(data, dict) or not isinstance(project, dict):
+            raise ValueError("invalid npm input")
+        packages = data.get("packages", {})
+        if not isinstance(packages, dict) or not all(isinstance(v, dict) for v in packages.values()):
+            raise ValueError("invalid npm lock packages")
+        dependencies = data.get("dependencies", {})
+        if not isinstance(dependencies, dict):
+            raise ValueError("invalid npm lock dependencies")
+        legacy = list(dependencies.values())
+        linked = False
+        while legacy:
+            item = legacy.pop()
+            if not isinstance(item, dict):
+                raise ValueError("invalid npm lock dependency")
+            linked = linked or bool(item.get("link")) or str(item.get("version", "")).startswith("file:")
+            children = item.get("dependencies", {})
+            if not isinstance(children, dict):
+                raise ValueError("invalid npm nested dependencies")
+            legacy.extend(children.values())
+        if (linked or "workspaces" in project or "workspaces" in packages.get("", {})
+                or any(v.get("link") or (name and not name.startswith("node_modules/"))
+                       for name, v in packages.items())):
+            incomplete(c, "npm audit", lock,
+                       "workspace or linked-package lock requires osv-scanner; "
+                       "npm fallback cannot guarantee whole-lock coverage")
+            return
+    except (OSError, ValueError, UnicodeError):
+        incomplete(c, "npm audit", lock, "could not validate single-project audit input")
+        return
     exe = shutil.which("npm")
     if not exe:
         c.not_run.append({"tool": "npm audit", "reason": "npm not installed"})
         return
     code, out, err = run([exe, "audit", "--json", "--package-lock-only",
                           "--include=prod", "--include=dev", "--include=optional",
-                          "--include=peer", "--ignore-scripts"], lock.parent)
+                          "--include=peer", "--ignore-scripts", "--package-lock=true",
+                          "--workspaces=null", "--prefix=" + str(lock.parent)], lock.parent)
     data = audit_json(c, "npm audit", lock, code, out)
     if data is None:
         return

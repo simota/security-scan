@@ -11,6 +11,7 @@ records and their consistency, not that a worker really ran or judged well.
 import re
 
 from three_pass import derive_three_pass
+from verification import _Validator, integrity_state
 
 VERSION = 1
 DISCOVERY_ANGLES = ("entry-first", "sink-first", "control-first")
@@ -63,6 +64,11 @@ def _count(record, key, where, error_type):
     return value
 
 
+def _actor_key(value):
+    """Use the workflow's declared-identity comparison for every expert role."""
+    return value.strip().casefold() if isinstance(value, str) else None
+
+
 def calibrated(scores):
     """A rater is calibrated when every anchor is scored, at most one differs, and none by two levels."""
     if not isinstance(scores, dict) or set(scores) != set(ANCHOR_KEY):
@@ -90,6 +96,12 @@ def derive_expert(data, error_type=ValueError, integrity=None):
         raise error_type(f"expert.version: must be {VERSION}")
     gaps = []
     gap = gaps.append
+    participants = set()
+
+    def participant(record, key, where):
+        actor = _actor_key(_text(record, key, where, error_type))
+        participants.add(actor)
+        return actor
 
     mode = record.get("mode")
     if mode not in ("full", "single-agent"):
@@ -126,13 +138,15 @@ def derive_expert(data, error_type=ValueError, integrity=None):
     for i, item in enumerate(spawns):
         where = f"expert.spawns[{i}]"
         sid = _text(item, "id", where, error_type)
-        actor = _text(item, "actor", where, error_type)
+        actor = _actor_key(_text(item, "actor", where, error_type))
         role = _text(item, "role", where, error_type)
         engine = _text(item, "engine", where, error_type)
         _text(item, "prompt", where, error_type)
         _text(item, "return", where, error_type)
         if role not in ROLES:
             raise error_type(f"{where}.role: one of {ROLES}")
+        if role != "qa":
+            participants.add(actor)
         if sid in spawn_ids:
             raise error_type(f"{where}.id: duplicate {sid}")
         spawn_ids.add(sid)
@@ -145,20 +159,51 @@ def derive_expert(data, error_type=ValueError, integrity=None):
         gap("spawns_over_ceiling")
 
     def spawned(actor, role):
-        return actors.get(actor, (None,))[0] == role
+        return actors.get(_actor_key(actor), (None,))[0] == role
 
     def engine_of(actor):
-        return actors.get(actor, (None, None))[1]
+        return actors.get(_actor_key(actor), (None, None))[1]
 
     findings = {f.get("id"): f for f in data.get("findings", []) if isinstance(f, dict)}
     code = {fid: f for fid, f in findings.items() if isinstance(fid, str) and CODE_ID.match(fid)}
     active = {fid: f for fid, f in code.items()
               if (f.get("validation") or {}).get("verdict") not in EXCLUDED}
     serious = [fid for fid, f in active.items() if f.get("severity") in ("High", "Medium")]
+    # Replay once and use only the effective round for stage-role gates. Retained
+    # journal actors still participated in the assessment and cannot perform QA.
+    three = derive_three_pass(data, error_type, integrity=integrity)
+    validator = _Validator(data, error_type, integrity)
+    validator.setup()
+    if three.get("opted_in"):
+        participants.add(_actor_key(three["discovery"]["actor"]))
+    for fid, state in three.get("findings", {}).items():
+        for event in state["history"]:
+            participants.add(_actor_key(event["actor"]))
+            snapshot = event.get("three_pass_snapshot")
+            discovery = snapshot.get("discovery") if isinstance(snapshot, dict) else None
+            if isinstance(discovery, dict):
+                participants.add(_actor_key(discovery.get("actor")))
+            # A challenge can also name reviewers other than its submitter.
+            # Restarting that round does not make those reviewers nonparticipants.
+            reviews = list(event["submission"].get("reviews", [])) if event["action"] == "submit" else []
+            previous = event.get("previous_fields")
+            proof = previous.get("verification") if isinstance(previous, dict) else None
+            if isinstance(proof, dict):
+                participants.add(_actor_key(proof.get("reviewer")))
+                if isinstance(proof.get("reviews"), list):
+                    reviews.extend(proof["reviews"])
+            for review in reviews:
+                if isinstance(review, dict):
+                    participants.add(_actor_key(review.get("reviewer")))
+        for stage in state["stages"]:
+            actor = _actor_key(stage["actor"])
+            participants.add(actor)
+            if stage["stage"] in ("conditions", "falsification") and not spawned(actor, stage["stage"]):
+                gap(f"{stage['stage']}_actor_not_spawned:{fid}:{actor}")
 
     # Recon twice, reconciled.
     recon = _list(record.get("recon", []), "expert.recon", error_type)
-    recon_actors = {_text(r, "actor", f"expert.recon[{i}]", error_type) for i, r in enumerate(recon)}
+    recon_actors = {participant(r, "actor", f"expert.recon[{i}]") for i, r in enumerate(recon)}
     for i, r in enumerate(recon):
         _count(r, "routes", f"expert.recon[{i}]", error_type)
         if not spawned(r["actor"], "recon"):
@@ -186,7 +231,7 @@ def derive_expert(data, error_type=ValueError, integrity=None):
     raw = 0
     for i, d in enumerate(discovery):
         where = f"expert.discovery[{i}]"
-        actor = _text(d, "actor", where, error_type)
+        actor = participant(d, "actor", where)
         angle = _text(d, "angle", where, error_type)
         if angle not in DISCOVERY_ANGLES:
             raise error_type(f"{where}.angle: one of {DISCOVERY_ANGLES}")
@@ -213,7 +258,7 @@ def derive_expert(data, error_type=ValueError, integrity=None):
     varied, hits, new_from_variants = set(), 0, set()
     for i, v in enumerate(variants):
         where = f"expert.variants[{i}]"
-        actor = _text(v, "actor", where, error_type)
+        actor = participant(v, "actor", where)
         _text(v, "pattern", where, error_type)
         _text(v, "search", where, error_type)
         count = _count(v, "hits", where, error_type)
@@ -245,7 +290,7 @@ def derive_expert(data, error_type=ValueError, integrity=None):
     omission = _list(record.get("omission", []), "expert.omission", error_type)
     every_discoverer = {a for passes in by_cell.values() for a, _, _ in passes}
     for i, o in enumerate(omission):
-        actor = _text(o, "actor", f"expert.omission[{i}]", error_type)
+        actor = participant(o, "actor", f"expert.omission[{i}]")
         _text(o, "reason", f"expert.omission[{i}]", error_type)
         if not spawned(actor, "omission") or actor in every_discoverer:
             gap(f"omission_actor_not_independent:{actor}")
@@ -264,14 +309,18 @@ def derive_expert(data, error_type=ValueError, integrity=None):
     verifiers = {}
     for fid, f in code.items():
         proof = f.get("verification") if isinstance(f.get("verification"), dict) else {}
-        verifier = proof.get("reviewer")
+        verifier = _actor_key(proof.get("reviewer"))
         verifiers[fid] = verifier
+        participants.add(verifier)
         if not isinstance(verifier, str) or not spawned(verifier, "conditions"):
             gap(f"verifier_not_spawned:{fid}")
         elif verifier in discoverers.get(fid, set()):
             gap(f"verifier_is_discoverer:{fid}")
         for review in proof.get("reviews", []) if isinstance(proof.get("reviews"), list) else []:
-            reviewer = review.get("reviewer") if isinstance(review, dict) else None
+            reviewer = _actor_key(review.get("reviewer")) if isinstance(review, dict) else None
+            participants.add(reviewer)
+            if not spawned(reviewer, "falsification"):
+                gap(f"reviewer_not_spawned:{fid}:{reviewer}")
             if reviewer in discoverers.get(fid, set()) or reviewer == verifier:
                 gap(f"reviewer_not_independent:{fid}")
 
@@ -282,27 +331,48 @@ def derive_expert(data, error_type=ValueError, integrity=None):
     for i, p in enumerate(panels):
         where = f"expert.panels[{i}]"
         fid = _text(p, "finding", where, error_type)
+        if fid not in code or fid in paneled:
+            raise error_type(f"{where}.finding: unknown or duplicate code finding")
         paneled.add(fid)
         skeptics = _list(p.get("skeptics", []), f"{where}.skeptics", error_type)
         results = []
+        members, angles, panel_engines = set(), set(), set()
         for j, s in enumerate(skeptics):
             w = f"{where}.skeptics[{j}]"
-            actor = _text(s, "actor", w, error_type)
+            actor = participant(s, "actor", w)
             angle = _text(s, "angle", w, error_type)
             result = _text(s, "result", w, error_type)
             _text(s, "reason", w, error_type)
-            _strings(s, "evidence_ids", w, error_type)
             if angle not in SKEPTIC_ANGLES:
                 raise error_type(f"{w}.angle: one of {SKEPTIC_ANGLES}")
             if result not in panel_counts:
                 raise error_type(f"{w}.result: refuted, survived or unproven")
-            panel_counts[result] += 1
-            results.append(result)
+            if actor in members:
+                raise error_type(f"{w}.actor: duplicate panel actor")
+            if angle in angles:
+                raise error_type(f"{w}.angle: duplicate panel angle")
+            members.add(actor)
+            angles.add(angle)
+            refs = validator.current_refs(s, w, required=result != "unproven")
+            provenance = integrity_state(data, refs, integrity)
+            evidence_ok = True
+            if refs and provenance["status"] == "incomplete":
+                gap(f"skeptic_evidence_integrity_failed:{fid}:{actor}")
+                evidence_ok = False
+            elif refs and validator.integrity_required and provenance["status"] != "checked":
+                gap(f"skeptic_evidence_integrity_unchecked:{fid}:{actor}")
+                evidence_ok = False
             if not spawned(actor, "skeptic") or actor in discoverers.get(fid, set()) or actor == verifiers.get(fid):
                 gap(f"skeptic_not_independent:{fid}:{actor}")
-        if len({s["actor"] for s in skeptics}) < 2 or len({s["angle"] for s in skeptics}) < 2:
+            elif evidence_ok:
+                panel_counts[result] += 1
+                results.append(result)
+                panel_engines.add(engine_of(actor))
+        if len(results) < 2:
             gap(f"panel_too_small:{fid}")
-        if cross_engine and len({engine_of(s["actor"]) for s in skeptics}) < 2:
+        if len(members) > 3:
+            gap(f"panel_too_large:{fid}")
+        if cross_engine and len(panel_engines) < 2:
             gap(f"panel_monoculture:{fid}")
         refuted = results.count("refuted")
         verdict = (code.get(fid, {}).get("validation") or {}).get("verdict")
@@ -315,7 +385,7 @@ def derive_expert(data, error_type=ValueError, integrity=None):
     # Severity: calibrated, independent, double-rated.
     raters = {}
     for i, c in enumerate(_list(record.get("calibration", []), "expert.calibration", error_type)):
-        rater = _text(c, "rater", f"expert.calibration[{i}]", error_type)
+        rater = participant(c, "rater", f"expert.calibration[{i}]")
         if not spawned(rater, "rater"):
             gap(f"rater_not_spawned:{rater}")
         raters[rater] = calibrated(c.get("scores"))
@@ -323,7 +393,7 @@ def derive_expert(data, error_type=ValueError, integrity=None):
     for i, r in enumerate(_list(record.get("ratings", []), "expert.ratings", error_type)):
         where = f"expert.ratings[{i}]"
         fid = _text(r, "finding", where, error_type)
-        rater = _text(r, "rater", where, error_type)
+        rater = participant(r, "rater", where)
         severity = _text(r, "severity", where, error_type)
         _text(r, "reason", where, error_type)
         if severity not in SEVERITY_ORDER:
@@ -353,16 +423,22 @@ def derive_expert(data, error_type=ValueError, integrity=None):
     # Simulated reception by three distinct recipients.
     reception = _list(record.get("reception", []), "expert.reception", error_type)
     seen_personas = set()
+    persona_actors = set()
     for i, r in enumerate(reception):
         where = f"expert.reception[{i}]"
         persona = _text(r, "persona", where, error_type)
-        actor = _text(r, "actor", where, error_type)
+        actor = participant(r, "actor", where)
         _text(r, "stop_span", where, error_type)
         _text(r, "disposition", where, error_type)
         if persona not in PERSONAS:
             raise error_type(f"{where}.persona: one of {PERSONAS}")
         if not spawned(actor, "persona"):
             gap(f"persona_not_spawned:{actor}")
+        if actor in persona_actors:
+            gap(f"reception_actor_reused:{actor}")
+        if persona in seen_personas:
+            raise error_type(f"{where}.persona: duplicate persona")
+        persona_actors.add(actor)
         seen_personas.add(persona)
     for persona in PERSONAS:
         if persona not in seen_personas:
@@ -374,16 +450,15 @@ def derive_expert(data, error_type=ValueError, integrity=None):
         gap("qa_missing")
         qa_result = "missing"
     else:
-        qa_actor = _text(qa, "actor", "expert.qa", error_type)
+        qa_actor = _actor_key(_text(qa, "actor", "expert.qa", error_type))
         qa_result = _text(qa, "result", "expert.qa", error_type)
         if qa_result not in ("pass", "imbalance"):
             raise error_type("expert.qa.result: pass or imbalance")
-        if not spawned(qa_actor, "qa"):
+        if not spawned(qa_actor, "qa") or qa_actor in participants:
             gap("qa_not_independent")
         if qa_result != "pass":
             gap("qa_imbalance")
 
-    three = derive_three_pass(data, error_type, integrity=integrity)
     if three.get("opted_in") and three.get("status") != "complete":
         gap("three_pass_incomplete")
 

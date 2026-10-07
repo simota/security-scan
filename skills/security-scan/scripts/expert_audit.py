@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Gate an expert-grade assessment: run contract, three-pass, expert records and run files.
 
-    python3 expert_audit.py OUT_DIR [--no-pdf]
+    python3 expert_audit.py OUT_DIR [--no-pdf] [--evidence-root ROOT --evidence-repository REPO]
 
 OUT_DIR holds findings.json, the rendered report and run/ (spawn prompts and
 returns, gate and preflight records). On top of expert.py's record gates this
 opens every recorded file and checks that each reception stop-span occurs in the
 rendered assessment. A file existing is not proof that a worker ran.
+Explicit evidence roots trigger fresh byte/source verification in this process;
+saved receipts never substitute for it, including when integrity is required.
 
 Exit codes: 0 complete, 3 held or degraded (each gap on stderr), 2 unreadable input.
 """
@@ -35,8 +37,14 @@ def visible_text(markup):
     return " ".join(html.unescape(re.sub(r"<[^>]+>", " ", text)).split())
 
 
-def audit(data, out_dir, pdf=True):
-    state = derive_expert(data, ValueError)
+def audit(data, out_dir, pdf=True, evidence_root=None, evidence_repository=None):
+    if evidence_repository is not None and evidence_root is None:
+        raise ValueError("--evidence-repository requires --evidence-root")
+    integrity = None
+    if evidence_root is not None:
+        from evidence_integrity import verify_evidence
+        integrity = verify_evidence(data, evidence_root, repository=evidence_repository)
+    state = derive_expert(data, ValueError, integrity=integrity)
     if not state["opted_in"]:
         return {"status": "not-expert", "gaps": ["expert record missing"], "counts": {}}
     gaps = list(state["gaps"])
@@ -63,12 +71,17 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("out_dir", type=Path)
     p.add_argument("--no-pdf", action="store_true", help="the PDF was skipped on purpose")
+    p.add_argument("--evidence-root", type=Path, help="explicit root for fresh evidence byte checks")
+    p.add_argument("--evidence-repository", type=Path, help="owned local Git repository for source binding")
     a = p.parse_args(argv)
+    if a.evidence_repository is not None and a.evidence_root is None:
+        p.error("--evidence-repository requires --evidence-root")
     try:
         data = json.loads((a.out_dir / "findings.json").read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             raise ValueError("findings.json must hold a JSON object")
-        result = audit(data, a.out_dir, pdf=not a.no_pdf)
+        result = audit(data, a.out_dir, pdf=not a.no_pdf, evidence_root=a.evidence_root,
+                       evidence_repository=a.evidence_repository)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         print(f"expert_audit.py: {exc}", file=sys.stderr)
         return 2
