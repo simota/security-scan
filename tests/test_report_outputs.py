@@ -168,10 +168,14 @@ class ReportOutputTests(unittest.TestCase):
                 if included_open:
                     self.assertEqual(queued[finding["id"]]["action"], expected)
         self.assertEqual({k: v for k, v in model.items()
-                          if k not in ("queue", "verification", "verification_counts")}, {
+                          if k not in ("queue", "verification", "verification_counts", "parts")}, {
             "open_count": 12, "fix_now": 1, "verify_first": 11,
             "fixed": 12, "accepted": 12, "excluded": 18,
             "unverified": 9, "unverified_high": 9,
+        })
+        self.assertEqual(model["parts"], {
+            "code": {"total": 36, "open_count": 12, "fix_now": 1, "verify_first": 11, "open_hm": 12},
+            "deps": {"total": 0, "open_count": 0, "fix_now": 0, "verify_first": 0, "open_hm": 0},
         })
         self.assertEqual(model["verification_counts"],
                          {"static": 0, "runtime": 9, "pending": 27, "retested": 0})
@@ -233,6 +237,31 @@ class ReportOutputTests(unittest.TestCase):
                 self.assertEqual(payload["report"], self.renderer.report_model(data))
                 self.assertEqual(payload["open_hm"], self.renderer.stats(data)["open_hm"])
                 self.assertEqual(assessment.find("html").attrs["lang"], lang)
+
+    def test_application_and_dependency_findings_are_reported_as_separate_parts(self):
+        data = self.report([self.finding("F-001", severity="Medium"), self.finding("D-001"),
+                            self.finding("D-002", severity="Low", status="Fixed")])
+        expected = {"code": {"total": 1, "open_count": 1, "fix_now": 0, "verify_first": 1, "open_hm": 1},
+                    "deps": {"total": 2, "open_count": 1, "fix_now": 0, "verify_first": 1, "open_hm": 1}}
+        for lang in ("en", "ja"):
+            with self.subTest(lang=lang):
+                dashboard, assessment = self.output(data, lang)
+                payload = self.payload(dashboard)
+                self.assertEqual({f["id"]: f["part"] for f in payload["findings"]},
+                                 {"F-001": "code", "D-001": "deps", "D-002": "deps"})
+                self.assertEqual(payload["report"]["parts"], expected)
+                for part, counts in expected.items():
+                    row = assessment.find("tr", **{"data-part": part})
+                    for key, number in counts.items():
+                        self.assertEqual(int(row.find(**{"data-part-count": key}).text()), number, (part, key))
+                # Each part's heading precedes only its own findings in the queue, register and details.
+                for section in ("priority-queue", "finding-register", "finding-details"):
+                    text = assessment.find(id=section).text()
+                    code, deps = (assessment.find(id=f"{section}-{part}").text() for part in ("code", "deps"))
+                    self.assertLess(text.index(code), text.index("F-001"), section)
+                    self.assertLess(text.index("F-001"), text.index(deps), section)
+                    self.assertLess(text.index(deps), text.index("D-001"), section)
+                self.assertNotIn("D-002", assessment.find(id="priority-queue").text())
 
     def test_anchors_are_safe_unique_and_consistent_across_outputs_and_input_order(self):
         ids = ["__proto__", "constructor", "toString", "x'\" ] # <svg/onload=fixture>",
@@ -497,6 +526,36 @@ class ReportOutputTests(unittest.TestCase):
             root = Path(destination) / "browser"
             root.mkdir(parents=True, exist_ok=True)
             page.screenshot(path=str(root / (name + ".png")), full_page=True)
+
+    @unittest.skipUnless(os.environ.get("SECURITY_SCAN_BROWSER_TEST") == "1", "opt-in Chromium interaction test")
+    def test_browser_parts_split_cards_priority_and_register_filter(self):
+        page = self.start_browser()
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        data = self.report([self.finding("F-001", severity="Medium"), self.finding("D-001"),
+                            self.finding("D-002", severity="Low", status="Fixed")])
+        for lang in ("en", "ja"):
+            with self.subTest(lang=lang):
+                labels = self.renderer.LABELS[lang]
+                page.goto("about:blank")
+                page.set_content(self.renderer.render_dashboard(data, labels, lang), wait_until="domcontentloaded")
+                for part, total in (("code", 1), ("deps", 2)):
+                    card = page.locator(f"#part-cards [data-part='{part}']")
+                    self.assertEqual(card.locator(".n").inner_text(), "1")
+                    self.assertIn(str(total), card.locator(".sub").inner_text())
+                    self.assertEqual(page.locator(f"#priority-{part} + .priority-list .priority-item").count(), 1)
+                self.assertIn("F-001", page.locator("#priority-code + .priority-list").inner_text())
+                self.assertIn("D-001", page.locator("#priority-deps + .priority-list").inner_text())
+                self.assertEqual(page.locator("tr.row").count(), 3)
+                page.select_option("#f-part", "deps")
+                self.assertEqual(sorted(page.locator("tr.row td:first-child").all_inner_texts()), ["D-001", "D-002"])
+                page.select_option("#f-part", "code")
+                self.assertEqual(page.locator("tr.row td:first-child").all_inner_texts(), ["F-001"])
+                page.locator("#reset").click()
+                self.assertEqual(page.locator("#f-part").input_value(), "")
+                self.assertEqual(page.locator("tr.row").count(), 3)
+                self.save_browser_artifact(page, "parts-" + lang)
+        self.assertEqual(errors, [])
 
     @unittest.skipUnless(os.environ.get("SECURITY_SCAN_BROWSER_TEST") == "1", "opt-in Chromium interaction test")
     def test_browser_keyboard_filters_reset_excluded_categories_and_hash_navigation(self):

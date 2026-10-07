@@ -34,6 +34,9 @@ CONFIDENCES = ["Confirmed", "Environment-dependent", "Suspected"]
 STATUSES = ["Open", "Fixed", "Accepted"]
 VERDICTS = ["Valid", "Likely", "Unverified", "Unlikely", "FalsePositive", "NotApplicable"]
 EXCLUDED = {"FalsePositive", "NotApplicable"}
+# Report parts: the application's own design, code and configuration, then the
+# scanner-owned dependency and supply-chain records (D-*, reference/dependencies.md).
+PARTS = ("code", "deps")
 CWE_RE = re.compile(r"^CWE-\d{1,5}$")
 
 LABELS = {
@@ -108,6 +111,35 @@ LABELS = {
 }
 
 # Shared wording keeps the dashboard and the printable assessment consistent.
+LABELS["en"].update({
+    "part": "Source",
+    "part_all": "All sources",
+    "part_code": "Application: design, code and configuration",
+    "part_deps": "Dependencies and supply chain",
+    "part_short_code": "Application",
+    "part_short_deps": "Dependencies",
+    "part_note": "Application findings come from reviewing the system's own design, code and configuration. Dependency findings (D-*) come from the dependency and supply-chain scan: vulnerable or malicious packages, lockfiles, version pinning, registries and build pipelines.",
+    "part_card_sub": "Open High/Medium: {open_hm} · Total: {total}",
+    "part_none_open": "No open findings in this part.",
+    "part_none": "No findings were recorded in this part.",
+    "a_cap_parts": "Findings by source: the application's own code and its third-party dependencies are counted separately.",
+    "a_part_total": "Total",
+})
+LABELS["ja"].update({
+    "part": "区分",
+    "part_all": "すべての区分",
+    "part_code": "アプリケーション（設計・実装・設定）",
+    "part_deps": "依存ライブラリ・サプライチェーン",
+    "part_short_code": "アプリケーション",
+    "part_short_deps": "依存ライブラリ",
+    "part_note": "アプリケーションの指摘は、対象システム自身の設計・実装・設定のレビュー結果です。依存ライブラリの指摘（D-*）は依存関係とサプライチェーンのスキャン結果で、脆弱・悪性パッケージ、lockfile、バージョン固定、レジストリ、ビルドパイプラインを対象にしています。",
+    "part_card_sub": "未対応の高・中: {open_hm} 件 · 計 {total} 件",
+    "part_none_open": "この区分に未対応の指摘はありません。",
+    "part_none": "この区分の指摘は記録されていません。",
+    "a_cap_parts": "区分別の指摘件数。アプリケーション自身のコードと第三者の依存ライブラリを分けて集計しています。",
+    "a_part_total": "計",
+})
+
 LABELS['en'].update({'eyebrow': 'SECURITY REVIEW',
  'report_note': 'Static review · read-only · offline report',
  'assessment_link': 'Print / assessment',
@@ -809,6 +841,10 @@ def stats(data):
     }
 
 
+def finding_part(finding):
+    return "deps" if str(finding["id"]).startswith("D-") else "code"
+
+
 def finding_anchor(data, finding):
     """Generated anchors never interpret finding IDs as HTML or CSS."""
     return "finding-" + str(next(i for i, f in enumerate(data["findings"], 1) if f is finding))
@@ -836,6 +872,7 @@ def display_finding(finding, state):
         "id", "title", "severity", "confidence", "location", "status", "category",
         "actor", "request", "impact", "fix", "validation", "verdict", "previous_validation",
         "references", "source_link", "snippet", "cwe") if key in finding}
+    public["part"] = finding_part(finding)
     public["_verification"] = public_verification_state(state)
     return public
 
@@ -879,6 +916,14 @@ def report_model(data, integrity=None):
                            ("static_supported", "runtime_supported") for f in fs),
             "retested": sum(verification[f["id"]]["retest"] == "verified" for f in fs),
         },
+        "parts": {part: {
+            "total": sum(finding_part(f) == part for f in fs),
+            "open_count": sum(item["finding"]["part"] == part for item in queue),
+            "fix_now": sum(item["finding"]["part"] == part and item["action"] == "fix_now" for item in queue),
+            "verify_first": sum(item["finding"]["part"] == part and item["action"] == "verify_first" for item in queue),
+            "open_hm": sum(item["finding"]["part"] == part and item["finding"]["severity"] in ("High", "Medium")
+                           for item in queue),
+        } for part in PARTS},
         "queue": queue,
     }
 
@@ -1656,25 +1701,41 @@ def render_assessment_html(data, L, lang, integrity=None):
                     "".join(f"<td class='{cls if number else ''}' data-report-count='{key}'>{number}</td>"
                             for key, (_, number, cls) in zip(("open_count", "fix_now", "verify_first", "open_hm"), metrics)) +
                     "</tr></tbody></table>")
+    part_columns = (("a_open", "open_count"), ("a_fix_now", "fix_now"), ("a_verify_first", "verify_first"),
+                    ("open_hm", "open_hm"), ("a_part_total", "total"))
+    parts_html = (f"<table class='metrics parts'><caption>{esc(L['a_cap_parts'])}</caption><thead><tr>"
+                  f"<th scope='col'>{esc(L['part'])}</th>" +
+                  "".join(f"<th scope='col'>{esc(L[label])}</th>" for label, _ in part_columns) + "</tr></thead><tbody>" +
+                  "".join(f"<tr data-part='{part}'><th scope='row'>{esc(L['part_short_' + part])}</th>" +
+                          "".join(f"<td data-part-count='{key}'>{model['parts'][part][key]}</td>" for _, key in part_columns) +
+                          "</tr>" for part in PARTS) +
+                  f"</tbody></table><p class='small'>{esc(L['part_note'])}</p>")
 
-    queue_rows = []
-    for item in model["queue"]:
-        f, action = item["finding"], item["action"]
-        if action == "fix_now":
-            action_text = f.get("fix") or L["a_fix_missing"]
-        else:
-            action_text = L["a_verify_action"]
-        # Queue is a navigation aid; the complete unabridged fix remains below.
-        action_preview = action_text if len(action_text) <= 220 else action_text[:217].rstrip() + "..."
-        queue_rows.append(
-            f"<tr><td><a href='#{esc(item['anchor'])}'>{esc(f['id'])}</a><br>{badge(f)}</td>"
-            f"<td><div class='queue-title'>{esc(f['title'])}</div>"
-            f"<div class='queue-location'><code>{esc(f['location'])}</code></div></td>"
-            f"<td class='queue-action'><strong>{esc(L['a_' + action])}</strong>{esc(action_preview)}</td></tr>")
-    queue_html = (f"<table class='queue'><caption>{esc(L['a_cap_queue'])}</caption><colgroup><col class='ref-col'><col class='finding-col'><col class='action-col'></colgroup>"
-                  f"<thead><tr><th scope='col'>ID / {esc(L['severity'])}</th><th scope='col'>{esc(L['a_finding'])}</th>"
-                  f"<th scope='col'>{esc(L['a_next_action'])}</th></tr></thead><tbody>{''.join(queue_rows)}</tbody></table>"
-                  if queue_rows else f"<p>{esc(L['a_queue_empty'])}</p>")
+    def queue_table(items):
+        queue_rows = []
+        for item in items:
+            f, action = item["finding"], item["action"]
+            if action == "fix_now":
+                action_text = f.get("fix") or L["a_fix_missing"]
+            else:
+                action_text = L["a_verify_action"]
+            # Queue is a navigation aid; the complete unabridged fix remains below.
+            action_preview = action_text if len(action_text) <= 220 else action_text[:217].rstrip() + "..."
+            queue_rows.append(
+                f"<tr><td><a href='#{esc(item['anchor'])}'>{esc(f['id'])}</a><br>{badge(f)}</td>"
+                f"<td><div class='queue-title'>{esc(f['title'])}</div>"
+                f"<div class='queue-location'><code>{esc(f['location'])}</code></div></td>"
+                f"<td class='queue-action'><strong>{esc(L['a_' + action])}</strong>{esc(action_preview)}</td></tr>")
+        return (f"<table class='queue'><caption>{esc(L['a_cap_queue'])}</caption><colgroup><col class='ref-col'><col class='finding-col'><col class='action-col'></colgroup>"
+                f"<thead><tr><th scope='col'>ID / {esc(L['severity'])}</th><th scope='col'>{esc(L['a_finding'])}</th>"
+                f"<th scope='col'>{esc(L['a_next_action'])}</th></tr></thead><tbody>{''.join(queue_rows)}</tbody></table>")
+
+    part_queues = {part: [item for item in model["queue"] if item["finding"]["part"] == part] for part in PARTS}
+    queue_html = ("".join(
+        f"<h3 id='priority-queue-{part}'>{esc(L['part_' + part])}</h3>" +
+        (queue_table(part_queues[part]) if part_queues[part] else f"<p class='small'>{esc(L['part_none_open'])}</p>")
+        for part in PARTS)
+        if model["queue"] else f"<p>{esc(L['a_queue_empty'])}</p>")
 
     lens = data.get("perspectives", [])
     lens_rows = "".join(
@@ -1685,20 +1746,27 @@ def render_assessment_html(data, L, lang, integrity=None):
                      f"<th scope='col'>{esc(L['note'])}</th></tr></thead><tbody>{lens_rows}</tbody></table>"
                      if lens else f"<p class='small'>{esc(L['a_coverage_empty'])}</p>")
 
-    index_rows = "".join(
-        f"<tr><td data-label='{esc(L['a_finding'])}'><a class='index-title' href='#{esc(finding_anchor(data, f))}'>{esc(f['title'])}</a>"
-        f"<span class='index-id'>{esc(f['id'])}</span></td><td data-label='{esc(L['severity'])}'>{badge(f)}</td>"
-        f"<td data-label='{esc(L['status'])}'>{esc(f['status'])}</td>"
-        f"<td class='evidence-cell' data-label='{esc(L['a_evidence_state'])}'><div><span>{esc(L['confidence'])}:</span> {esc(f['confidence'])}</div>"
-        f"<div><span>{esc(L['verdict'])}:</span> {esc(f['verdict'])}</div>"
-        f"<div>{esc(verification_views[f['id']]['level'])}</div>"
-        + (f"<div class='workflow-status'>{esc(workflow_views[f['id']]['status'])}</div>"
-           if f["id"] in workflow_views else "") + "</td></tr>" for f in fs)
-    index_html = (f"<table class='index'><caption>{esc(L['a_cap_index'])}</caption><colgroup><col class='finding-col'><col class='severity-col'><col class='status-col'><col class='evidence-col'></colgroup>"
-                  f"<thead><tr><th scope='col'>{esc(L['a_finding'])}</th><th scope='col'>{esc(L['severity'])}</th>"
-                  f"<th scope='col'>{esc(L['status'])}</th><th scope='col'>{esc(L['a_evidence_state'])}</th></tr></thead>"
-                  f"<tbody>{index_rows}</tbody></table>"
-                  if fs else f"<p>{esc(L['a_register_empty'])}</p>")
+    def index_table(part_fs):
+        index_rows = "".join(
+            f"<tr><td data-label='{esc(L['a_finding'])}'><a class='index-title' href='#{esc(finding_anchor(data, f))}'>{esc(f['title'])}</a>"
+            f"<span class='index-id'>{esc(f['id'])}</span></td><td data-label='{esc(L['severity'])}'>{badge(f)}</td>"
+            f"<td data-label='{esc(L['status'])}'>{esc(f['status'])}</td>"
+            f"<td class='evidence-cell' data-label='{esc(L['a_evidence_state'])}'><div><span>{esc(L['confidence'])}:</span> {esc(f['confidence'])}</div>"
+            f"<div><span>{esc(L['verdict'])}:</span> {esc(f['verdict'])}</div>"
+            f"<div>{esc(verification_views[f['id']]['level'])}</div>"
+            + (f"<div class='workflow-status'>{esc(workflow_views[f['id']]['status'])}</div>"
+               if f["id"] in workflow_views else "") + "</td></tr>" for f in part_fs)
+        return (f"<table class='index'><caption>{esc(L['a_cap_index'])}</caption><colgroup><col class='finding-col'><col class='severity-col'><col class='status-col'><col class='evidence-col'></colgroup>"
+                f"<thead><tr><th scope='col'>{esc(L['a_finding'])}</th><th scope='col'>{esc(L['severity'])}</th>"
+                f"<th scope='col'>{esc(L['status'])}</th><th scope='col'>{esc(L['a_evidence_state'])}</th></tr></thead>"
+                f"<tbody>{index_rows}</tbody></table>")
+
+    part_findings = {part: [f for f in fs if finding_part(f) == part] for part in PARTS}
+    index_html = ("".join(
+        f"<h3 id='finding-register-{part}'>{esc(L['part_' + part])}</h3>" +
+        (index_table(part_findings[part]) if part_findings[part] else f"<p class='small'>{esc(L['part_none'])}</p>")
+        for part in PARTS)
+        if fs else f"<p>{esc(L['a_register_empty'])}</p>")
 
     def card(f, is_excluded=False):
         state_keys = ("severity", "status", "confidence", "verdict")
@@ -1765,6 +1833,7 @@ def render_assessment_html(data, L, lang, integrity=None):
 <main>
 <section class="summary-section" id="executive-summary"><h2>{esc(L['summary'])}</h2>
 <p class="lead">{esc(summary)}</p>{metrics_html}<p class="small">{esc(accounting)}</p>
+{parts_html}
 <p class="small">{esc(L['a_status_note'])}</p>
 {verification_summary_html(model, L, integrity_summary_view(verification_states, fs, L))}
 {expert_html(expert_view(data, lang, integrity=integrity), L)}
@@ -1777,7 +1846,9 @@ def render_assessment_html(data, L, lang, integrity=None):
 {coverage_html}{ledger_html(data, lang)}<h3>{esc(L['a_checks'])}</h3>{bullets(data.get('checked_ok', []), 'a_checks_empty')}</section>
 <section class="finding-register" id="finding-register"><h2>{esc(L['a_register'])}</h2>
 <p class="section-note">{esc(L['a_register_note'])}</p>{index_html}</section>
-{(f'<section id="finding-details"><h2>{esc(L["details"])}</h2>' + "".join(card(f) for f in fs) + "</section>") if fs else ""}
+{(f'<section id="finding-details"><h2>{esc(L["details"])}</h2>' + "".join(
+    f"<h3 class='part-heading' id='finding-details-{part}'>{esc(L['part_' + part])}</h3>" + "".join(card(f) for f in part_findings[part])
+    for part in PARTS if part_findings[part]) + "</section>") if fs else ""}
 {excluded_html}
 </main></body></html>
 """
@@ -1842,7 +1913,7 @@ DASHBOARD = r"""<!doctype html>
 :root{color-scheme:light;--bg:#f6f5f1;--panel:#fff;--text:#1b1b1b;--muted:#5a5a5a;--line:#dcd9d2;--soft:#ecebe5;--high:#8a1c1c;--medium:#7a4800;--low:#24476e;--info:#5a5a5a;--accent:#1f3f66;--tint:#efede6;--warn:#f6f5f1;--warn-line:#1b1b1b;--serif:"Hiragino Mincho ProN","Noto Serif CJK JP","Yu Mincho",Georgia,serif;--sans:system-ui,-apple-system,"Hiragino Sans","Noto Sans CJK JP","Noto Sans JP",sans-serif}
 @media(prefers-color-scheme:dark){:root:not([data-theme="light"]){color-scheme:dark;--bg:#17171a;--panel:#1f1f23;--text:#ece9e2;--muted:#b3aea4;--line:#3a3936;--soft:#2a2a2e;--high:#f2a19a;--medium:#e8bf7a;--low:#a9c3e6;--info:#b3aea4;--accent:#a9c3e6;--tint:#26252a;--warn:#17171a;--warn-line:#ece9e2}}
 :root[data-theme="dark"]{color-scheme:dark;--bg:#17171a;--panel:#1f1f23;--text:#ece9e2;--muted:#b3aea4;--line:#3a3936;--soft:#2a2a2e;--high:#f2a19a;--medium:#e8bf7a;--low:#a9c3e6;--info:#b3aea4;--accent:#a9c3e6;--tint:#26252a;--warn:#17171a;--warn-line:#ece9e2}
-*{box-sizing:border-box}[hidden]{display:none!important}html{scroll-behavior:smooth;scroll-padding-top:20px}body{margin:0;overflow-wrap:anywhere;background:var(--bg);color:var(--text);font:14px/1.65 system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif}main{max-width:1320px;margin:auto;padding:32px 28px 48px}a{color:var(--accent);text-underline-offset:3px}button,input,select{font:inherit}button,a,input,select,summary{-webkit-tap-highlight-color:transparent}:focus-visible{outline:3px solid var(--accent);outline-offset:3px}button{cursor:pointer}button,.button{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:8px 12px;text-decoration:none}button:hover,.button:hover{background:var(--soft)}.skip{position:absolute;left:20px;top:-100px}.skip:focus{top:8px;z-index:2}.masthead{display:flex;justify-content:space-between;align-items:center;gap:12px;border-bottom:1px solid var(--line);padding-bottom:18px;margin-bottom:26px}.brand{font-size:12px;font-weight:750;letter-spacing:.15em;color:var(--accent)}.tools{display:flex;gap:8px;flex-wrap:wrap}.hero{display:flex;justify-content:space-between;gap:24px;margin-bottom:20px}.hero h1{font-size:clamp(25px,3.5vw,38px);line-height:1.25;letter-spacing:-.04em;margin:3px 0 9px;overflow-wrap:anywhere}.eyebrow,.meta,.muted{color:var(--muted)}.eyebrow{font-size:13px}.meta{max-width:820px;overflow-wrap:anywhere}.hero-aside{align-self:flex-end;font-size:12px;text-align:right;max-width:280px}.summary-banner{padding:16px 20px;background:var(--tint);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;margin-bottom:16px}.summary-banner strong{display:block;font-size:18px}.summary-banner p{margin:5px 0 0}.cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:16px 0}.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px 20px;text-align:left}.card .n{font-size:32px;line-height:1.25;font-weight:750;letter-spacing:-.03em}.card .l{font-size:12px;color:var(--muted);display:block;margin-bottom:8px}.card .sub{font-size:12px;color:var(--muted);margin-top:6px}.card.urgent .n{color:var(--high)}.card.review .n{color:var(--medium)}.report-note{font-size:12px;color:var(--muted);margin:8px 0 22px}.section-head{display:flex;justify-content:space-between;gap:16px;align-items:baseline;margin:26px 0 12px}h2{font-size:19px;letter-spacing:-.02em;margin:0}h3{font-size:15px;margin:0 0 6px}.section-head p{margin:4px 0 0;color:var(--muted)}.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:20px}.priority-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,330px),1fr));gap:12px}.hero>div,.priority-item,.panel{min-width:0}.priority-item h3{overflow-wrap:anywhere}.priority-item{border-top:3px solid var(--line)}.priority-item.sev-High{border-top-color:var(--high)}.priority-item.sev-Medium{border-top-color:var(--medium)}.priority-top{display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:10px}.priority-item h3 a{text-decoration:none;color:var(--text)}.priority-item h3 a:hover{text-decoration:underline}.priority-item p{margin:8px 0;overflow-wrap:anywhere}.priority-item .action-label{font-size:12px;font-weight:700;color:var(--accent)}.priority-item .impact{color:var(--muted)}.priority-item .action{padding-top:10px;border-top:1px solid var(--line)}.priority-item .location{font-size:12px;color:var(--muted)}.badge{display:inline-block;border:1px solid currentColor;border-radius:5px;padding:1px 7px;font-size:11px;line-height:1.7;font-weight:750;white-space:nowrap}.High{color:var(--high)}.Medium{color:var(--medium)}.Low{color:var(--low)}.Info{color:var(--info)}.verdict{font-size:12px;color:var(--muted)}.section-note{font-size:12px;color:var(--muted);margin:10px 0}.coverage{margin:20px 0;background:var(--warn);border-color:var(--warn-line)}summary{cursor:pointer;font-weight:700}summary .small{font-weight:400;color:var(--muted);margin-left:10px}.coverage p{margin:10px 0}.scope-meta{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:5px 16px;margin:16px 0}.scope-meta dt{font-size:12px;color:var(--muted)}.scope-meta dd{margin:0;overflow-wrap:anywhere}.coverage-columns{display:grid;grid-template-columns:1fr 1fr;gap:24px}.coverage ul{margin:6px 0;padding-left:20px}.perspective{border-bottom:1px solid var(--warn-line);padding:9px 0}.perspective:last-child{border:0}.perspective strong{display:block}.perspective p{margin:3px 0;font-size:13px}.chart-section{margin:20px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:16px}.grid .panel{padding:16px}.grid h3{font-size:13px}.bar{display:grid;grid-template-columns:minmax(85px,46%) 1fr 26px;gap:8px;align-items:center;margin:7px 0;font-size:12px}.bar .t{overflow-wrap:anywhere}.bar .track{height:7px;background:var(--soft);border-radius:4px;overflow:hidden}.bar .fill{height:100%;background:var(--accent)}.bar .v{text-align:right;font-variant-numeric:tabular-nums}.filters{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.filters label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}.filters select,.filters input{width:100%;min-width:0;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:9px;font-size:13px}.filters .search{grid-column:span 2}.filter-bottom{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:14px}.result-count{font-size:12px;color:var(--muted);margin:0}.tablewrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;margin-top:12px}table{border-collapse:collapse;width:100%;table-layout:fixed}th,td{text-align:left;padding:12px;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}th{font-size:11px;color:var(--muted);font-weight:700;background:var(--soft)}th:nth-child(1){width:9%}th:nth-child(2){width:9%}th:nth-child(3){width:14%}th:nth-child(4){width:9%}th:nth-child(5){width:11%}th:nth-child(6){width:30%}th:nth-child(7){width:18%}tr.row{cursor:pointer}tr.row:hover{background:var(--tint)}.finding-toggle{border:0;border-radius:3px;padding:0;background:transparent;text-align:left;font-weight:650;color:var(--text);width:100%}.finding-toggle:hover{background:transparent;color:var(--accent)}.finding-toggle .toggle-label{font-size:11px;display:block;font-weight:400;color:var(--accent);margin-top:4px}.location{display:block;overflow-wrap:anywhere;margin-top:4px;font-size:11px;color:var(--muted)}tr.detail>td{background:var(--tint);padding:18px 24px}tr.detail dl{display:grid;grid-template-columns:150px minmax(0,1fr);gap:8px 18px;margin:12px 0}tr.detail dt{font-size:12px;color:var(--muted)}tr.detail dd{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}.detail-actions{display:flex;justify-content:space-between;gap:12px;align-items:center}.action-guidance{border-left:3px solid var(--accent);padding:8px 12px;background:var(--panel)}.action-guidance strong{display:block}.action-guidance p{margin:4px 0}.three-pass-summary{margin:16px 0;overflow-wrap:anywhere;break-inside:auto!important;page-break-inside:auto}.three-pass-summary .prose{white-space:pre-wrap;overflow-wrap:anywhere}.three-pass-summary h4{margin:12px 0 4px}.three-pass-stage{break-inside:avoid}.verification-record,.workflow-record{margin:16px 0;padding:16px;border:1px solid var(--line);border-radius:6px;min-width:0}.verification-record h4,.workflow-record h4{font-size:15px;margin:0 0 8px}.verification-record h5,.workflow-record h5{font-size:13px;margin:18px 0 6px}.verification-record .prose,.workflow-record .prose{white-space:pre-wrap;overflow-wrap:anywhere}.verification-level,.workflow-status,.workflow-next{display:block;font-size:12px;font-weight:600;margin-top:7px}.history{border:1px dashed var(--line);padding:12px;margin-top:16px}.history p{margin:5px 0;white-space:pre-wrap}.lists{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:12px;margin-top:24px}.lists h2{font-size:16px}.lists ul{margin:10px 0 0;padding-left:18px}.empty{color:var(--muted);padding:20px}.snippet{margin:0;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);overflow-x:auto;font:12px/1.6 ui-monospace,Menlo,monospace;white-space:pre}.snippet span{display:block}.snippet .hit{background:var(--warn)}.snippet b{color:var(--muted);font-weight:400}.refs{margin:0;padding-left:18px}.refs li{overflow-wrap:anywhere}.rt{display:inline-block;min-width:60px;color:var(--muted);font-size:12px}.footer{font-size:12px;color:var(--muted);border-top:1px solid var(--line);margin-top:32px;padding-top:16px}code{font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
+*{box-sizing:border-box}[hidden]{display:none!important}html{scroll-behavior:smooth;scroll-padding-top:20px}body{margin:0;overflow-wrap:anywhere;background:var(--bg);color:var(--text);font:14px/1.65 system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif}main{max-width:1320px;margin:auto;padding:32px 28px 48px}a{color:var(--accent);text-underline-offset:3px}button,input,select{font:inherit}button,a,input,select,summary{-webkit-tap-highlight-color:transparent}:focus-visible{outline:3px solid var(--accent);outline-offset:3px}button{cursor:pointer}button,.button{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:8px 12px;text-decoration:none}button:hover,.button:hover{background:var(--soft)}.skip{position:absolute;left:20px;top:-100px}.skip:focus{top:8px;z-index:2}.masthead{display:flex;justify-content:space-between;align-items:center;gap:12px;border-bottom:1px solid var(--line);padding-bottom:18px;margin-bottom:26px}.brand{font-size:12px;font-weight:750;letter-spacing:.15em;color:var(--accent)}.tools{display:flex;gap:8px;flex-wrap:wrap}.hero{display:flex;justify-content:space-between;gap:24px;margin-bottom:20px}.hero h1{font-size:clamp(25px,3.5vw,38px);line-height:1.25;letter-spacing:-.04em;margin:3px 0 9px;overflow-wrap:anywhere}.eyebrow,.meta,.muted{color:var(--muted)}.eyebrow{font-size:13px}.meta{max-width:820px;overflow-wrap:anywhere}.hero-aside{align-self:flex-end;font-size:12px;text-align:right;max-width:280px}.summary-banner{padding:16px 20px;background:var(--tint);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;margin-bottom:16px}.summary-banner strong{display:block;font-size:18px}.summary-banner p{margin:5px 0 0}.cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:16px 0}.cards.part-cards{grid-template-columns:repeat(2,minmax(0,1fr))}.part-heading{margin:18px 0 8px}.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px 20px;text-align:left}.card .n{font-size:32px;line-height:1.25;font-weight:750;letter-spacing:-.03em}.card .l{font-size:12px;color:var(--muted);display:block;margin-bottom:8px}.card .sub{font-size:12px;color:var(--muted);margin-top:6px}.card.urgent .n{color:var(--high)}.card.review .n{color:var(--medium)}.report-note{font-size:12px;color:var(--muted);margin:8px 0 22px}.section-head{display:flex;justify-content:space-between;gap:16px;align-items:baseline;margin:26px 0 12px}h2{font-size:19px;letter-spacing:-.02em;margin:0}h3{font-size:15px;margin:0 0 6px}.section-head p{margin:4px 0 0;color:var(--muted)}.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:20px}.priority-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,330px),1fr));gap:12px}.hero>div,.priority-item,.panel{min-width:0}.priority-item h3{overflow-wrap:anywhere}.priority-item{border-top:3px solid var(--line)}.priority-item.sev-High{border-top-color:var(--high)}.priority-item.sev-Medium{border-top-color:var(--medium)}.priority-top{display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:10px}.priority-item h3 a{text-decoration:none;color:var(--text)}.priority-item h3 a:hover{text-decoration:underline}.priority-item p{margin:8px 0;overflow-wrap:anywhere}.priority-item .action-label{font-size:12px;font-weight:700;color:var(--accent)}.priority-item .impact{color:var(--muted)}.priority-item .action{padding-top:10px;border-top:1px solid var(--line)}.priority-item .location{font-size:12px;color:var(--muted)}.badge{display:inline-block;border:1px solid currentColor;border-radius:5px;padding:1px 7px;font-size:11px;line-height:1.7;font-weight:750;white-space:nowrap}.High{color:var(--high)}.Medium{color:var(--medium)}.Low{color:var(--low)}.Info{color:var(--info)}.verdict{font-size:12px;color:var(--muted)}.section-note{font-size:12px;color:var(--muted);margin:10px 0}.coverage{margin:20px 0;background:var(--warn);border-color:var(--warn-line)}summary{cursor:pointer;font-weight:700}summary .small{font-weight:400;color:var(--muted);margin-left:10px}.coverage p{margin:10px 0}.scope-meta{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:5px 16px;margin:16px 0}.scope-meta dt{font-size:12px;color:var(--muted)}.scope-meta dd{margin:0;overflow-wrap:anywhere}.coverage-columns{display:grid;grid-template-columns:1fr 1fr;gap:24px}.coverage ul{margin:6px 0;padding-left:20px}.perspective{border-bottom:1px solid var(--warn-line);padding:9px 0}.perspective:last-child{border:0}.perspective strong{display:block}.perspective p{margin:3px 0;font-size:13px}.chart-section{margin:20px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:16px}.grid .panel{padding:16px}.grid h3{font-size:13px}.bar{display:grid;grid-template-columns:minmax(85px,46%) 1fr 26px;gap:8px;align-items:center;margin:7px 0;font-size:12px}.bar .t{overflow-wrap:anywhere}.bar .track{height:7px;background:var(--soft);border-radius:4px;overflow:hidden}.bar .fill{height:100%;background:var(--accent)}.bar .v{text-align:right;font-variant-numeric:tabular-nums}.filters{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.filters label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}.filters select,.filters input{width:100%;min-width:0;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:9px;font-size:13px}.filters .search{grid-column:span 2}.filter-bottom{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:14px}.result-count{font-size:12px;color:var(--muted);margin:0}.tablewrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;margin-top:12px}table{border-collapse:collapse;width:100%;table-layout:fixed}th,td{text-align:left;padding:12px;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}th{font-size:11px;color:var(--muted);font-weight:700;background:var(--soft)}th:nth-child(1){width:9%}th:nth-child(2){width:9%}th:nth-child(3){width:14%}th:nth-child(4){width:9%}th:nth-child(5){width:11%}th:nth-child(6){width:30%}th:nth-child(7){width:18%}tr.row{cursor:pointer}tr.row:hover{background:var(--tint)}.finding-toggle{border:0;border-radius:3px;padding:0;background:transparent;text-align:left;font-weight:650;color:var(--text);width:100%}.finding-toggle:hover{background:transparent;color:var(--accent)}.finding-toggle .toggle-label{font-size:11px;display:block;font-weight:400;color:var(--accent);margin-top:4px}.location{display:block;overflow-wrap:anywhere;margin-top:4px;font-size:11px;color:var(--muted)}tr.detail>td{background:var(--tint);padding:18px 24px}tr.detail dl{display:grid;grid-template-columns:150px minmax(0,1fr);gap:8px 18px;margin:12px 0}tr.detail dt{font-size:12px;color:var(--muted)}tr.detail dd{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}.detail-actions{display:flex;justify-content:space-between;gap:12px;align-items:center}.action-guidance{border-left:3px solid var(--accent);padding:8px 12px;background:var(--panel)}.action-guidance strong{display:block}.action-guidance p{margin:4px 0}.three-pass-summary{margin:16px 0;overflow-wrap:anywhere;break-inside:auto!important;page-break-inside:auto}.three-pass-summary .prose{white-space:pre-wrap;overflow-wrap:anywhere}.three-pass-summary h4{margin:12px 0 4px}.three-pass-stage{break-inside:avoid}.verification-record,.workflow-record{margin:16px 0;padding:16px;border:1px solid var(--line);border-radius:6px;min-width:0}.verification-record h4,.workflow-record h4{font-size:15px;margin:0 0 8px}.verification-record h5,.workflow-record h5{font-size:13px;margin:18px 0 6px}.verification-record .prose,.workflow-record .prose{white-space:pre-wrap;overflow-wrap:anywhere}.verification-level,.workflow-status,.workflow-next{display:block;font-size:12px;font-weight:600;margin-top:7px}.history{border:1px dashed var(--line);padding:12px;margin-top:16px}.history p{margin:5px 0;white-space:pre-wrap}.lists{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:12px;margin-top:24px}.lists h2{font-size:16px}.lists ul{margin:10px 0 0;padding-left:18px}.empty{color:var(--muted);padding:20px}.snippet{margin:0;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);overflow-x:auto;font:12px/1.6 ui-monospace,Menlo,monospace;white-space:pre}.snippet span{display:block}.snippet .hit{background:var(--warn)}.snippet b{color:var(--muted);font-weight:400}.refs{margin:0;padding-left:18px}.refs li{overflow-wrap:anywhere}.rt{display:inline-block;min-width:60px;color:var(--muted);font-size:12px}.footer{font-size:12px;color:var(--muted);border-top:1px solid var(--line);margin-top:32px;padding-top:16px}code{font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
 /* Academic layer (docs/report-design.md): serif argument, sans apparatus, booktabs rules, no boxes. */
 body{font-family:var(--serif);font-size:15px;line-height:1.7;font-variant-numeric:lining-nums tabular-nums}
 h1,h2,h3,h4{font-family:var(--serif);font-weight:700;letter-spacing:0}
@@ -1884,7 +1955,8 @@ button,.button,.filters select,.filters input{border-radius:2px}
 <div class="hero"><div><div class="eyebrow" data-l="dash_title"></div><h1 id="h"></h1><div class="meta" id="meta"></div></div><div class="hero-aside" data-l="report_note"></div></div>
 <div class="summary-banner" id="summary"></div>
 <div class="cards" id="cards"></div><p class="report-note" data-l="counts_note"></p>
-<section aria-labelledby="priority-heading"><div class="section-head"><div><h2 id="priority-heading" data-l="priority"></h2><p data-l="priority_note"></p></div><a href="#findings" data-l="view_all"></a></div><div class="priority-list" id="priority"></div><p class="section-note" id="queue-note"></p></section>
+<div class="cards part-cards" id="part-cards"></div><p class="report-note" data-l="part_note"></p>
+<section aria-labelledby="priority-heading"><div class="section-head"><div><h2 id="priority-heading" data-l="priority"></h2><p data-l="priority_note"></p></div><a href="#findings" data-l="view_all"></a></div><div id="priority"></div><p class="section-note" id="queue-note"></p></section>
 <section class="panel" id="verification-summary" aria-label="Verification summary"></section>
 __EXPERT__
 __THREE_PASS__
@@ -1892,7 +1964,7 @@ __THREE_PASS__
 <details class="chart-section"><summary data-l="overview"></summary><p class="section-note" data-l="count_basis"></p><div class="grid"><div class="panel"><h3 data-l="by_sev"></h3><div id="c-sev"></div></div><div class="panel"><h3 data-l="by_conf"></h3><div id="c-conf"></div></div><div class="panel"><h3 data-l="by_cat"></h3><div id="c-cat"></div></div><div class="panel"><h3 data-l="by_status"></h3><div id="c-status"></div></div><div class="panel"><h3 data-l="by_verdict"></h3><div id="c-verdict"></div><p class="section-note" data-l="excluded_note"></p></div></div></details>
 <section id="findings" aria-labelledby="findings-heading"><div class="section-head"><div><h2 id="findings-heading" data-l="findings_register"></h2><p data-l="findings_note"></p></div></div>
 <div class="panel filters-panel"><div class="filters">
-<label><span data-l="record_set"></span><select id="f-scope"></select></label><label><span data-l="severity"></span><select id="f-sev"></select></label><label><span data-l="confidence"></span><select id="f-conf"></select></label><label><span data-l="category"></span><select id="f-cat"></select></label><label><span data-l="status"></span><select id="f-status"></select></label><label><span data-l="verdict"></span><select id="f-verdict"></select></label><label><span data-l="sort"></span><select id="f-sort"></select></label><label class="search"><span data-l="search"></span><input id="f-q" type="search"></label></div><div class="filter-bottom"><p class="result-count" id="result-count" role="status" aria-live="polite"></p><button type="button" id="reset" data-l="reset"></button></div></div>
+<label><span data-l="record_set"></span><select id="f-scope"></select></label><label><span data-l="part"></span><select id="f-part"></select></label><label><span data-l="severity"></span><select id="f-sev"></select></label><label><span data-l="confidence"></span><select id="f-conf"></select></label><label><span data-l="category"></span><select id="f-cat"></select></label><label><span data-l="status"></span><select id="f-status"></select></label><label><span data-l="verdict"></span><select id="f-verdict"></select></label><label><span data-l="sort"></span><select id="f-sort"></select></label><label class="search"><span data-l="search"></span><input id="f-q" type="search"></label></div><div class="filter-bottom"><p class="result-count" id="result-count" role="status" aria-live="polite"></p><button type="button" id="reset" data-l="reset"></button></div></div>
 <div class="tablewrap"><table><thead><tr><th scope="col">ID</th><th scope="col" data-l="severity"></th><th scope="col" data-l="confidence"></th><th scope="col" data-l="status"></th><th scope="col" data-l="verdict"></th><th scope="col" data-l="title_col"></th><th scope="col" data-l="category"></th></tr></thead><tbody id="rows"></tbody></table></div></section>
 <div class="lists" id="lists"></div><footer class="footer" data-l="source_note"></footer>
 <noscript><p>__NOSCRIPT__ <a href="assessment.html">__ASSESSMENT__</a></p></noscript>
@@ -1927,8 +1999,9 @@ function workflowNode(f){var view=ownValue(D.workflow_views,f.id);if(!view)retur
 function verificationNode(f){var view=D.verification_views[f.id],box=el('div',{'class':'verification-record'});box.appendChild(el('h4',null,L.v_title));box.appendChild(el('p',{'class':'verification-level'},view.level));box.appendChild(el('p',null,L.v_retest+': '+view.retest));if(view.gaps.length){var ul=el('ul',{'class':'verification-gaps'});view.gaps.forEach(function(gap){ul.appendChild(el('li',null,gap));});box.appendChild(ul);}view.sections.forEach(function(section){var group=el('section');group.appendChild(el('h5',null,section.title));section.items.forEach(function(item){group.appendChild(el('p',{'class':'prose'},item));});box.appendChild(group);});return box;}
 
 [[L.open_hm,D.open_hm,'urgent',L.open_count+': '+R.open_count],[L.needs_validation,R.verify_first,'review',L.fix_now+': '+R.fix_now],[L.closed_count,R.fixed+' / '+R.accepted,'',L.included+': '+F.length],[L.excluded_short,R.excluded,'',L.all_records+': '+ALL.length]].forEach(function(c){var d=el('div',{'class':'card '+c[2]});d.appendChild(el('span',{'class':'l'},c[0]));d.appendChild(el('div',{'class':'n'},c[1]));d.appendChild(el('div',{'class':'sub'},c[3]));byId('cards').appendChild(d);});
-var top=R.queue.slice(0,4);top.forEach(function(item){var f=item.finding,p=el('article',{'class':'panel priority-item sev-'+f.severity}),head=el('div',{'class':'priority-top'});head.appendChild(badge(f));head.appendChild(el('span',{'class':'action-label'},L[item.action]));p.appendChild(head);var h=el('h3');h.appendChild(el('a',{href:'#'+item.anchor},f.id+' · '+f.title));p.appendChild(h);p.appendChild(el('div',{'class':'verdict'},f.confidence+' · '+f.verdict));p.appendChild(el('code',{'class':'location'},f.location));var workflowView=ownValue(D.workflow_views,f.id);if(workflowView)p.appendChild(el('p',{'class':'workflow-next'},L.w_next+': '+workflowView.next_stage));if(f.impact)p.appendChild(el('p',{'class':'impact'},f.impact));p.appendChild(el('p',{'class':'action'},item.action==='fix_now'?(f.fix||L.missing_fix):L.verify_first_note));byId('priority').appendChild(p);});
-if(!top.length)byId('priority').appendChild(el('div',{'class':'panel muted'},L.no_open));byId('queue-note').textContent=fmt(L.queue_more,{shown:top.length,total:R.open_count});
+D.parts.forEach(function(part){var c=R.parts[part],d=el('div',{'class':'card','data-part':part});d.appendChild(el('span',{'class':'l'},L['part_'+part]));d.appendChild(el('div',{'class':'n'},c.open_count));d.appendChild(el('div',{'class':'sub'},fmt(L.part_card_sub,c)));byId('part-cards').appendChild(d);});
+var shownTop=0;D.parts.forEach(function(part){var top=R.queue.filter(function(item){return item.finding.part===part;}).slice(0,4);shownTop+=top.length;if(!R.queue.length)return;byId('priority').appendChild(el('h3',{'class':'part-heading',id:'priority-'+part},L['part_'+part]));var list=el('div',{'class':'priority-list'});byId('priority').appendChild(list);if(!top.length)list.appendChild(el('div',{'class':'panel muted'},L.part_none_open));top.forEach(function(item){var f=item.finding,p=el('article',{'class':'panel priority-item sev-'+f.severity}),head=el('div',{'class':'priority-top'});head.appendChild(badge(f));head.appendChild(el('span',{'class':'action-label'},L[item.action]));p.appendChild(head);var h=el('h3');h.appendChild(el('a',{href:'#'+item.anchor},f.id+' · '+f.title));p.appendChild(h);p.appendChild(el('div',{'class':'verdict'},f.confidence+' · '+f.verdict));p.appendChild(el('code',{'class':'location'},f.location));var workflowView=ownValue(D.workflow_views,f.id);if(workflowView)p.appendChild(el('p',{'class':'workflow-next'},L.w_next+': '+workflowView.next_stage));if(f.impact)p.appendChild(el('p',{'class':'impact'},f.impact));p.appendChild(el('p',{'class':'action'},item.action==='fix_now'?(f.fix||L.missing_fix):L.verify_first_note));list.appendChild(p);});});
+if(!R.queue.length)byId('priority').appendChild(el('div',{'class':'panel muted'},L.no_open));byId('queue-note').textContent=fmt(L.queue_more,{shown:shownTop,total:R.open_count});
 ['scope','method','commit'].forEach(function(k){byId('scope-meta').appendChild(el('dt',null,L[k==='scope'?'scope_l':k]));byId('scope-meta').appendChild(el('dd',null,D.meta[k]||L.not_recorded));});
 byId('coverage-count').textContent=L.limitations_count+': '+D.limitations.length;listInto(byId('limitations'),D.limitations,L.limitations_empty);
 if(!D.perspectives.length)byId('perspectives').appendChild(el('p',{'class':'muted'},L.coverage_missing));
@@ -1936,11 +2009,11 @@ D.perspectives.forEach(function(p){var box=el('div',{'class':'perspective'});box
 function bars(id,key,order,colored,fs){var c=count(fs||F,key),keys=order||Object.keys(c).sort(function(a,b){return c[b]-c[a]||a.localeCompare(b);});var max=Math.max.apply(null,keys.map(function(k){return c[k]||0;}).concat([1]));keys.forEach(function(k){var r=el('div',{'class':'bar'});r.appendChild(el('span',{'class':'t'},k));var t=el('div',{'class':'track'}),fill=el('div',{'class':'fill'});fill.style.width=((c[k]||0)/max*100)+'%';if(colored)fill.style.background='var(--'+k.toLowerCase()+')';t.appendChild(fill);r.appendChild(t);r.appendChild(el('span',{'class':'v'},c[k]||0));byId(id).appendChild(r);});}
 bars('c-sev','severity',SEV,true);bars('c-conf','confidence',CONF);bars('c-cat','category');bars('c-status','status',ST);bars('c-verdict','verdict',D.order.verdict,false,ALL);
 function opts(id,vals,first){var s=byId(id);if(first)s.appendChild(el('option',{value:''},first));vals.forEach(function(v){var pair=Array.isArray(v)?v:[v,v];s.appendChild(el('option',{value:pair[0]},pair[1]));});s.onchange=function(){if(id==='f-verdict'&&D.excluded_verdicts.indexOf(s.value)>=0)byId('f-scope').value='all';draw();};}
-opts('f-scope',[['included',L.included_set],['excluded',L.excluded_set],['all',L.all_records]]);opts('f-sort',[['priority',L.priority_sort],['severity',L.severity_sort]]);
+opts('f-scope',[['included',L.included_set],['excluded',L.excluded_set],['all',L.all_records]]);opts('f-part',D.parts.map(function(part){return [part,L['part_short_'+part]];}),L.part_all);opts('f-sort',[['priority',L.priority_sort],['severity',L.severity_sort]]);
 opts('f-sev',SEV,L.all);opts('f-conf',CONF,L.all);opts('f-cat',Object.keys(count(ALL,'category')).sort(),L.all);opts('f-status',ST,L.all);opts('f-verdict',D.order.verdict,L.all_verdicts);
 var q=byId('f-q');q.placeholder=L.search;q.oninput=draw;
 function v(id){return byId(id).value;}
-function reset(){['f-sev','f-conf','f-cat','f-status','f-verdict'].forEach(function(id){byId(id).value='';});byId('f-scope').value='included';byId('f-sort').value='priority';q.value='';}
+function reset(){['f-part','f-sev','f-conf','f-cat','f-status','f-verdict'].forEach(function(id){byId(id).value='';});byId('f-scope').value='included';byId('f-sort').value='priority';q.value='';}
 byId('reset').onclick=function(){reset();draw();};
 function details(f,anchor){var dt=el('tr',{'class':'detail',id:anchor+'-detail'});dt.hidden=!expanded.has(anchor);var td=el('td',{colspan:7}),dl=el('dl');
 var head=el('div',{'class':'detail-actions'});head.appendChild(el('strong',null,f.id+' · '+f.title));head.appendChild(el('a',{href:'#'+anchor},L.permalink));td.appendChild(head);
@@ -1950,7 +2023,7 @@ field(L.location,f.location);if(f.cwe)field(L.cwe,f.cwe);['actor','request','imp
 if(f.snippet){var pre=el('pre',{'class':'snippet'});f.snippet.lines.forEach(function(text,i){var n=f.snippet.start+i,ln=el('span',{'class':n>=f.snippet.hit[0]&&n<=f.snippet.hit[1]?'hit':''});ln.appendChild(el('b',null,String(n).padStart(5,' ')+' '));ln.appendChild(document.createTextNode(text));pre.appendChild(ln);});field(L.snippet,pre);if(f.snippet.truncated)field(L.note,L.snippet_truncated);}
 var refs=(f.source_link?[{type:'source',url:f.source_link,title:L.source_link}]:[]).concat(f.references||[]);if(refs.length){var ul=el('ul',{'class':'refs'});refs.forEach(function(r){var li=el('li');li.appendChild(el('span',{'class':'rt'},r.type));li.appendChild(el('a',{href:r.url,target:'_blank',rel:'noopener noreferrer'},r.title||r.url));ul.appendChild(li);});field(L.references,ul);}td.appendChild(dl);var workflow=workflowNode(f);if(workflow)td.appendChild(workflow);td.appendChild(verificationNode(f));
 if(f.previous_validation&&typeof f.previous_validation==='object'){var history=el('aside',{'class':'history'});history.appendChild(el('strong',null,L.previous_validation));history.appendChild(el('p',null,L.history_note));['verdict','evidence','method'].forEach(function(k){if(typeof f.previous_validation[k]==='string')history.appendChild(el('p',null,f.previous_validation[k]));});td.appendChild(history);}dt.appendChild(td);return dt;}
-function draw(){var tb=byId('rows');tb.textContent='';var term=q.value.trim().toLowerCase(),scope=v('f-scope');var pool=scope==='all'?ALL:ALL.filter(function(f){return scope==='excluded'?excluded(f):!excluded(f);});var shown=pool.filter(function(f){return (!v('f-sev')||f.severity===v('f-sev'))&&(!v('f-conf')||f.confidence===v('f-conf'))&&(!v('f-cat')||f.category===v('f-cat'))&&(!v('f-status')||f.status===v('f-status'))&&(!v('f-verdict')||f.verdict===v('f-verdict'))&&(!term||JSON.stringify(f).toLowerCase().indexOf(term)>=0);});
+function draw(){var tb=byId('rows');tb.textContent='';var term=q.value.trim().toLowerCase(),scope=v('f-scope');var pool=scope==='all'?ALL:ALL.filter(function(f){return scope==='excluded'?excluded(f):!excluded(f);});var shown=pool.filter(function(f){return (!v('f-part')||f.part===v('f-part'))&&(!v('f-sev')||f.severity===v('f-sev'))&&(!v('f-conf')||f.confidence===v('f-conf'))&&(!v('f-cat')||f.category===v('f-cat'))&&(!v('f-status')||f.status===v('f-status'))&&(!v('f-verdict')||f.verdict===v('f-verdict'))&&(!term||JSON.stringify(f).toLowerCase().indexOf(term)>=0);});
 shown.sort(function(a,b){var status=v('f-sort')==='priority'?Number(a.status!=='Open')-Number(b.status!=='Open'):0;return status||SEV.indexOf(a.severity)-SEV.indexOf(b.severity)||(v('f-sort')==='priority'?Number(action(a)!=='fix_now')-Number(action(b)!=='fix_now'):0)||String(a.id).localeCompare(String(b.id));});
 byId('result-count').textContent=fmt(L.showing,{shown:shown.length,total:pool.length});
 if(!shown.length){var empty=el('tr'),td=el('td',{colspan:7,'class':'empty'},pool.length?L.no_matches:L.no_records);empty.appendChild(td);tb.appendChild(empty);return;}
@@ -1992,6 +2065,7 @@ def render_dashboard(data, L, lang, integrity=None):
         "verification_summary": verification_summary_parts(model, L),
         "integrity_summary": integrity_summary_view(verification_states, active(data), L),
         "anchors": {str(f["id"]): finding_anchor(data, f) for f in data["findings"]},
+        "parts": list(PARTS),
         "order": {"severity": SEVERITIES, "confidence": CONFIDENCES, "status": STATUSES, "verdict": VERDICTS},
         "excluded_verdicts": sorted(EXCLUDED),
         **{k: data[k] for k in ("checked_ok", "decisions", "limitations", "next_steps", "perspectives")},

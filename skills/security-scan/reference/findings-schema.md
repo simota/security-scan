@@ -19,6 +19,11 @@ It writes:
   confidence, category and status, filterable findings table with expandable
   details, perspective coverage. Self-contained, works offline
 - `<dir>/assessment.html` — the assessment document, print-styled for A4
+- Both outputs report two parts separately: the application's own design, code
+  and configuration (every non-`D-*` finding) and dependencies and supply chain
+  (`D-*`, scanner-owned). The split comes from the ID prefix, not `category`:
+  per-part counts, a priority queue and register per part, and a dashboard
+  source filter
 - `<dir>/assessment.pdf` — the assessment document as PDF, printed by headless
   Chrome/Chromium (set `CHROME` to choose a binary) or WeasyPrint as a fallback
 

@@ -69,7 +69,8 @@ needs rerunning outside the sandbox with the requester's agreement.
   per-package review in the existing `D-*` findings' `validation`; do not add
   per-package findings under another prefix
 - State application (`F-*`) and dependency (`D-*`) counts separately in the
-  chat summary, so scanner volume does not hide the code findings
+  chat summary, so scanner volume does not hide the code findings; the
+  dashboard and assessment already split the two parts by ID prefix
 - A vulnerable package that is a dev-only dependency is still reported; say it
   is dev-only in `impact` and lower severity only with a reason
 - Record in `perspectives`: lockfiles audited, tools run, tools not run

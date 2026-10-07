@@ -109,7 +109,7 @@ class ReportArtifactTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory(prefix="security-scan-pdf-tests-")
         self.addCleanup(temp.cleanup)
-        self.root = Path(temp.name)
+        self.root = Path(temp.name).resolve()
         destination = os.environ.get("SECURITY_SCAN_REPORT_ARTIFACTS")
         self.artifacts = Path(destination) if destination else self.root / "artifacts"
 
