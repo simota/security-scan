@@ -5,12 +5,16 @@
 
 A fragment is a JSON file written with the host's file-write tool (never a
 shell heredoc or a generated script). It holds any of these top-level keys:
-`meta` is merged key by key; `findings` and `evidence` records are matched by
+`meta`, `expert`, `three_pass` and `evidence_integrity` are merged key by key;
+nested values (including phase lists) are replaced, not recursively merged.
+`findings`, `evidence` and `test_runs` records are matched by
 `id`, a known record updated key by key (so a later fragment can add just
 `verification` to F-003) and a new one appended; the list sections (`perspectives`, `checked_ok`, `decisions`,
 `limitations`, `next_steps`) are appended without duplicates. FINDINGS is
-created when absent. `schema_version` and `assessment` are set only by
-evidence_capture.py, never by a fragment. The merged report must pass render.py's schema check
+created when absent. Profiles and test runs require a captured version-2 record.
+`schema_version`, `assessment` and `meta.commit` come only from evidence_capture.py;
+workflow journals come only from verification_workflow.py. The merged report
+must pass render.py's schema check
 before anything is written.
 
 Finding text describes the weakness, not an attack: the request shape is the
@@ -30,10 +34,16 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import render  # noqa: E402
+from expert import derive_expert  # noqa: E402
 
 LISTS = ("perspectives", "checked_ok", "decisions", "limitations", "next_steps")
-OBJECTS = ("meta",)
-RECORDS = ("findings", "evidence")
+PROFILES = ("expert", "three_pass", "evidence_integrity")
+OBJECTS = ("meta", *PROFILES)
+RECORDS = ("findings", "evidence", "test_runs")
+EXPERT_FIELDS = {"version", "mode", "host", "consent", "preflight", "spawns", "recon",
+                 "reconciliation", "discovery", "variants", "omission", "panels",
+                 "calibration", "ratings", "severity_resolutions", "reception", "qa"}
+RESERVED_FINDING = {"verification_workflow", "verdict", "source_link", "snippet"}
 PROSE = ("title", "actor", "request", "impact", "fix")
 # Literal attack strings, not descriptions of them. Prose names the weakness
 # and the parameter; the payload itself never belongs in the report.
@@ -47,9 +57,65 @@ PAYLOAD = re.compile(
 
 def read_json(path):
     try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, ValueError) as e:
+        return json.loads(Path(path).read_text(encoding="utf-8"), object_pairs_hook=unique_object)
+    except (OSError, UnicodeError, ValueError, RecursionError) as e:
         raise render.SchemaError(f"{path}: {e}") from None
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key {key!r}")
+        result[key] = value
+    return result
+
+
+def fragment_problems(fragment, name):
+    """Check patch structure before applying it, including writer-owned fields."""
+    if not isinstance(fragment, dict):
+        return [f"{name}: a fragment must be a JSON object"]
+    unsupported = fragment.keys() - {*OBJECTS, *RECORDS, *LISTS}
+    if unsupported:
+        return [f"{name}: unsupported keys {sorted(unsupported)}; schema_version and assessment "
+                "come from evidence_capture.py"]
+    problems = []
+    for key in OBJECTS:
+        if key in fragment and not isinstance(fragment[key], dict):
+            problems.append(f"{name}: {key} must be an object")
+    for key in (*RECORDS, *LISTS):
+        if key in fragment and not isinstance(fragment[key], list):
+            problems.append(f"{name}: {key} must be a list")
+    if problems:
+        return problems
+    if "commit" in fragment.get("meta", {}):
+        problems.append(f"{name}: meta.commit comes from evidence_capture.py")
+    unknown_expert = fragment.get("expert", {}).keys() - EXPERT_FIELDS
+    if unknown_expert:
+        problems.append(f"{name}: unsupported expert fields {sorted(unknown_expert)}")
+    for key in RECORDS:
+        seen = set()
+        for record in fragment.get(key, []):
+            identifier = record.get("id") if isinstance(record, dict) else None
+            if not isinstance(identifier, str) or not identifier.strip():
+                problems.append(f"{name}: {key} records need a nonblank id")
+                continue
+            if identifier in seen:
+                problems.append(f"{name}: duplicate {key} id {identifier}")
+            seen.add(identifier)
+            if key == "findings" and RESERVED_FINDING.intersection(record):
+                problems.append(f"{name}: {identifier}: workflow journals and derived fields cannot be merged")
+    pending = [fragment]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            if any(key.startswith("_") for key in value):
+                problems.append(f"{name}: internal/derived fields cannot be merged")
+                break
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
+    return problems or payload_problems(fragment, name)
 
 
 def payload_problems(fragment, name):
@@ -82,7 +148,8 @@ def merge(base, fragment):
         if isinstance(fragment.get(key), dict):
             base.setdefault(key, {}).update(fragment[key])
     for key in RECORDS:
-        upsert(base.setdefault(key, []), fragment.get(key, []))
+        if key in fragment or key == "findings":
+            upsert(base.setdefault(key, []), fragment.get(key, []))
     for key in LISTS:
         items = base.setdefault(key, [])
         for item in fragment.get(key, []):
@@ -107,22 +174,23 @@ def main(argv=None):
         return 2
     refused = []
     for name, fragment in fragments:
-        if not isinstance(fragment, dict):
-            refused.append(f"{name}: a fragment must be a JSON object")
-        elif fragment.keys() - {*OBJECTS, *RECORDS, *LISTS}:
-            refused.append(f"{name}: unsupported keys {sorted(fragment.keys() - {*OBJECTS, *RECORDS, *LISTS})}; "
-                           "schema_version and assessment come from evidence_capture.py")
-        elif any(not isinstance(fragment.get(k, []), list) for k in (*RECORDS, *LISTS)):
-            refused.append(f"{name}: {', '.join((*RECORDS, *LISTS))} must be lists")
-        else:
-            refused += payload_problems(fragment, name)
+        refused += fragment_problems(fragment, name)
     if refused:
         print("\n".join(refused), file=sys.stderr)
         return 1
-    for _, fragment in fragments:
-        base = merge(base, fragment)
     try:
+        if not isinstance(base, dict):
+            raise render.SchemaError("existing report must be an object")
+        if base:
+            render.validate_data(copy.deepcopy(base))
+            derive_expert(base, render.SchemaError)
+        for _, fragment in fragments:
+            if any(key in fragment for key in (*PROFILES, "test_runs")) and base.get("schema_version") != 2:
+                raise render.SchemaError("extension profiles and test_runs require evidence_capture.py first")
+            base = merge(base, fragment)
         render.validate_data(copy.deepcopy(base))
+        # Shape errors fail; incomplete later phases are permitted and stay held.
+        derive_expert(base, render.SchemaError)
     except render.SchemaError as e:
         print(f"error: merged report does not match the schema: {e}", file=sys.stderr)
         return 2

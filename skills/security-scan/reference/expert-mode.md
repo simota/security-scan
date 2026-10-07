@@ -39,6 +39,19 @@ One actor label holds one role for the whole run.
 
 Then `contract_check.py` and `expert_audit.py <out>` must both exit `0`.
 
+When `evidence_integrity.required` is true, supply the explicit evidence root
+and owned local Git repository to the expert audit, just as for rendering:
+
+```sh
+python3 scripts/expert_audit.py <out> --evidence-root <out> --evidence-repository <owned-repo>
+# Add --no-pdf only when the PDF was intentionally skipped.
+```
+
+The audit checks artifact bytes and source/commit correspondence afresh and
+passes that in-memory result into the gates. Missing roots or failed checks
+hold required-integrity runs. A saved receipt or a previously completed journal
+cannot replace the fresh check; never turn off the policy to pass the audit.
+
 ## Envelope
 
 ```
@@ -114,7 +127,23 @@ levels. A failed rater is replaced, never coached on the key.
 
 Roles are `recon`, `discovery`, `variant`, `conditions`, `falsification`,
 `skeptic`, `rater`, `omission`, `persona` and `qa`. Engines named in spawns must
-be approved and preflighted. The rendered report carries an *Assessment method
+be approved and preflighted. Actor identities are compared with surrounding
+whitespace removed and case folded, consistently with the sequential workflow.
+Conditions and falsification actors in the effective workflow round, including
+its recorded reviewers, must have the corresponding registered spawn roles.
+QA must not appear in any other declared role or recorded workflow participation,
+including retained historical rounds and coordinator/decision events. Reception
+requires three distinct actors, one for each persona.
+
+Each finding has at most one refutation panel, with two or three distinct,
+registered independent skeptics and distinct angles. Duplicate panel entries,
+actor rows or angles are schema errors, not additional votes. Only legitimate
+members contribute votes. Skeptic evidence IDs use the shared evidence rules:
+known, unique and pinned to the assessed revision; `refuted` and `survived`
+require evidence, while `unproven` may have none. Required integrity applies to
+panel evidence too.
+
+The rendered report carries an *Assessment method
 and assurance* section derived from these records, and each finding's CWE.
 
 ## What it does not prove
