@@ -202,6 +202,8 @@ actual artifact bytes. A missing or changed artifact is an error, not a no-op
 success. Output children are created with no-follow checks, existing files are
 never truncated, and findings are atomically replaced only after all captures
 succeed. Existing clean assessment metadata and workflow journals are preserved.
+The existing record and complete proposed update must pass the report schema
+and expert-record validation before any new evidence artifact is written.
 Keep files unchanged during capture: these checks are not a hostile-filesystem
 sandbox or an atomic snapshot of an entire repository.
 

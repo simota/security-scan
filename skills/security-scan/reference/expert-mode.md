@@ -145,6 +145,10 @@ panel evidence too.
 
 The rendered report carries an *Assessment method
 and assurance* section derived from these records, and each finding's CWE.
+That section reports declaration-record gates only; it does not establish that
+the final run-file audit passed. Missing prompts, returns or reception spans can
+still hold `expert_audit.py` even when the report's declaration gates are complete.
+Apply the expert-grade label only after that final audit exits `0`.
 
 ## What it does not prove
 

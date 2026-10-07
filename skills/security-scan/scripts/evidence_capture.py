@@ -18,6 +18,7 @@ elapsed time are bounded. Repeated captures recheck their existing artifacts.
 Exit codes: 0 done, 2 bad input or a path differs from / is missing at the commit.
 """
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -31,6 +32,7 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from evidence_integrity import EvidenceError, _Root, _parts, _deadline
+from render import SchemaError, derive_expert, validate_data
 
 GIT_BINARY = "/usr/bin/git"  # Never resolve a program through target PATH/config.
 GIT_ENV = {"PATH": "/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
@@ -144,6 +146,17 @@ def _write_report(root, name, raw, original, identity):
             pass
 
 
+def validate_findings(data):
+    try:
+        # Validation supplies display defaults; do not persist those changes.
+        validated = validate_data(copy.deepcopy(data))
+        derive_expert(validated, SchemaError)
+    except SchemaError as exc:
+        raise CaptureError(f"findings do not match the schema: {exc}") from None
+    except RecursionError:
+        raise CaptureError("findings nesting is too deep") from None
+
+
 def capture(repo, findings_path, paths, commit="HEAD"):
     until = time.monotonic() + MAX_SECONDS
     source_root = out_root = None
@@ -166,9 +179,13 @@ def capture(repo, findings_path, paths, commit="HEAD"):
 
 def _capture(repo, out_root, source_root, findings_name, paths, commit, until):
     original, identity = out_root.read(findings_name, MAX_FILE_BYTES, with_identity=True)
-    data = json.loads(original)
+    try:
+        data = json.loads(original)
+    except RecursionError:
+        raise CaptureError("findings nesting is too deep") from None
     if not isinstance(data, dict):
         raise CaptureError("findings file must hold a JSON object")
+    validate_findings(data)
     if not isinstance(paths, (list, tuple)) or not 0 < len(paths) <= MAX_PATHS:
         raise CaptureError(f"capture requires 1 to {MAX_PATHS} paths")
     oid = git(repo, "rev-parse", "--verify", "--end-of-options", f"{commit}^{{commit}}",
@@ -180,14 +197,15 @@ def _capture(repo, out_root, source_root, findings_name, paths, commit, until):
     if version is not None and (type(version) is not int or version not in (1, 2)):
         raise CaptureError(f"unsupported schema_version {version!r}")
     pin = data.get("assessment")
-    if pin is not None and (not isinstance(pin, dict) or pin.get("commit") != oid):
+    if pin is not None and (not isinstance(pin, dict) or not isinstance(pin.get("commit"), str)
+                            or pin["commit"].lower() != oid):
         raise CaptureError("findings already pin a different assessment; capture from that commit")
-    if pin is not None and (pin.get("worktree") != "clean" or pin.get("diff_sha256")):
+    if pin is not None and (pin.get("worktree") != "clean" or "diff_sha256" in pin):
         raise CaptureError("capture requires an existing clean assessment pin")
     meta = data.setdefault("meta", {})
     if not isinstance(meta, dict):
         raise CaptureError("meta must be an object")
-    if meta.get("commit") and meta["commit"] != oid:
+    if meta.get("commit") and meta["commit"].lower() != oid:
         raise CaptureError(f"meta.commit {meta['commit']} differs from {oid}")
 
     evidence = data.setdefault("evidence", [])
@@ -204,6 +222,7 @@ def _capture(repo, out_root, source_root, findings_name, paths, commit, until):
             key = (record.get("commit"), record.get("source_path"))
             if not all(isinstance(value, str) for value in key):
                 raise CaptureError("source evidence requires commit and source_path")
+            key = (key[0].lower(), key[1])
             if key in known:
                 raise CaptureError("duplicate source evidence path at the same commit")
             known[key] = record
@@ -255,7 +274,6 @@ def _capture(repo, out_root, source_root, findings_name, paths, commit, until):
     source_root.check()
     out_root.check()
     for rel, location, blob in new:
-        _write_source(out_root, location, blob, budget)
         record_id = mapping[rel]
         evidence.append({"id": record_id, "kind": "source", "commit": oid,
                          "location": location, "source_path": rel,
@@ -265,9 +283,16 @@ def _capture(repo, out_root, source_root, findings_name, paths, commit, until):
     data["schema_version"] = 2
     if pin is None:
         data["assessment"] = {"repository": repo.name, "commit": oid, "worktree": "clean"}
-    meta["commit"] = oid
-    _write_report(out_root, findings_name,
-                  (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode("utf-8"), original, identity)
+    if not meta.get("commit"):
+        meta["commit"] = oid
+    # Validate the complete upgraded report before creating any new artifacts.
+    validate_findings(data)
+    serialized = (json.dumps(data, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    if len(serialized) > MAX_FILE_BYTES:
+        raise CaptureError("findings file exceeds size limit")
+    for rel, location, blob in new:
+        _write_source(out_root, location, blob, budget)
+    _write_report(out_root, findings_name, serialized, original, identity)
     return mapping
 
 
