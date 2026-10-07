@@ -149,6 +149,11 @@ are retained if their values can be represented safely in UTF-8/JSON output;
 this does not make them verification evidence. Derived verification labels are
 computed by the renderer and cannot be set by an input flag.
 
+**Static reproduction lives in the existing fields** — `actor`, `request`
+(preconditions, steps, `Contrast:`), `impact` (expected vs actual, `INV-…`),
+`fix` (invariant restored, then `Test:` assertion) — as `reference/invariants.md`
+§5 specifies; optional `cwe` comes from `reference/coverage-trace.md`.
+
 `status` defaults to `Open`; `validation.verdict`
 defaults to `Unverified`. Findings marked `FalsePositive` or `NotApplicable` are
 left out of included totals and listed in a closing "excluded" section. The
@@ -523,3 +528,33 @@ handoffs through the existing digest binding; prior history is not current proof
 The dashboard and assessment project redacted known fields and per-pass counts,
 never raw profile extensions. Scope completeness and actor labels remain
 unverified declarations, not guaranteed security or measured accuracy.
+
+## Optional invariant ledger profile
+
+Only `schema_version: 2` with top-level `invariant_ledger` opts in
+(`scripts/invariant_ledger.py`, checked by `render.py` and `findings.py merge`).
+Without it, findings are validated as before. Shape:
+
+- `version`: integer `1`
+- `entries`: nonempty list of `{id, family, invariant, source, status,
+  paths_read, paths_total}` plus optional `finding_ids` and `reason`
+  - `id`: `INV-<nn>`, unique; `family`: `OWN`, `ROLE`, `PROP`, `STATE`, `QTY`,
+    `ID` or `TRUST`; `invariant` and `source` (`path:line`) nonblank
+  - `status`: `holds` (every path read: `paths_read == paths_total >= 1`),
+    `partial` (`paths_read < paths_total`: "holds on N/M, rest not read"),
+    `violated` (nonempty `finding_ids` of `F-*` findings in this report) or
+    `not_checked` (nonblank `reason`)
+- `units` (optional): `{unit, record_inputs, trace_rows, blank_cells}` plus
+  optional boolean `closed`; a unit marked `closed: true` is a schema error
+  unless `trace_rows == record_inputs` and `blank_cells == 0`, and any unit
+  renders as closed only when those hold
+
+Once opted in, every `F-*` finding whose verdict is not `FalsePositive` or
+`NotApplicable` must have `Preconditions:`, `Steps:` and `Contrast:` in
+`request`, `Test:` in `fix`, and in `impact` an expected outcome followed by the
+actual one (`expected` … `actual`, or `期待` … `実際`; `reference/invariants.md`
+§5); a missing marker is a schema error. These fields are required on every
+`F-*` finding in every run (`SKILL.md`, *Always / Never*); the opt-in only makes
+the check mechanical. The ledger renders as a table in the assessment's coverage
+section. Send the whole ledger in one fragment: `findings.py merge` replaces
+`entries` and `units` key by key. Unknown fields are rejected.

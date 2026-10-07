@@ -5,9 +5,14 @@ Write in the requester's language.
 
 ## Checklist deliverable
 
-- First line: how many perspectives apply, and that suspicions are unverified
-- One section per perspective from `reference/perspectives.md`, most important
-  first; list the ones judged N/A with a reason
+- First line: how many invariants were derived, how many perspectives apply,
+  and that suspicions are unverified
+- **Invariant ledger first** (`reference/invariants.md` §2): each entry with its
+  source, the paths that touch it and which of them to read; mark `inferred`
+  rules as questions for the requester
+- Then one section per perspective from `reference/perspectives.md`, most
+  important first, listing only the hunt steps no ledger entry covers; list the
+  ones judged N/A with a reason
 - Each item: the question, concrete routes/files, and an optional
   `initial note (unverified)`
 - Close with the recommended starting point and one decision for the requester
@@ -25,14 +30,18 @@ Write in the requester's language.
    ```
    [High|Medium|Low][Confirmed|Environment-dependent|Suspected] one-line title
      location: path:line at the assessed revision
-     actor and request shape: role, method, path, parameter names
-     what happens: the code fact and bounded impact
+     actor and preconditions: role, tenant; numbered steps that set up the state
+     steps: numbered request shapes (method, path, parameter names, placeholders)
+     contrast: the sibling path that enforces the rule, path:line (or "none")
+     expected vs actual: what the violated invariant requires; what the code does
+     what happens: the code fact and bounded impact; CWE
      recorded verdict: Valid / Likely / Unverified / Unlikely / excluded verdict
      verification: static support / isolated runtime reproduction / incomplete
      evidence: IDs supporting reachability, preconditions, defenses and impact
      open questions: environment assumptions, counterevidence, reviewer disagreement
      remediation: recorded status; separately, whether a retest is evidenced
-     fix direction: one line
+     fix direction: one line — the invariant restored and where its check goes
+     regression test: at least one assertion of the secure outcome
      references: source; advisory / fix commit / article for libraries
    ```
 
@@ -73,7 +82,10 @@ State limitations prominently: static evidence is not runtime reproduction,
 isolated reproduction is not proof of production conditions, and structural
 schema checks are not semantic proof. Missing perspective coverage is unknown;
 zero findings and passing repository CI are not evidence of an all-clear
-assessment of the target application.
+assessment of the target application. A run without the `invariant_ledger`
+opt-in adds this limitation verbatim: "invariant ledger and close-check not
+machine-checked (no invariant_ledger opt-in)" — the ledger and the close-check
+were kept in scratch and nothing in the record proves their counts.
 
 Describe weaknesses and parameters, not working payloads. Never print secret
 values: use location and kind only. Evidence summaries and commands must be

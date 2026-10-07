@@ -27,6 +27,7 @@ from verification_workflow import derive_workflow, validate_workflows
 from evidence_integrity import verify_evidence
 from three_pass import derive_three_pass
 from expert import derive_expert
+from invariant_ledger import ledger_html, validate_ledger
 
 SEVERITIES = ["High", "Medium", "Low", "Info"]
 CONFIDENCES = ["Confirmed", "Environment-dependent", "Suspected"]
@@ -784,6 +785,7 @@ def validate_data(data):
     data["perspectives"] = lens
     validate_verification(data, SchemaError)
     validate_workflows(data, SchemaError)
+    validate_ledger(data, SchemaError)
     rank = {s: i for i, s in enumerate(SEVERITIES)}
     # code findings before dependency advisories (D-*) at the same severity
     findings.sort(key=lambda f: (rank[f["severity"]], str(f["id"]).startswith("D-"), f["id"]))
@@ -1772,7 +1774,7 @@ def render_assessment_html(data, L, lang, integrity=None):
 <section id="priority-queue"><h2>{esc(L['a_queue'])}</h2><p class="section-note">{esc(L['a_queue_note'])}</p>{queue_html}</section>
 {decisions_html}{next_steps_html}
 <section id="recorded-coverage"><h2>{esc(L['a_coverage'])}</h2><p class="section-note">{esc(L['a_coverage_note'])}</p>
-{coverage_html}<h3>{esc(L['a_checks'])}</h3>{bullets(data.get('checked_ok', []), 'a_checks_empty')}</section>
+{coverage_html}{ledger_html(data, lang)}<h3>{esc(L['a_checks'])}</h3>{bullets(data.get('checked_ok', []), 'a_checks_empty')}</section>
 <section class="finding-register" id="finding-register"><h2>{esc(L['a_register'])}</h2>
 <p class="section-note">{esc(L['a_register_note'])}</p>{index_html}</section>
 {(f'<section id="finding-details"><h2>{esc(L["details"])}</h2>' + "".join(card(f) for f in fs) + "</section>") if fs else ""}

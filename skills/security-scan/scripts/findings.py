@@ -5,9 +5,10 @@
 
 A fragment is a JSON file written with the host's file-write tool (never a
 shell heredoc or a generated script). It holds any of these top-level keys:
-`meta`, `expert`, `three_pass` and `evidence_integrity` are merged key by key;
-nested values (including phase lists) are replaced, not recursively merged.
-`findings`, `evidence` and `test_runs` records are matched by
+`meta`, `expert`, `three_pass`, `evidence_integrity` and the opt-in
+`invariant_ledger` are merged key by key; nested values (including phase lists
+and the ledger's `entries`, so send the whole list in one fragment) are
+replaced, not recursively merged. `findings`, `evidence` and `test_runs` records are matched by
 `id`, a known record updated key by key (so a later fragment can add just
 `verification` to F-003) and a new one appended; the list sections (`perspectives`, `checked_ok`, `decisions`,
 `limitations`, `next_steps`) are appended without duplicates. FINDINGS is
@@ -37,7 +38,7 @@ import render  # noqa: E402
 from expert import derive_expert  # noqa: E402
 
 LISTS = ("perspectives", "checked_ok", "decisions", "limitations", "next_steps")
-PROFILES = ("expert", "three_pass", "evidence_integrity")
+PROFILES = ("expert", "three_pass", "evidence_integrity", "invariant_ledger")
 OBJECTS = ("meta", *PROFILES)
 RECORDS = ("findings", "evidence", "test_runs")
 EXPERT_FIELDS = {"version", "mode", "host", "consent", "preflight", "spawns", "recon",
