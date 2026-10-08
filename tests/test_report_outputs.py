@@ -682,7 +682,8 @@ class ReportOutputTests(unittest.TestCase):
                     page.set_content(self.renderer.render_dashboard(data, labels, lang),
                                      wait_until="domcontentloaded")
                     self.assertEqual(page.locator("tr.row").count(), len(data["findings"]))
-                    self.assertEqual(page.locator("#lists > section").count(), 3)
+                    self.assertEqual(page.locator("#lists > section").count(), 2)
+                    self.assertTrue(page.locator("#decisions-section").is_visible())
                     for finding in data["findings"]:
                         anchor = self.renderer.finding_anchor(data, finding)
                         row = page.locator("#" + anchor)
