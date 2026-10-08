@@ -1069,6 +1069,7 @@ tbody tr+tr td{border-top:.3pt solid var(--hair)}
 tr{break-inside:avoid;page-break-inside:avoid}
 .metrics{margin:3mm 0 3mm}
 .metrics td{font:400 18pt/1.2 var(--serif);padding:2mm 2.2mm 1.5mm}
+.metrics tbody th,.metrics td{vertical-align:baseline}.metrics tbody th{border-bottom:0}.metrics tbody tr+tr th{border-top:.3pt solid var(--hair)}
 .metrics .metric-urgent{color:var(--high)}
 .queue .ref-col{width:17%}.queue .finding-col{width:43%}.queue .action-col{width:40%}
 .queue td:first-child{font:8.2pt/1.5 var(--mono)}
