@@ -247,12 +247,13 @@ a completed stage or several agreeing reviewers cannot certify it by themselves.
 See `skills/security-scan/reference/verification-workflow.md` for the commands,
 stage contract and resuming interrupted work.
 
-### 再現スクリプトとシードデータを生成する
+### Generating reproduction scripts and seed data
 
-明示的に依頼した場合だけ、finding に結び付いた再現バンドルを生成できます。
-現在の実行テンプレートは、架空の owner と resource を使う SQLite の所有者境界モデルです。
-実際のアプリケーション、その認証・認可層、修正コミットは実行しません。
-以下は同梱の架空データを使った、ネットワーク不要の例です。
+Only when explicitly requested, a reproduction bundle tied to a finding can be
+generated. The current execution template is a SQLite owner-boundary model with
+synthetic owners and resources. It does not execute the real application, its
+authentication or authorization layer, or a fix commit. The example below uses
+the bundled synthetic data and needs no network.
 
 ```sh
 work=$(mktemp -d "${TMPDIR:-/tmp}/security-scan-repro.XXXXXX")
@@ -266,35 +267,39 @@ python3 skills/security-scan/scripts/reproduction.py run \
   --out "$work/results"
 ```
 
-生成先・結果の保存先には、親ディレクトリが存在する未使用のパスを指定します。
-結果は results/results.json、results/records.json、results/evidence/ に保存されます。
-バンドルには seed・再現・cleanup・反復実行用のスクリプトが入ります。
-固定 seed で初期化し、修正前モデルでは安全な期待値の assertion が失敗、
-修正後モデルでは成功すること、正当な所有者のアクセスと存在しない resource の
-対照ケースが成功することを確認します。cleanup を挟んで 2 回実行し、
-fixture と観測結果の意味的な hash が一致することも調べます。
+Give unused paths whose parent directories exist for the bundle and the results.
+Results are written to `results/results.json`, `results/records.json` and
+`results/evidence/`. The bundle contains seed, reproduction, cleanup and
+repeat-run scripts. It initializes from a fixed seed and checks that the
+secure-expectation assertion fails on the pre-fix model and passes on the fixed
+model, and that the control cases (the legitimate owner's access and a
+nonexistent resource) pass. It runs twice with cleanup in between and checks
+that the semantic hashes of the fixtures and observations match.
 
-成功時の results.json は `status: completed`、`repeatable: true` になります。
-生成・整合性検証だけでは `not_run` のままです。実行エラーや未対応を成功とみなしません。
+On success, `results.json` has `status: completed` and `repeatable: true`.
+Generation and integrity verification alone leave it `not_run`; execution errors
+and unsupported cases are never counted as success.
 
-manifest は finding、評価対象の revision、選択した証拠レコード、設定と生成コードを
-結び付けます。元の findings が変わった場合や生成コードが改変された場合は、
-再検証で拒否します。結果は findings とは別に保存し、自動で `Valid`、
-`Fixed`、runtime 検証済みへ昇格させません。記録された対象コミットや証拠の hash は、
-対象コードを実際に実行した証明にはなりません。
+The manifest binds the finding, the assessed revision, the selected evidence
+records, the configuration and the generated code. Re-verification rejects the
+bundle if the original findings change or the generated code is modified.
+Results are stored separately from the findings and never automatically promote
+a finding to `Valid`, `Fixed` or runtime-verified. A recorded target commit or
+evidence hash does not prove that the target code was actually executed.
 
-`verification_workflow.py bundle` からも同じ生成ができます。
-実アプリへの適用には別途、対象・権限・隔離方法を確認し、そのアプリのテスト基盤で
-本物の境界を通るテストを作ります。詳細と未対応ケースの扱いは
-`skills/security-scan/reference/reproduction-bundles.md` を参照してください。
+`verification_workflow.py bundle` generates the same bundle. Applying this to a
+real application needs a separate check of target, authorization and isolation,
+and a test that crosses the real boundary in that application's own test
+harness. See `skills/security-scan/reference/reproduction-bundles.md` for details
+and how unsupported cases are handled.
 
-### 証拠ファイルの実体・hash・コミットを照合する
+### Checking evidence files against their hashes and commits
 
-記録された hash だけでなく、手元の証拠ファイルを毎回読み直して照合できます。
-`evidence.location` は証拠ルートからの相対ファイルパス、`source_path` は
-明示したローカル Git リポジトリ内のファイルパスにします。
-source は宣言した完全なコミット ID の blob とも照合します。行番号付きの
-表示用 location や URL は、証拠ファイルのパスとして使いません。
+Beyond the recorded hashes, local evidence files can be re-read and checked on
+every run. `evidence.location` is a file path relative to the evidence root, and
+`source_path` is a file path inside an explicitly named local Git repository.
+Source is also checked against the blob at the declared full commit ID. Display
+locations with line numbers, and URLs, are not used as evidence file paths.
 
 ```sh
 python3 skills/security-scan/scripts/evidence_integrity.py verify findings.json \
@@ -306,19 +311,21 @@ python3 skills/security-scan/scripts/render.py findings.json \
   --out /path/to/new-report --lang ja --no-pdf
 ```
 
-receipt は findings と別ファイルです。findings や判定は書き換えません。
-レポート・workflow・再現バンドルで使うときも、同じ証拠ルートとリポジトリを
-指定して再照合します。古い receipt を読み込むだけでは検証済みになりません。
-既存データは従来どおり宣言として扱い、過去の証拠に検証済みの信用を追加しません。
-`schema_version: 2` のトップレベルに `"evidence_integrity": {"required": true}` を
-設定すると、新しい照合が足りない finding は構造化検証・再テストの条件を満たしません。
+The receipt is a separate file from the findings; it never rewrites findings or
+verdicts. Reports, workflows and reproduction bundles re-check against the same
+evidence root and repository when they use it; loading an old receipt alone does
+not make anything verified. Existing data is still treated as declared, and past
+evidence gains no verified credit. Setting `"evidence_integrity": {"required": true}`
+at the top level of a `schema_version: 2` file makes any finding without a fresh
+check fail the structured-verification and retest conditions.
 
-source は clean なコミットへの対応付けのみ検証でき、dirty source pin は未対応です。
-ネットワーク取得、Git hook、対象アプリや記録されたコマンドは実行しません。
-runtime・environment の hash が一致しても、ログの出来事、実行したコードや
-環境条件が真実だとは証明できません。source の一致も脆弱性の存在を証明しません。
-[安全上の制約と、新しい架空 Git リポジトリだけで試す例](skills/security-scan/reference/evidence-integrity.md)
-を参照してください。同梱サンプルの架空 hash は実ファイルの検証には使えません。
+Source can be verified only against a clean commit; dirty source pins are not
+supported. Nothing is fetched over the network, and no Git hooks, target
+application or recorded commands are run. Matching runtime or environment hashes
+do not prove that logged events, the executed code or the environment conditions
+are true, and a source match does not prove that a vulnerability exists. See
+[the safety limits and an example that uses only a new synthetic Git repository](skills/security-scan/reference/evidence-integrity.md).
+The synthetic hashes in the bundled samples cannot verify real files.
 
 ### Structured verification records
 
