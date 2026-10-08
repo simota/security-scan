@@ -204,7 +204,6 @@ LABELS['en'].update({'eyebrow': 'SECURITY REVIEW',
  'source_note': 'Source excerpts are best-effort redacted. Inspect this report before sharing.',
  'no_script': 'Enable JavaScript to use the interactive dashboard, or open the assessment for the '
               'complete report.',
- 'status_summary': '{open} open · {fixed} fixes recorded · {accepted} accepted · {excluded} excluded',
  'risk_summary': '{n} open High / Medium findings need attention.',
  'jump_findings': 'Jump to findings',
  'findings_register': 'Findings register',
@@ -263,7 +262,6 @@ LABELS['ja'].update({'eyebrow': 'SECURITY REVIEW',
  'missing_evidence': '妥当性の根拠が記録されていません。',
  'source_note': 'ソース抜粋の伏せ字は完全ではありません。共有前に内容を確認してください。',
  'no_script': '対話型ダッシュボードには JavaScript が必要です。診断書ではすべての記録を確認できます。',
- 'status_summary': '未対応 {open} · 修正の申告 {fixed} · 受容 {accepted} · 除外 {excluded}',
  'risk_summary': '未対応の High / Medium が {n} 件あります。',
  'jump_findings': '指摘一覧へ移動',
  'findings_register': '指摘一覧',
@@ -1936,7 +1934,7 @@ button,input,select,label,th,.badge,.brand,.eyebrow,.tools,.filters,.result-coun
 .panel{background:transparent;border:0;border-top:1px solid var(--line);border-radius:0;padding:18px 0}
 .priority-item{border-top-width:2px}
 .coverage{background:transparent;border:0;border-left:1px solid var(--text);border-radius:0;padding:4px 0 4px 18px}
-.perspective{border-bottom-color:var(--line)}
+.coverage-columns{grid-template-columns:1fr;gap:8px}#perspectives{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));column-gap:32px}.perspective,.perspective:last-child{border:0;border-top:1px solid var(--line)}
 .bar .fill{background:var(--text)}.bar .track{border-radius:0;height:5px}
 .tablewrap{background:transparent;border:0;border-top:1.5px solid var(--text);border-bottom:1.5px solid var(--text);border-radius:0}
 th{background:transparent;color:var(--text);letter-spacing:.06em;font-size:11px;border-bottom:1px solid var(--text)}
@@ -1947,6 +1945,12 @@ button,.button,.filters select,.filters input{border-radius:2px}
 .verification-record,.workflow-record{border:0;border-left:1px solid var(--line);border-radius:0;padding:4px 0 4px 16px}
 .expert-summary h3,.three-pass-summary h3{margin-top:0}
 .footer{border-top:1.5px solid var(--text)}
+.priority-item .impact{color:var(--text)}
+.finding-toggle{font-family:var(--serif);font-weight:700}
+#verification-summary h2,#decisions-section h2{margin-bottom:8px}#decisions-section ul{margin:0;padding-left:20px}
+.verify-legend{margin:0 0 14px;color:var(--muted)}.verify-legend .action-label{font-family:var(--sans);font-size:12px;font-weight:700;color:var(--accent)}
+.card .n .pair{display:inline-block;white-space:nowrap;margin-right:18px}.card .n .u{font-family:var(--sans);font-size:11px;letter-spacing:.06em;color:var(--muted);margin-left:6px}
+td .verification-level{font-family:var(--sans);font-size:11px;font-weight:400;color:var(--muted);margin-top:4px}
 .snippet .hit{background:var(--tint)}
 @media(max-width:850px){main{padding:22px 18px}.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.hero{display:block}.hero-aside{text-align:left;max-width:none;margin-top:12px}.coverage-columns{grid-template-columns:1fr}.filters{grid-template-columns:repeat(2,minmax(0,1fr))}table,tbody,tr,td{display:block}thead{display:none}tr.row{padding:14px;border-bottom:1px solid var(--line);display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}tr.row td{border:0;padding:0;font-size:12px}tr.row td:before{content:attr(data-label);display:block;color:var(--muted);font-size:10px;margin-bottom:3px}tr.row td:nth-child(6){grid-column:1/-1;grid-row:1}.finding-toggle{font-size:15px}tr.row td:nth-child(7){grid-column:span 2}.detail-actions{align-items:flex-start}tr.detail>td{padding:16px}tr.detail dl{grid-template-columns:1fr;gap:3px}tr.detail dd{margin-bottom:10px}}
 @media(max-width:480px){main{padding:16px 12px}.masthead{align-items:flex-start;flex-direction:column;gap:12px}.tools{width:100%}.tools .button{flex:1}.card{padding:14px}.card .n{font-size:28px}.panel{padding:16px}.section-head{display:block}.filters{grid-template-columns:1fr 1fr;gap:10px}.filters label:first-child,.filters .search{grid-column:1/-1}.filter-bottom{align-items:flex-start;flex-direction:column}.scope-meta{grid-template-columns:1fr;gap:2px}.scope-meta dd{margin-bottom:8px}.priority-top{flex-wrap:wrap}}
@@ -1962,8 +1966,9 @@ button,.button,.filters select,.filters input{border-radius:2px}
 <div class="summary-banner" id="summary"></div>
 <div class="cards" id="cards"></div><p class="report-note" data-l="counts_note"></p>
 <div class="cards part-cards" id="part-cards"></div><p class="report-note" data-l="part_note"></p>
-<section aria-labelledby="priority-heading"><div class="section-head"><div><h2 id="priority-heading" data-l="priority"></h2><p data-l="priority_note"></p></div><a href="#findings" data-l="view_all"></a></div><div id="priority"></div><p class="section-note" id="queue-note"></p></section>
-<section class="panel" id="verification-summary" aria-label="Verification summary"></section>
+<section aria-labelledby="priority-heading"><div class="section-head"><div><h2 id="priority-heading" data-l="priority"></h2><p data-l="priority_note"></p></div><a href="#findings" data-l="view_all"></a></div><p class="verify-legend" id="verify-legend" hidden></p><div id="priority"></div><p class="section-note" id="queue-note"></p></section>
+<section class="panel" id="decisions-section" aria-labelledby="decisions-heading"><h2 id="decisions-heading" data-l="decisions"></h2><div id="decisions"></div></section>
+<section class="panel" id="verification-summary"></section>
 __EXPERT__
 __THREE_PASS__
 <details class="panel coverage" id="coverage" open><summary><span data-l="coverage_heading"></span><span class="small" id="coverage-count"></span></summary><p data-l="coverage_note"></p><dl class="scope-meta" id="scope-meta"></dl><div class="coverage-columns"><section><h3 data-l="limitations"></h3><div id="limitations"></div></section><section><h3 data-l="perspectives"></h3><div id="perspectives"></div></section></div></details>
@@ -1998,15 +2003,15 @@ byId('theme').onclick=function(){var root=document.documentElement,dark=root.dat
 var summary=byId('summary');
 summary.appendChild(el('strong',null,fmt(L.unverified_line,{n:R.unverified,high:R.unverified_high})));
 summary.appendChild(el('p',null,F.length?(D.open_hm?fmt(L.risk_summary,{n:D.open_hm}):(R.open_count?fmt(L.open_summary,{n:R.open_count}):L.no_open)):L.no_findings));
-summary.appendChild(el('p',{'class':'muted'},fmt(L.status_summary,{open:R.open_count,fixed:R.fixed,accepted:R.accepted,excluded:R.excluded})));
-var verificationSummary=byId('verification-summary'),verificationSentence=el('p');verificationSummary.setAttribute('aria-label',L.v_title);D.verification_summary.forEach(function(part){verificationSentence.appendChild(part.key?el('strong',{'data-verification-count':part.key},part.count):document.createTextNode(part.text));});verificationSummary.appendChild(verificationSentence);verificationSummary.appendChild(el('p',{'class':'muted'},L.v_note));
+var verificationSummary=byId('verification-summary'),verificationSentence=el('p');verificationSummary.setAttribute('aria-labelledby','verification-heading');verificationSummary.appendChild(el('h2',{id:'verification-heading'},L.v_title));D.verification_summary.forEach(function(part){verificationSentence.appendChild(part.key?el('strong',{'data-verification-count':part.key},part.count):document.createTextNode(part.text));});verificationSummary.appendChild(verificationSentence);verificationSummary.appendChild(el('p',{'class':'muted'},L.v_note));
 var integritySummary=el('div',{'class':'integrity-summary'});integritySummary.appendChild(el('h3',null,L.i_title));integritySummary.appendChild(el('p',null,D.integrity_summary.text));integritySummary.appendChild(el('p',{'class':'muted'},D.integrity_summary.note));verificationSummary.appendChild(integritySummary);
 function workflowNode(f){var view=ownValue(D.workflow_views,f.id);if(!view)return null;var box=el('div',{'class':'workflow-record'});box.appendChild(el('h4',null,L.w_title));box.appendChild(el('p',{'class':'workflow-status'},L.w_status+': '+view.status));box.appendChild(el('p',{'class':'workflow-next'},L.w_next+': '+view.next_stage));box.appendChild(el('p',{'class':'muted'},L.w_note));if(view.gaps.length){box.appendChild(el('h5',null,L.w_gaps));var ul=el('ul',{'class':'workflow-gaps'});view.gaps.forEach(function(gap){ul.appendChild(el('li',null,gap));});box.appendChild(ul);}view.sections.forEach(function(section){var group=el('section');group.appendChild(el('h5',null,section.title));section.items.forEach(function(item){group.appendChild(el('p',{'class':'prose'},item));});box.appendChild(group);});box.appendChild(el('p',{'class':'muted'},L.w_safety));return box;}
 function verificationNode(f){var view=D.verification_views[f.id],box=el('div',{'class':'verification-record'});box.appendChild(el('h4',null,L.v_title));box.appendChild(el('p',{'class':'verification-level'},view.level));box.appendChild(el('p',null,L.v_retest+': '+view.retest));if(view.gaps.length){var ul=el('ul',{'class':'verification-gaps'});view.gaps.forEach(function(gap){ul.appendChild(el('li',null,gap));});box.appendChild(ul);}view.sections.forEach(function(section){var group=el('section');group.appendChild(el('h5',null,section.title));section.items.forEach(function(item){group.appendChild(el('p',{'class':'prose'},item));});box.appendChild(group);});return box;}
 
-[[L.open_hm,D.open_hm,'urgent',L.open_count+': '+R.open_count],[L.needs_validation,R.verify_first,'review',L.fix_now+': '+R.fix_now],[L.closed_count,R.fixed+' / '+R.accepted,'',L.included+': '+F.length],[L.excluded_short,R.excluded,'',L.all_records+': '+ALL.length]].forEach(function(c){var d=el('div',{'class':'card '+c[2]});d.appendChild(el('span',{'class':'l'},c[0]));d.appendChild(el('div',{'class':'n'},c[1]));d.appendChild(el('div',{'class':'sub'},c[3]));byId('cards').appendChild(d);});
-D.parts.forEach(function(part){var c=R.parts[part],d=el('div',{'class':'card','data-part':part});d.appendChild(el('span',{'class':'l'},L['part_'+part]));d.appendChild(el('div',{'class':'n'},c.open_count));d.appendChild(el('div',{'class':'sub'},fmt(L.part_card_sub,c)));byId('part-cards').appendChild(d);});
-var shownTop=0;D.parts.forEach(function(part){var top=R.queue.filter(function(item){return item.finding.part===part;}).slice(0,4);shownTop+=top.length;if(!R.queue.length)return;byId('priority').appendChild(el('h3',{'class':'part-heading',id:'priority-'+part},L['part_'+part]));var list=el('div',{'class':'priority-list'});byId('priority').appendChild(list);if(!top.length)list.appendChild(el('div',{'class':'panel muted'},L.part_none_open));top.forEach(function(item){var f=item.finding,p=el('article',{'class':'panel priority-item sev-'+f.severity}),head=el('div',{'class':'priority-top'});head.appendChild(badge(f));head.appendChild(el('span',{'class':'action-label'},L[item.action]));p.appendChild(head);var h=el('h3');h.appendChild(el('a',{href:'#'+item.anchor},f.id+' · '+f.title));p.appendChild(h);p.appendChild(el('div',{'class':'verdict'},f.confidence+' · '+f.verdict));p.appendChild(el('code',{'class':'location'},f.location));var workflowView=ownValue(D.workflow_views,f.id);if(workflowView)p.appendChild(el('p',{'class':'workflow-next'},L.w_next+': '+workflowView.next_stage));if(f.impact)p.appendChild(el('p',{'class':'impact'},f.impact));p.appendChild(el('p',{'class':'action'},item.action==='fix_now'?(f.fix||L.missing_fix):L.verify_first_note));list.appendChild(p);});});
+[[L.open_hm,D.open_hm,'urgent',L.open_count+': '+R.open_count],[L.needs_validation,R.verify_first,'review',L.fix_now+': '+R.fix_now],[L.closed_count,[[R.fixed,'Fixed'],[R.accepted,'Accepted']],'',L.included+': '+F.length],[L.excluded_short,R.excluded,'',L.all_records+': '+ALL.length]].forEach(function(c){var d=el('div',{'class':'card '+c[2]});d.appendChild(el('span',{'class':'l'},c[0]));var n=el('div',{'class':'n'});if(Array.isArray(c[1]))c[1].forEach(function(x){var pair=el('span',{'class':'pair'},x[0]);pair.appendChild(el('span',{'class':'u'},x[1]));n.appendChild(pair);});else n.textContent=c[1];d.appendChild(n);d.appendChild(el('div',{'class':'sub'},c[3]));byId('cards').appendChild(d);});
+D.parts.forEach(function(part){var c=R.parts[part],d=el('div',{'class':'card','data-part':part});d.appendChild(el('span',{'class':'l'},L['part_'+part]+' · '+L.open_count));d.appendChild(el('div',{'class':'n'},c.open_count));d.appendChild(el('div',{'class':'sub'},fmt(L.part_card_sub,c)));byId('part-cards').appendChild(d);});
+var shownTop=0;D.parts.forEach(function(part){var top=R.queue.filter(function(item){return item.finding.part===part;}).slice(0,4);shownTop+=top.length;if(!R.queue.length)return;byId('priority').appendChild(el('h3',{'class':'part-heading',id:'priority-'+part},L['part_'+part]));var list=el('div',{'class':'priority-list'});byId('priority').appendChild(list);if(!top.length)list.appendChild(el('div',{'class':'panel muted'},L.part_none_open));top.forEach(function(item){var f=item.finding,p=el('article',{'class':'panel priority-item sev-'+f.severity}),head=el('div',{'class':'priority-top'});head.appendChild(badge(f));head.appendChild(el('span',{'class':'action-label'},L[item.action]));p.appendChild(head);var h=el('h3');h.appendChild(el('a',{href:'#'+item.anchor},f.id+' · '+f.title));p.appendChild(h);p.appendChild(el('div',{'class':'verdict'},f.confidence+' · '+f.verdict));p.appendChild(el('code',{'class':'location'},f.location));var workflowView=ownValue(D.workflow_views,f.id);if(workflowView)p.appendChild(el('p',{'class':'workflow-next'},L.w_next+': '+workflowView.next_stage));if(f.impact)p.appendChild(el('p',{'class':'impact'},f.impact));if(item.action==='fix_now')p.appendChild(el('p',{'class':'action'},f.fix||L.missing_fix));list.appendChild(p);});});
+if(R.queue.some(function(item){return item.action==='verify_first';})){var legend=byId('verify-legend');legend.appendChild(el('span',{'class':'action-label'},L.verify_first));legend.appendChild(document.createTextNode(' '+L.verify_first_note));legend.hidden=false;}
 if(!R.queue.length)byId('priority').appendChild(el('div',{'class':'panel muted'},L.no_open));byId('queue-note').textContent=fmt(L.queue_more,{shown:shownTop,total:R.open_count});
 ['scope','method','commit'].forEach(function(k){byId('scope-meta').appendChild(el('dt',null,L[k==='scope'?'scope_l':k]));byId('scope-meta').appendChild(el('dd',null,D.meta[k]||L.not_recorded));});
 byId('coverage-count').textContent=L.limitations_count+': '+D.limitations.length;listInto(byId('limitations'),D.limitations,L.limitations_empty);
@@ -2050,7 +2055,8 @@ button.onclick=function(e){e.stopPropagation();toggle();};tr.onclick=function(e)
 function openHash(){var anchor=window.location.hash.slice(1),f=ALL.find(function(x){return D.anchors[x.id]===anchor;});if(!f)return;reset();if(excluded(f))byId('f-scope').value='all';expanded.add(anchor);draw();var row=byId(anchor);row.scrollIntoView({block:'start'});row.querySelector('button').focus({preventScroll:true});}
 document.addEventListener('click',function(e){var a=e.target.closest('a[href^="#finding-"]');if(a&&a.getAttribute('href')===window.location.hash){e.preventDefault();openHash();}});
 window.addEventListener('hashchange',openHash);draw();if(window.location.hash)openHash();
-['next_steps','decisions','checked_ok'].forEach(function(k){var p=el('section',{'class':'panel'});p.appendChild(el('h2',null,L[k]));listInto(p,D[k],L.not_recorded);byId('lists').appendChild(p);});
+listInto(byId('decisions'),D.decisions,L.not_recorded);
+['next_steps','checked_ok'].forEach(function(k){var p=el('section',{'class':'panel'});p.appendChild(el('h2',null,L[k]));listInto(p,D[k],L.not_recorded);byId('lists').appendChild(p);});
 })();
 </script>
 </body>
