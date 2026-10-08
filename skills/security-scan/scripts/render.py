@@ -1076,6 +1076,7 @@ tr{break-inside:avoid;page-break-inside:avoid}
 .queue-location,.queue-location code{font-size:7.4pt;color:var(--muted)}
 .queue-action{font-size:8.4pt}
 .queue-action strong{display:block;margin-bottom:.6mm;font:700 7.4pt/1.4 var(--sans);letter-spacing:.06em}
+.queue-legend{font-size:8.6pt;margin:0 0 2mm}.queue-legend strong{font:700 7.4pt/1.4 var(--sans);letter-spacing:.06em;margin-right:1.5mm}
 .badge{display:inline-block;font:700 7.2pt/1.5 var(--sans);letter-spacing:.1em;padding:0;margin:.6mm 0;border:0;background:none;color:var(--muted);white-space:nowrap}
 .High{color:var(--high)}.Medium{color:var(--medium)}.Low{color:var(--low)}.Info{color:var(--muted)}
 .coverage .perspective-col{width:28%}.coverage .result-col{width:26%}.coverage .note-col{width:46%}
@@ -1088,7 +1089,7 @@ tr{break-inside:avoid;page-break-inside:avoid}
 #finding-details,.excluded-section{counter-reset:finding}
 .finding{counter-increment:finding;margin:7mm 0 0;padding:0 0 0 4mm;border-left:.6pt solid var(--hair);break-inside:auto;page-break-inside:auto}
 .finding.sev-High{border-left:2.4pt solid var(--high)}.finding.sev-Medium{border-left:1.2pt solid var(--medium)}.finding.sev-Low{border-left:.6pt solid var(--low)}
-.finding.compact{break-inside:avoid;page-break-inside:avoid}
+.finding.excluded{border-left:.6pt dashed var(--hair)}.finding.excluded .badge{color:var(--muted)}
 .finding-header{break-inside:avoid;page-break-inside:avoid;break-after:avoid;page-break-after:avoid}
 .finding h3{font-size:11.5pt;line-height:1.4;margin:0 0 2.5mm}
 .finding-id{display:block;font:400 8pt/1.4 var(--mono);color:var(--muted);margin-bottom:1mm}
@@ -1099,7 +1100,7 @@ tr{break-inside:avoid;page-break-inside:avoid}
 .finding-state .badge{margin:0}
 .finding-context{font-size:8.8pt;margin-bottom:1.4mm}
 .finding-context strong{font:600 7.6pt/1.4 var(--sans);letter-spacing:.05em;color:var(--muted);margin-right:1.5mm}
-.finding-field{margin:0 0 3mm;break-inside:auto;page-break-inside:auto}
+.finding-field{margin:0 0 3mm;break-inside:auto;page-break-inside:auto;orphans:3;widows:3}
 .finding-field h4{margin-bottom:1mm}
 .prose{white-space:pre-wrap;overflow-wrap:anywhere;word-wrap:break-word}
 .empty-value{color:var(--muted);font-style:italic}
@@ -1114,14 +1115,14 @@ html[lang="ja"] .snippet::before{content:"コード " counter(listing);letter-sp
 .record-footer{break-before:avoid;page-break-before:avoid;font:7.4pt/1.4 var(--sans);margin:2mm 0 0;color:var(--muted)}
 .record-footer a{color:var(--muted)}
 .excluded-section{margin-top:9mm}
-.excluded-section>.section-note{break-after:avoid;page-break-after:avoid}
+.excluded-section>.section-note{break-inside:avoid;page-break-inside:avoid;break-after:avoid;page-break-after:avoid}
 .expert-summary,.three-pass-summary,.integrity-summary{margin:5mm 0;padding:0 0 0 4mm;border-left:.6pt solid var(--rule);overflow-wrap:anywhere;break-inside:auto!important;page-break-inside:auto}
 .expert-summary h3,.three-pass-summary h3{margin-top:0}
 .expert-lines{padding-left:4mm;font-size:9pt}
 .three-pass-summary .prose{white-space:pre-wrap;overflow-wrap:anywhere}.three-pass-summary h4{margin:3mm 0 1mm}.three-pass-stage{break-inside:avoid}
 .verification-record,.workflow-record{margin:3mm 0;padding:0 0 0 3mm;border:0;border-left:.3pt solid var(--hair);break-inside:auto;page-break-inside:auto}
 .verification-record h5,.workflow-record h5{font-size:9pt;margin:3mm 0 1mm;break-after:avoid}
-.verification-record p,.workflow-record p{font-size:8.3pt;overflow-wrap:anywhere}
+.verification-record p,.workflow-record p,.verification-gaps,.workflow-gaps{font-size:8.3pt;overflow-wrap:anywhere}.verification-gaps{color:var(--muted)}
 .verification-level{font-weight:700}
 .verification-record section,.workflow-record section{break-inside:auto;page-break-inside:auto}
 .validation-method{break-before:avoid;page-break-before:avoid}
@@ -1722,7 +1723,7 @@ def render_assessment_html(data, L, lang, integrity=None):
             if action == "fix_now":
                 action_text = f.get("fix") or L["a_fix_missing"]
             else:
-                action_text = L["a_verify_action"]
+                action_text = ""
             # Queue is a navigation aid; the complete unabridged fix remains below.
             action_preview = action_text if len(action_text) <= 220 else action_text[:217].rstrip() + "..."
             queue_rows.append(
@@ -1734,6 +1735,8 @@ def render_assessment_html(data, L, lang, integrity=None):
                 f"<thead><tr><th scope='col'>ID / {esc(L['severity'])}</th><th scope='col'>{esc(L['a_finding'])}</th>"
                 f"<th scope='col'>{esc(L['a_next_action'])}</th></tr></thead><tbody>{''.join(queue_rows)}</tbody></table>")
 
+    verify_legend = (f"<p class='queue-legend'><strong>{esc(L['a_verify_first'])}</strong> {esc(L['a_verify_action'])}</p>"
+                     if any(item["action"] != "fix_now" for item in model["queue"]) else "")
     part_queues = {part: [item for item in model["queue"] if item["finding"]["part"] == part] for part in PARTS}
     queue_html = ("".join(
         f"<h3 id='priority-queue-{part}'>{esc(L['part_' + part])}</h3>" +
@@ -1807,16 +1810,12 @@ def render_assessment_html(data, L, lang, integrity=None):
         previous = f.get("previous_validation")
         if isinstance(previous, dict):
             historical = prose(L["history_note"])
-            for key in ("verdict", "evidence", "method"):
+            for key, label in (("verdict", "verdict"), ("evidence", "evidence"), ("method", "a_method")):
                 if isinstance(previous.get(key), str) and previous[key]:
-                    historical += prose(previous[key])
+                    historical += f"<p class='finding-context prose'><strong>{esc(L[label])}:</strong> {esc(previous[key])}</p>"
             content += field("previous_validation", historical)
-        # Keep small records together; large evidence/source records remain splittable.
-        record_length = sum(len(str(f.get(k) or "")) for k in
-                            ("title", "location", "category", "actor", "request", "impact", "fix"))
-        record_length += len(str(validation.get("evidence") or "")) + len(str(previous or ""))
-        compact = " compact" if not f.get("snippet") and not f.get("verification") and not f.get("verification_workflow") and record_length <= 400 else ""
-        return (f"<article class='finding sev-{esc(f['severity'])}{compact}' id='{esc(finding_anchor(data, f))}'>"
+        excluded_class = " excluded" if is_excluded else ""
+        return (f"<article class='finding sev-{esc(f['severity'])}{excluded_class}' id='{esc(finding_anchor(data, f))}'>"
                 f"<div class='finding-header'><h3><span class='finding-id'>{esc(f['id'])}</span>{esc(f['title'])}</h3>"
                 f"{state}{action}{context}</div>{content}"
                 f"<p class='record-footer'><a href='#finding-register'>{esc(L['a_back_to_register'])}</a></p></article>")
@@ -1844,7 +1843,7 @@ def render_assessment_html(data, L, lang, integrity=None):
 {three_pass_html(three_pass_view(data, lang, integrity=integrity), L)}
 <h3 class="limit-heading">{esc(L['a_limits'])}</h3><p class="small">{esc(L['a_uncertainty'])}</p>
 <div class="limits">{bullets(data.get('limitations', []), 'a_limits_empty')}</div></section>
-<section id="priority-queue"><h2>{esc(L['a_queue'])}</h2><p class="section-note">{esc(L['a_queue_note'])}</p>{queue_html}</section>
+<section id="priority-queue"><h2>{esc(L['a_queue'])}</h2><p class="section-note">{esc(L['a_queue_note'])}</p>{verify_legend}{queue_html}</section>
 {decisions_html}{next_steps_html}
 <section id="recorded-coverage"><h2>{esc(L['a_coverage'])}</h2><p class="section-note">{esc(L['a_coverage_note'])}</p>
 {coverage_html}{ledger_html(data, lang)}<h3>{esc(L['a_checks'])}</h3>{bullets(data.get('checked_ok', []), 'a_checks_empty')}</section>
