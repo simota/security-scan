@@ -37,7 +37,8 @@ EXCLUDED = {"FalsePositive", "NotApplicable"}
 # Report parts: the application's own design, code and configuration, then the
 # scanner-owned dependency and supply-chain records (D-*, reference/dependencies.md).
 PARTS = ("code", "deps")
-CWE_RE = re.compile(r"^CWE-\d{1,5}$")
+# ASCII digits only, no trailing newline: the number becomes part of a link.
+CWE_RE = re.compile(r"CWE-[0-9]{1,5}")
 
 LABELS = {
     "en": {
@@ -763,8 +764,12 @@ def validate_data(data):
             raise SchemaError(f"{where}.status: one of {STATUSES}")
         for k in ("category", "actor", "request", "impact", "fix"):
             f[k] = text_field(f, k, where)
-        if "cwe" in f and not CWE_RE.match(text_field(f, "cwe", where)):
-            raise SchemaError(f"{where}.cwe: CWE-<number>")
+        if "cwe" in f:
+            # Optional text fields may be an empty string (findings-schema.md).
+            if not text_field(f, "cwe", where):
+                del f["cwe"]
+            elif not CWE_RE.fullmatch(f["cwe"]):
+                raise SchemaError(f"{where}.cwe: CWE-<number>")
         if not f["category"]:
             f["category"] = "Uncategorized"
         val = f.get("validation", {})
@@ -897,7 +902,8 @@ def report_model(data, integrity=None):
               "action": action_kind(f, verification[f["id"]], workflows.get(f["id"])), "anchor": finding_anchor(data, f)}
              for f in fs if f["status"] == "Open"]
     queue.sort(key=lambda item: (SEVERITIES.index(item["finding"]["severity"]),
-                                item["action"] != "fix_now", str(item["finding"]["id"])))
+                                item["action"] != "fix_now", item["finding"]["part"] == "deps",
+                                str(item["finding"]["id"])))
     return {
         **({"three_pass": {"status": profile["status"],
                           "passes": [{key: item[key] for key in ("id", "status", "completed", "total")}
@@ -1212,7 +1218,14 @@ def attach_sources(data, repo, context=3):
         # Do not show even a middle line of a multiline private key.
         if PRIVATE_KEY_RE.search(text):
             continue
-        lines = text.splitlines()
+        # Number lines as Git and editors do: str.splitlines() also breaks on
+        # form feeds, U+2028 and other separators and would shift every line.
+        lines = text.split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()
+        lines = [line[:-1] if line.endswith("\r") else line for line in lines]
+        if start > len(lines):
+            continue  # The location is past the end of this file: no excerpt.
         lo, hi = max(1, start - max(0, context)), min(len(lines), end + max(0, context))
         requested_hi = hi
         hi = min(hi, lo + 199)
@@ -1867,6 +1880,8 @@ CHROME_CANDIDATES = [
 
 def to_pdf(html_path, pdf_path):
     """Print html_path to pdf_path with headless Chrome, else WeasyPrint. Returns the engine used or None."""
+    # A previous run's PDF must never survive next to newer HTML.
+    Path(pdf_path).unlink(missing_ok=True)
     chrome = os.environ.get("CHROME")
     cands = [chrome] if chrome else CHROME_CANDIDATES
     for c in cands:
@@ -1884,9 +1899,9 @@ def to_pdf(html_path, pdf_path):
             # wait for the file to appear and stop growing, then stop the process.
             last, deadline = -1, time.monotonic() + 120
             while time.monotonic() < deadline:
-                if proc.poll() is not None and not pdf.exists():
-                    break
                 size = pdf.stat().st_size if pdf.exists() else -1
+                if proc.poll() is not None and size <= 0 and (size < 0 or size == last):
+                    break  # Exited without writing (or left an empty file): try the next engine.
                 if size > 0 and size == last:
                     break
                 last = size
@@ -1897,11 +1912,15 @@ def to_pdf(html_path, pdf_path):
                     proc.wait(timeout=10)
                 except subprocess.TimeoutExpired:
                     proc.kill()
+                    proc.wait()
         if pdf.exists() and pdf.stat().st_size > 0:
             return "chrome"
     wp = shutil.which("weasyprint")
     if wp:
-        r = subprocess.run([wp, str(html_path), str(pdf_path)], capture_output=True, text=True, timeout=120)
+        try:
+            r = subprocess.run([wp, str(html_path), str(pdf_path)], capture_output=True, text=True, timeout=120)
+        except (subprocess.TimeoutExpired, OSError):
+            return None
         if r.returncode == 0 and Path(pdf_path).exists():
             return "weasyprint"
     return None
@@ -2012,7 +2031,7 @@ function verificationNode(f){var view=D.verification_views[f.id],box=el('div',{'
 D.parts.forEach(function(part){var c=R.parts[part],d=el('div',{'class':'card','data-part':part});d.appendChild(el('span',{'class':'l'},L['part_'+part]+' · '+L.open_count));d.appendChild(el('div',{'class':'n'},c.open_count));d.appendChild(el('div',{'class':'sub'},fmt(L.part_card_sub,c)));byId('part-cards').appendChild(d);});
 var shownTop=0;D.parts.forEach(function(part){var top=R.queue.filter(function(item){return item.finding.part===part;}).slice(0,4);shownTop+=top.length;if(!R.queue.length)return;byId('priority').appendChild(el('h3',{'class':'part-heading',id:'priority-'+part},L['part_'+part]));var list=el('div',{'class':'priority-list'});byId('priority').appendChild(list);if(!top.length)list.appendChild(el('div',{'class':'panel muted'},L.part_none_open));top.forEach(function(item){var f=item.finding,p=el('article',{'class':'panel priority-item sev-'+f.severity}),head=el('div',{'class':'priority-top'});head.appendChild(badge(f));head.appendChild(el('span',{'class':'action-label'},L[item.action]));p.appendChild(head);var h=el('h3');h.appendChild(el('a',{href:'#'+item.anchor},f.id+' · '+f.title));p.appendChild(h);p.appendChild(el('div',{'class':'verdict'},f.confidence+' · '+f.verdict));p.appendChild(el('code',{'class':'location'},f.location));var workflowView=ownValue(D.workflow_views,f.id);if(workflowView)p.appendChild(el('p',{'class':'workflow-next'},L.w_next+': '+workflowView.next_stage));if(f.impact)p.appendChild(el('p',{'class':'impact'},f.impact));if(item.action==='fix_now')p.appendChild(el('p',{'class':'action'},f.fix||L.missing_fix));list.appendChild(p);});});
 if(R.queue.some(function(item){return item.action==='verify_first';})){var legend=byId('verify-legend');legend.appendChild(el('span',{'class':'action-label'},L.verify_first));legend.appendChild(document.createTextNode(' '+L.verify_first_note));legend.hidden=false;}
-if(!R.queue.length)byId('priority').appendChild(el('div',{'class':'panel muted'},L.no_open));byId('queue-note').textContent=fmt(L.queue_more,{shown:shownTop,total:R.open_count});
+if(!R.queue.length)byId('priority').appendChild(el('div',{'class':'panel muted'},L.no_open));byId('queue-note').textContent=shownTop<R.open_count?fmt(L.queue_more,{shown:shownTop,total:R.open_count}):'';
 ['scope','method','commit'].forEach(function(k){byId('scope-meta').appendChild(el('dt',null,L[k==='scope'?'scope_l':k]));byId('scope-meta').appendChild(el('dd',null,D.meta[k]||L.not_recorded));});
 byId('coverage-count').textContent=L.limitations_count+': '+D.limitations.length;listInto(byId('limitations'),D.limitations,L.limitations_empty);
 if(!D.perspectives.length)byId('perspectives').appendChild(el('p',{'class':'muted'},L.coverage_missing));
@@ -2044,8 +2063,9 @@ field(L.location,f.location);if(f.cwe)field(L.cwe,f.cwe);['actor','request','imp
 if(f.snippet){var pre=el('pre',{'class':'snippet'});f.snippet.lines.forEach(function(text,i){var n=f.snippet.start+i,ln=el('span',{'class':n>=f.snippet.hit[0]&&n<=f.snippet.hit[1]?'hit':''});ln.appendChild(el('b',null,String(n).padStart(5,' ')+' '));ln.appendChild(document.createTextNode(text));pre.appendChild(ln);});field(L.snippet,pre);if(f.snippet.truncated)field(L.note,L.snippet_truncated);}
 var refs=(f.source_link?[{type:'source',url:f.source_link,title:L.source_link}]:[]).concat(f.references||[]);if(refs.length){var ul=el('ul',{'class':'refs'});refs.forEach(function(r){var li=el('li');li.appendChild(el('span',{'class':'rt'},r.type));li.appendChild(el('a',{href:r.url,target:'_blank',rel:'noopener noreferrer'},r.title||r.url));ul.appendChild(li);});field(L.references,ul);}td.appendChild(dl);var workflow=workflowNode(f);if(workflow)td.appendChild(workflow);td.appendChild(verificationNode(f));
 if(f.previous_validation&&typeof f.previous_validation==='object'){var history=el('aside',{'class':'history'});history.appendChild(el('strong',null,L.previous_validation));history.appendChild(el('p',null,L.history_note));['verdict','evidence','method'].forEach(function(k){if(typeof f.previous_validation[k]==='string')history.appendChild(el('p',null,f.previous_validation[k]));});td.appendChild(history);}dt.appendChild(td);return dt;}
-function draw(){var tb=byId('rows');tb.textContent='';var term=q.value.trim().toLowerCase(),scope=v('f-scope');var pool=scope==='all'?ALL:ALL.filter(function(f){return scope==='excluded'?excluded(f):!excluded(f);});var shown=pool.filter(function(f){return (!v('f-part')||f.part===v('f-part'))&&(!v('f-sev')||f.severity===v('f-sev'))&&(!v('f-conf')||f.confidence===v('f-conf'))&&(!v('f-cat')||f.category===v('f-cat'))&&(!v('f-status')||f.status===v('f-status'))&&(!v('f-verdict')||f.verdict===v('f-verdict'))&&(!term||JSON.stringify(f).toLowerCase().indexOf(term)>=0);});
-shown.sort(function(a,b){var status=v('f-sort')==='priority'?Number(a.status!=='Open')-Number(b.status!=='Open'):0;return status||SEV.indexOf(a.severity)-SEV.indexOf(b.severity)||(v('f-sort')==='priority'?Number(action(a)!=='fix_now')-Number(action(b)!=='fix_now'):0)||String(a.id).localeCompare(String(b.id));});
+function searchText(f){var val=f.validation||{};return [f.id,f.title,f.location,f.category,f.actor,f.request,f.impact,f.fix,f.cwe,f.status,f.severity,f.confidence,f.verdict,val.evidence,val.method].filter(Boolean).join('\n').toLowerCase();}
+function draw(){var tb=byId('rows');tb.textContent='';var term=q.value.trim().toLowerCase(),scope=v('f-scope');var pool=scope==='all'?ALL:ALL.filter(function(f){return scope==='excluded'?excluded(f):!excluded(f);});var shown=pool.filter(function(f){return (!v('f-part')||f.part===v('f-part'))&&(!v('f-sev')||f.severity===v('f-sev'))&&(!v('f-conf')||f.confidence===v('f-conf'))&&(!v('f-cat')||f.category===v('f-cat'))&&(!v('f-status')||f.status===v('f-status'))&&(!v('f-verdict')||f.verdict===v('f-verdict'))&&(!term||searchText(f).indexOf(term)>=0);});
+shown.sort(function(a,b){var status=v('f-sort')==='priority'?Number(a.status!=='Open')-Number(b.status!=='Open'):0;return status||SEV.indexOf(a.severity)-SEV.indexOf(b.severity)||(v('f-sort')==='priority'?Number(action(a)!=='fix_now')-Number(action(b)!=='fix_now'):0)||Number(a.part==='deps')-Number(b.part==='deps')||String(a.id).localeCompare(String(b.id));});
 byId('result-count').textContent=fmt(L.showing,{shown:shown.length,total:pool.length});
 if(!shown.length){var empty=el('tr'),td=el('td',{colspan:7,'class':'empty'},pool.length?L.no_matches:L.no_records);empty.appendChild(td);tb.appendChild(empty);return;}
 shown.forEach(function(f){var anchor=D.anchors[f.id],tr=el('tr',{'class':'row',id:anchor}),dt=details(f,anchor);var labels=['ID',L.severity,L.confidence,L.status,L.verdict,L.title_col,L.category];var values=[f.id,null,f.confidence,f.status,f.verdict,null,f.category],button;
@@ -2138,10 +2158,16 @@ def main(argv=None):
         print(f"render.py: {e}", file=sys.stderr)
         return 2
     out = Path(a.out)
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "dashboard.html").write_text(dashboard, encoding="utf-8")
     html_path = out / "assessment.html"
-    html_path.write_text(assessment, encoding="utf-8")
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "dashboard.html").write_text(dashboard, encoding="utf-8")
+        html_path.write_text(assessment, encoding="utf-8")
+        if a.no_pdf:
+            (out / "assessment.pdf").unlink(missing_ok=True)
+    except OSError as e:
+        print(f"render.py: cannot write outputs to {a.out}: {e.strerror or e}", file=sys.stderr)
+        return 2
     print(f"wrote {out / 'dashboard.html'}")
     print(f"wrote {html_path}")
     if a.no_pdf:
