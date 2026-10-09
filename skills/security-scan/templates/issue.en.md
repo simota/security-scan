@@ -22,6 +22,8 @@ Before filing:
 | Severity | {{severity}} |
 | Confidence | {{confidence}} (if Environment-dependent, name the setting under *Open questions*) |
 | Verdict | {{validation.verdict}} (method: {{validation.method}}) |
+| Verification | static support / runtime support / incomplete, as the dashboard shows it |
+| Retest | verified / not verified / not started, as the dashboard shows it |
 | Perspective | {{category}} |
 | CWE | {{cwe}} |
 | Location | `{{location}}` |

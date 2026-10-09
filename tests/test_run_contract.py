@@ -75,6 +75,7 @@ class RunContractTests(unittest.TestCase):
         }
         self.findings.write_text(json.dumps(data))
         self.deps.merge_into(self.findings, {"findings": [], "not_run": []}, audit=True)
+        (self.out / "deps.json").write_text('{"inventory": [], "findings": [], "not_run": []}\n')
         return json.loads(self.findings.read_text())
 
     def render(self):

@@ -249,7 +249,10 @@ The repository runner writes a new results directory containing:
 
 - `results.json`: complete run status, each cycle and step, expected/actual case
   outcomes, semantic hashes, repeatability, timeout and tool-version metadata.
-- `records.json`: separate evidence/test-run records for manual review/import.
+- `records.json`: separate evidence/test-run records for manual review/import,
+  exported only for a `completed`, repeatable run. A stale, errored, timed-out
+  or `incomplete` run exports no records. The child runtime stops one second
+  before the `--timeout` deadline and reports `timeout` itself.
 - `evidence/`: one sanitized JSON observation per completed case, referenced by
   hash from the exported records. Unsupported cases have no invented observations.
 

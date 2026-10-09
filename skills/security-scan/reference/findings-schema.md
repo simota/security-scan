@@ -200,8 +200,11 @@ profile below adds an explicitly declared perspective/target coverage plan.
 both for source evidence: it reads each path from the commit's blob (refusing
 a path whose checked-out bytes differ), copies it to `evidence/source/<path>`
 beside `findings.json`, sets `schema_version`, `assessment` and `meta.commit`,
-appends one `SRC-NNN` record per new path and prints the path → ID map. Edit
-the generic `summary` into the sanitized observation when it matters.
+appends one `SRC-NNN` record per new path and prints the path → ID map. When
+the generic `summary` should carry the sanitized observation, merge a fragment
+such as `{"evidence": [{"id": "SRC-001", "summary": "…"}]}` (never edit
+`findings.json` by hand). `verification` and `evidence` fragments are refused
+until capture has run, so they can only cite IDs it printed.
 
 Capture requires stable, owned local inputs and POSIX no-follow file operations.
 Caller-selected repository/output roots are canonicalized once, supporting
@@ -272,8 +275,9 @@ or revision and does not substitute for these flags.
 `verification` is an object with these fields:
 
 - `reviewer`: nonblank identity of the primary reviewer
-- `claims`: the four required claim names below, each with `status`,
-  nonblank `reason` and `evidence_ids`
+- `claims`: an object keyed by the four required claim names below, each an
+  object with `status`, nonblank `reason` and `evidence_ids`, e.g.
+  `"claims": {"reachability": {"status": "supported", "reason": "…", "evidence_ids": ["SRC-001"]}, …}`
   - `reachability`: the named actor can reach the relevant route and operation
   - `preconditions`: required feature, version, configuration and state hold
   - `defenses`: compensating controls do not neutralize the claimed issue
@@ -553,9 +557,10 @@ Without it, findings are validated as before. Shape:
   paths_read, paths_total}` plus optional `finding_ids` and `reason`
   - `id`: `INV-<nn>`, unique; `family`: `OWN`, `ROLE`, `PROP`, `STATE`, `QTY`,
     `ID` or `TRUST`; `invariant` and `source` (`path:line`) nonblank
-  - `status`: `holds` (every path read: `paths_read == paths_total >= 1`),
-    `partial` (`paths_read < paths_total`: "holds on N/M, rest not read"),
-    `violated` (nonempty `finding_ids` of `F-*` findings in this report) or
+  - `status`: `holds` (every path read: `paths_read == paths_total >= 1`; no
+    `finding_ids`), `partial` (`paths_read < paths_total`: "holds on N/M, rest
+    not read"), `violated` (`finding_ids` of `F-*` findings in this report, at
+    least one not ruled out as FalsePositive/NotApplicable) or
     `not_checked` (nonblank `reason`)
 - `units` (optional): `{unit, record_inputs, trace_rows, blank_cells}` plus
   optional boolean `closed`; a unit marked `closed: true` is a schema error

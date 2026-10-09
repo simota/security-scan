@@ -5,7 +5,20 @@ Other findings retain their historical verdict but receive no verification credi
 Artifact paths, hashes and reviewer identities are records, not attestations.
 """
 import re
+import unicodedata
 from datetime import datetime
+
+
+def identity(name):
+    """Compare declared identities, not spellings.
+
+    NFKC folds compatibility forms (fullwidth letters); format characters
+    (zero-width space, soft hyphen) and spaces are invisible in a report, so
+    'author' and 'author\u200b' are one identity, not two independent reviewers.
+    """
+    folded = unicodedata.normalize("NFKC", name)
+    return "".join(c for c in folded if unicodedata.category(c) not in ("Cf", "Zs", "Zl", "Zp")
+                   and not c.isspace()).casefold()
 
 # One explicit ISO-8601 profile, so the same record validates identically on
 # Python 3.9 and 3.11+ (whose fromisoformat accepts many more spellings).
@@ -29,7 +42,7 @@ GAPS = (
     "legacy_details_missing", "verdict_unresolved", "claims_incomplete", "falsification_incomplete",
     "review_missing", "review_disagreement", "environment_unknown",
     "runtime_incomplete", "runtime_contradiction", "runtime_boundary_unverified", "retest_missing",
-    "retest_before_unverified", "retest_after_unverified", "retest_case_mismatch",
+    "retest_before_unverified", "retest_after_unverified", "retest_case_mismatch", "retest_order_invalid",
     "retest_context_mismatch", "retest_version_mismatch", "retest_control_missing",
     "retest_control_failed", "retest_regression_missing", "retest_regression_failed",
     "retest_verification_incomplete",
@@ -189,7 +202,7 @@ class _Validator:
         resolution = self.obj(record["resolution"], where + ".resolution")
         self.text(resolution, "reason", where + ".resolution")
         reviewer = self.text(resolution, "reviewer", where + ".resolution")
-        if reviewer.strip().casefold() != record["reviewer"].strip().casefold():
+        if identity(reviewer) != identity(record["reviewer"]):
             self.error(where + ".resolution.reviewer", "must be the dissenting reviewer")
         self.current_refs(resolution, where + ".resolution", required=True)
         return True
@@ -237,6 +250,9 @@ class _Validator:
         if before and after:
             if before["case_id"] != after["case_id"] or before["expected"] != after["expected"]:
                 gaps.append("retest_case_mismatch")
+            # The fix is retested after the original failure was observed, never before it.
+            if parse_timestamp(after["recorded_at"]) < parse_timestamp(before["recorded_at"]):
+                gaps.append("retest_order_invalid")
             if self.context(before) != self.context(after):
                 gaps.append("retest_context_mismatch")
         for key, role, label in (("positive_control_run_ids", "positive_control", "control"),
@@ -254,6 +270,8 @@ class _Validator:
                     gaps.append("retest_context_mismatch")
                 if after and run["case_id"] == after["case_id"]:
                     gaps.append("retest_case_mismatch")
+                if before and parse_timestamp(run["recorded_at"]) < parse_timestamp(before["recorded_at"]):
+                    gaps.append("retest_order_invalid")
         if level != "runtime_supported" or finding.get("validation", {}).get("verdict") != "Valid":
             gaps.append("retest_verification_incomplete")
         return ("incomplete" if gaps else "verified"), gaps
@@ -334,7 +352,7 @@ class _Validator:
                 all_refs.update(review["resolution"]["evidence_ids"])
             if conclusion != "agree" and not resolved:
                 gaps.append("review_disagreement")
-            if author.strip().casefold() != reviewer.strip().casefold() and (conclusion == "agree" or resolved) and claim_refs.issubset(refs):
+            if identity(author) != identity(reviewer) and (conclusion == "agree" or resolved) and claim_refs.issubset(refs):
                 independent = True
         if finding.get("severity") == "High" and verdict in DEFINITIVE and not independent:
             gaps.append("review_missing")

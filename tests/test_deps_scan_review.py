@@ -167,5 +167,146 @@ class DepsScanReviewTests(unittest.TestCase):
         self.assertIn("validation", c.findings[0])
 
 
+class DepsScanSecondReviewTests(DepsScanReviewTests):
+    """Second-round regressions: audit parsing, workflow sinks and --into writes."""
+
+    def osv(self, lock, vulnerabilities, groups, code=1):
+        payload = {"results": [{"source": {"path": str(lock), "type": "lockfile"}, "packages": [
+            {"package": {"name": "fixture", "version": "1.0", "ecosystem": "PyPI"},
+             "vulnerabilities": vulnerabilities, "groups": groups}]}]}
+        c = self.deps.Collector(self.root)
+        with patch.object(self.deps.shutil, "which", return_value="/tools/osv-scanner"), \
+             patch.object(self.deps, "run", return_value=(code, json.dumps(payload), "")):
+            self.deps.audit_osv(c, self.root, [lock])
+        return c
+
+    def test_npm_user_and_global_config_are_different_files(self):
+        lock = self.write("package-lock.json", {"lockfileVersion": 3, "packages": {}})
+        c = self.deps.Collector(self.root)
+        with patch.object(self.deps.shutil, "which", return_value="/tools/npm"), \
+             patch.object(self.deps, "run", return_value=(0, '{"vulnerabilities": {}}', "")) as run:
+            self.deps.audit_npm(c, self.root, lock)
+        argv = run.call_args.args[0]
+        user = next(a for a in argv if a.startswith("--userconfig="))
+        globalconfig = next(a for a in argv if a.startswith("--globalconfig="))
+        self.assertNotEqual(user.split("=", 1)[1], globalconfig.split("=", 1)[1])
+
+    def test_prose_in_requirements_directory_is_not_a_requirements_file(self):
+        self.write("requirements/README.txt", "Requirement files for this project.\n")
+        self.write("requirements/base.txt", "django\n")
+        locations = [f["location"] for f in self.deps.scan(self.root, False)["findings"]]
+        self.assertEqual(locations, ["requirements/base.txt:1"])
+
+    def test_legacy_poetry_and_uv_dev_dependencies_need_a_lockfile(self):
+        for text in ("[tool.poetry]\nname='x'\n[tool.poetry.dev-dependencies]\npytest='*'\n",
+                     "[tool.uv]\ndev-dependencies = ['pytest']\n"):
+            with self.subTest(text=text):
+                self.write("pyproject.toml", text)
+                self.assertIn("pyproject.toml has no lockfile", self.titles())
+
+    def test_setup_files_with_install_requires_are_inventoried(self):
+        self.write("setup.cfg", "[flake8]\nmax-line-length = 100\n")
+        self.assertFalse(self.titles())
+        self.write("setup.py", "setup(install_requires=['django'])\n")
+        self.assertIn("setup.py has no lockfile", self.titles())
+
+    def test_tool_only_pyproject_is_not_an_unaudited_input(self):
+        project = self.write("pyproject.toml", "[tool.black]\nline-length = 100\n")
+        c = self.deps.Collector(self.root)
+        with patch.object(self.deps, "audit_osv", return_value=set()):
+            self.deps.audits(c, self.root, [project])
+        self.assertFalse(c.not_run)
+
+    def test_scoped_yarn_registry_and_platform_packages(self):
+        self.write(".yarnrc.yml", 'npmScopes:\n  acme:\n    npmRegistryServer: "https://npm.acme.invalid"\n')
+        self.write("composer.json", {"require": {"ext-json": "*", "php": ">=8.1", "lib-icu": ""}})
+        titles = [t for t in self.titles() if "lockfile" not in t]
+        self.assertEqual(titles, [".yarnrc.yml points a scope at \"https://npm.acme.invalid\""])
+
+    def test_editable_bzr_and_flow_style_uses(self):
+        self.write("requirements.txt", "-e bzr+https://example.invalid/pkg#egg=pkg\n")
+        self.write(".github/workflows/a.yml", "jobs:\n  j:\n    steps:\n      - {uses: actions/cache@v3}\n")
+        titles = self.titles()
+        self.assertIn("Python dependency fetched from a URL (see source location)", titles)
+        self.assertIn("action actions/cache@v3 is pinned to a mutable tag, not a commit SHA", titles)
+
+    def workflow_findings(self, step):
+        self.write(".github/workflows/a.yml", "on: issues\njobs:\n  j:\n    runs-on: ubuntu-latest\n"
+                                             "    steps:\n" + step)
+        return [f for f in self.deps.scan(self.root, False)["findings"] if f["title"].startswith("untrusted")]
+
+    def test_github_script_and_single_quoted_runs_are_sinks(self):
+        cases = {
+            "github-script": "      - uses: actions/github-script@" + "0" * 40 + "\n        with:\n"
+                             "          script: |\n            console.log('${{ github.event.issue.title }}')\n",
+            "single-quoted": "      - run: 'echo ${{ format(''}} {0}'', github.event.issue.title) }}'\n",
+            "author email": "      - run: echo ${{ github.event.head_commit.author.email }}\n",
+            "workflow_run branch": "      - run: echo ${{ github.event.workflow_run.head_branch }}\n",
+        }
+        for name, step in cases.items():
+            with self.subTest(name):
+                self.assertEqual(len(self.workflow_findings(step)), 1)
+
+    def test_malicious_alias_group_dedupe_and_git_fix_ranges(self):
+        lock = self.write("poetry.lock", "")
+        vulnerabilities = [
+            {"id": "GHSA-0000-0000-0000", "summary": "s", "aliases": ["MAL-2025-1"],
+             "affected": [{"package": {"name": "fixture"}, "ranges": [
+                 {"type": "GIT", "events": [{"fixed": "0123456789abcdef0123456789abcdef01234567"}]},
+                 {"type": "ECOSYSTEM", "events": [{"fixed": "1.2.4"}]}]}]},
+            {"id": "PYSEC-2024-9", "summary": "s", "aliases": []}]
+        groups = [{"ids": ["GHSA-0000-0000-0000", "PYSEC-2024-9"], "max_severity": "5.0"}]
+        c = self.osv(lock, vulnerabilities, groups)
+        self.assertEqual(len(c.findings), 1)
+        finding = c.findings[0]
+        self.assertTrue(finding["malicious"])
+        self.assertEqual(finding["severity"], "High")
+        self.assertEqual(finding["fix"], "Upgrade to 1.2.4")
+        self.assertIn("PYSEC-2024-9", finding["advisory_ids"])
+
+    def test_composer_audit_tolerates_null_dev_packages(self):
+        lock = self.write("composer.lock", {"packages": [{"name": "acme/x", "version": "1.0"}], "packages-dev": None})
+        advisories = {"advisories": {"acme/x": [{"advisoryId": "PKSA-1", "title": "t", "severity": "high"}]}}
+        c = self.deps.Collector(self.root)
+        with patch.object(self.deps.shutil, "which", return_value="/tools/composer"), \
+             patch.object(self.deps, "run", return_value=(1, json.dumps(advisories), "")):
+            self.deps.audit_composer(c, self.root, lock)
+        self.assertEqual([f["version"] for f in c.findings], ["1.0"])
+
+    def test_triage_needles_are_imports_and_other_ecosystems_are_unknown(self):
+        self.write("app.js", "const level = 'debug';\n")
+        self.write("app.py", "import jinja2\n")
+        self.write("package-lock.json", {"lockfileVersion": 3, "packages": {}})
+        self.write("requirements.txt", "jinja2==2.0\n")
+        c = self.deps.Collector(self.root)
+        self.deps.vuln(c, "high", "debug", "1.0", ["GHSA-1"], "s", self.root / "package-lock.json", "t")
+        self.deps.vuln(c, "high", "jinja2", "2.0", ["PYSEC-1"], "s", self.root / "requirements.txt", "t")
+        self.deps.triage(c, self.root)
+        self.assertEqual([f["validation"]["referenced"] for f in c.findings], ["no", "unknown"])
+
+    def test_lockfile_git_sources_and_pnpm_tarballs(self):
+        self.write("package-lock.json", {"lockfileVersion": 3, "packages": {"node_modules/b": {
+            "resolved": "git+ssh://git@github.com/owner/b.git#0123", "integrity": "sha512-x"}}})
+        self.write("pnpm-lock.yaml", "packages:\n  x@1.0.0:\n    resolution: {tarball: https://pkgs.invalid/x.tgz}\n")
+        titles = self.titles()
+        self.assertIn("lockfile resolves a package from git or a local path, not a registry", titles)
+        self.assertIn("lockfile resolves packages from non-default host pkgs.invalid", titles)
+
+    def test_into_requires_the_file_and_respects_the_writer_lock(self):
+        missing = self.root / "out" / "findings.json"
+        with patch.object(sys, "stderr"), patch.object(sys, "stdout"):
+            self.assertEqual(self.deps.main([str(self.root), "--into", str(missing)]), 2)
+        report = self.write("findings.json", {"findings": []})
+        lock = report.with_name(report.name + ".workflow.lock")
+        lock.write_text("busy")
+        with patch.object(sys, "stderr"), patch.object(sys, "stdout"):
+            self.assertEqual(self.deps.main([str(self.root), "--into", str(report)]), 2)
+        self.assertEqual(json.loads(report.read_text()), {"findings": []})
+        lock.unlink()
+        with patch.object(sys, "stderr"), patch.object(sys, "stdout"):
+            self.assertEqual(self.deps.main([str(self.root), "--into", str(report)]), 0)
+        self.assertIn("dependency_scan", json.loads(report.read_text()))
+
+
 if __name__ == "__main__":
     unittest.main()

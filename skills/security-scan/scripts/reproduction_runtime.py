@@ -310,7 +310,8 @@ def repeat(bundle, manifest, timeout=10):
         if result["status"] not in ("completed", "mismatch"):
             break
     repeatable = len(cycles) == 2 and all(x["status"] == "completed" for x in cycles) and cycles[0]["semantic_sha256"] == cycles[1]["semantic_sha256"]
-    return {"status": "completed" if repeatable else "incomplete", "repeatable": repeatable,
+    status = "completed" if repeatable else "timeout" if any(x["status"] == "timeout" for x in cycles) else "incomplete"
+    return {"status": status, "repeatable": repeatable,
             "cycles": cycles, "boundary": "mocked", "tools": tools_record(),
             "recorded_at": datetime.now(timezone.utc).isoformat(),
             "bundle_id": manifest["bundle_id"], "manifest_sha256": digest(canonical(manifest)),
@@ -324,7 +325,7 @@ def acquire_lock(bundle):
     return lock
 
 
-def entry(action, argv=None, evidence_checked=False):
+def entry(action, argv=None, evidence_checked=False, timeout=10):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--findings", type=Path, required=True, help="Unchanged findings file used to generate this bundle")
     args = parser.parse_args(argv)
@@ -339,7 +340,10 @@ def entry(action, argv=None, evidence_checked=False):
             print(json.dumps({"status": "unsupported", "reason": "Target adapter requires review and implementation; nothing executed."}))
             return 3
         lock = acquire_lock(bundle)
-        result = {"seed": seed, "reproduce": reproduce, "cleanup": cleanup, "run": repeat}[action](bundle, manifest)
+        if action == "run":
+            result = repeat(bundle, manifest, timeout)
+        else:
+            result = {"seed": seed, "reproduce": reproduce, "cleanup": cleanup}[action](bundle, manifest)
         print(json.dumps(result, sort_keys=True))
         # reproduce follows the secure assertion: the expected vulnerable case is red.
         if action == "reproduce":

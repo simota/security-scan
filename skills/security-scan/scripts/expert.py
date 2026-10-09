@@ -8,10 +8,14 @@ omission challenge, simulated reception and the non-participant QA audit
 records; supplied summaries and statuses are never trusted. It checks declared
 records and their consistency, not that a worker really ran or judged well.
 """
+from pathlib import Path
 import re
+import sys
 
+# Sibling modules must import under python3 -I / PYTHONSAFEPATH as well.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from three_pass import derive_three_pass
-from verification import _Validator, integrity_state
+from verification import _Validator, identity, integrity_state
 
 VERSION = 1
 DISCOVERY_ANGLES = ("entry-first", "sink-first", "control-first")
@@ -23,7 +27,7 @@ ROLES = ("recon", "discovery", "variant", "conditions", "falsification", "skepti
 SEVERITY_ORDER = ("High", "Medium", "Low", "Info")
 EXCLUDED = ("FalsePositive", "NotApplicable")
 CWE = re.compile(r"^CWE-\d{1,5}$")
-CODE_ID = re.compile(r"^F-\d{3}$")
+CODE_ID = re.compile(r"F-[0-9]{3}\Z")
 
 # Calibration key for reference/expert-mode.md §Calibration anchors. Raters receive
 # only the anchor text; the orchestrator compares their scores with this key.
@@ -71,7 +75,7 @@ def _count(record, key, where, error_type):
 
 def _actor_key(value):
     """Use the workflow's declared-identity comparison for every expert role."""
-    return value.strip().casefold() if isinstance(value, str) else None
+    return identity(value) if isinstance(value, str) else None
 
 
 def calibrated(scores):

@@ -277,6 +277,38 @@ class ReproductionAdversarialTests(unittest.TestCase):
         self.assertEqual(records["test_runs"], [])
         self.assertNotIn("private partial output", json.dumps(result))
 
+    def test_incomplete_replay_exports_no_records(self):
+        manifest = self.generate()
+        cycle = {"cycle": 1, "status": "completed", "reproduction": {"cases": [
+            {"phase": "before", "role": "security", "case_id": "c", "expected": "x", "actual": "x",
+             "result": "fail", "failure_kind": "assertion"}]}}
+        for result in ({"status": "incomplete", "repeatable": False, "cycles": [cycle, dict(cycle, cycle=2, status="error")]},
+                       {"status": "timeout", "repeatable": False, "cycles": [cycle]}):
+            with self.subTest(status=result["status"]):
+                out = self.root / ("records-" + result["status"])
+                out.mkdir()
+                records = self.repro.export_records(manifest, result, out)
+                self.assertEqual((records["evidence"], records["test_runs"]), ([], []))
+
+    def test_child_deadline_follows_the_run_timeout(self):
+        self.generate()
+        captured = {}
+
+        def fake_run(argv, **kwargs):
+            captured["program"] = argv[argv.index("-c") + 1]
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+        with patch.object(self.repro.subprocess, "run", side_effect=fake_run):
+            self.repro.run(self.bundle, self.findings, self.out, timeout=30)
+        self.assertIn('entry("run", evidence_checked=True, timeout=29)', captured["program"])
+
+    def test_child_reports_timeout_when_a_cycle_times_out(self):
+        manifest = self.generate()
+        with patch.object(self.runtime.time, "monotonic", side_effect=[0, 0, 0, 0, 0, 100, 100, 100, 100]):
+            result = self.runtime.repeat(self.bundle, manifest, timeout=10)
+        self.assertEqual(result["status"], "timeout")
+        self.assertFalse(result["repeatable"])
+
     def test_runner_output_and_errors_do_not_leak_into_public_results(self):
         self.generate()
         private = "INERT_PRIVATE_STDOUT_MARKER_691"

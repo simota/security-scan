@@ -31,7 +31,10 @@ import sys
 import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
+# Sibling modules must import under python3 -I / PYTHONSAFEPATH as well.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from url_redaction import redact_urls
+from findings import MergeConflict, write_report  # The shared findings.json writer.
 
 SKIP_DIRS = {".git", "node_modules", "vendor", ".venv", "venv", "dist", "build",
              "target", "__pycache__", ".next", ".nuxt", "bower_components", ".tox"}
@@ -43,10 +46,13 @@ LOCKS = {
     "go.mod": ["go.sum"],
     "Cargo.toml": ["Cargo.lock"],
     "pyproject.toml": ["poetry.lock", "uv.lock", "pdm.lock", "Pipfile.lock", "requirements.lock"],
+    "setup.py": ["poetry.lock", "uv.lock", "pdm.lock", "Pipfile.lock", "requirements.lock"],
+    "setup.cfg": ["poetry.lock", "uv.lock", "pdm.lock", "Pipfile.lock", "requirements.lock"],
     "Pipfile": ["Pipfile.lock"],
 }
 ECOSYSTEM = {"package.json": "npm", "composer.json": "composer", "Gemfile": "bundler", "go.mod": "go",
-             "Cargo.toml": "cargo", "pyproject.toml": "python", "Pipfile": "python",
+             "Cargo.toml": "cargo", "pyproject.toml": "python", "setup.py": "python",
+             "setup.cfg": "python", "Pipfile": "python",
              "requirements.txt": "python", "pom.xml": "maven", "build.gradle": "gradle",
              "build.gradle.kts": "gradle"}
 
@@ -54,9 +60,10 @@ def is_requirements(p, suffixes=("txt", "in")):
     """requirements*.txt, dev-requirements.txt / test_requirements.in, and files under requirements/."""
     p = Path(p)
     ext = p.suffix[1:]
+    prose = re.match(r"(readme|license|licence|notice|notes|changelog|authors)\b", p.stem, re.I)
     return ext in suffixes and (re.match(r"^requirements", p.name) is not None
                                 or re.search(r"[-_.]requirements$", p.stem) is not None
-                                or p.parent.name == "requirements")
+                                or p.parent.name == "requirements" and not prose)
 
 
 CAT_DEP = "Dependencies and platform"
@@ -332,7 +339,10 @@ def workflow_run_blocks(c, path, text):
         key, value = next(x for x in match.group(3, 4, 5) if x is not None), match[6]
         while stack and stack[-1][0] >= level:
             stack.pop()
-        is_run = key == "run" and bool(stack and stack[-1][1] == "steps")
+        # run: is a shell script; with.script (actions/github-script) is JavaScript.
+        # Both evaluate ${{ }} before the code runs.
+        is_run = bool(stack) and (key == "run" and stack[-1][1] == "steps"
+                                  or key == "script" and stack[-1][1] == "with")
         if (value.startswith(("*", "&", "!"))
                 or key == "steps" and value and not value.startswith("#")
                 or value.startswith(("{", "[")) and (key == "jobs" or stack and stack[-1][1] == "jobs")):
@@ -384,8 +394,10 @@ def untrusted_workflow_expression(c, path, expression):
     property selectors whose source cannot be resolved are explicitly incomplete.
     """
     tokens = re.findall(r"'(?:[^']|'')*'|[A-Za-z_][A-Za-z0-9_-]*|[0-9]+|[^\s]", expression)
-    events = {"issue", "pull_request", "comment", "review", "head_commit", "commits"}
-    fields = {"title", "body", "message", "name", "ref", "label"}
+    events = {"issue", "pull_request", "comment", "review", "review_comment", "head_commit", "commits",
+              "discussion", "discussion_comment", "workflow_run", "pages"}
+    fields = {"title", "body", "message", "name", "ref", "label", "email", "page_name",
+              "head_branch", "default_branch"}
     safe_event_paths = {
         ("event", "number"),
         ("event", "issue", "id"), ("event", "issue", "number"),
@@ -477,14 +489,24 @@ def isolated_composer_audit(c, root, lock, exe):
 
 def declares_python_dependencies(text):
     """A pyproject.toml that only configures tools has nothing to lock."""
-    return re.search(r"^\s*(dependencies|optional-dependencies)\s*=|"
+    return re.search(r"^\s*(dev-)?(dependencies|optional-dependencies)\s*=|"
                      r"^\s*\[(project\.optional-dependencies|tool\.poetry(\.group\.[^\]]+)?\.dependencies|"
-                     r"tool\.pdm\.dev-dependencies|dependency-groups)\]", text, re.M) is not None
+                     r"tool\.poetry\.dev-dependencies|tool\.pdm\.dev-dependencies|dependency-groups)\]",
+                     text, re.M) is not None
+
+
+def declares_dependencies(p):
+    """Python packaging files that only configure tools have nothing to lock or audit."""
+    if p.name == "pyproject.toml":
+        return declares_python_dependencies(read(p))
+    if p.name in ("setup.py", "setup.cfg"):
+        return re.search(r"\binstall_requires\b", read(p)) is not None
+    return True
 
 
 def check_lockfile(c, p):
     locks = LOCKS.get(p.name)
-    if p.name == "pyproject.toml" and not declares_python_dependencies(read(p)):
+    if not declares_dependencies(p):
         return
     associated = matching_lockfiles(c, p) if locks else []
     if locks and associated is not None and not associated:
@@ -556,11 +578,17 @@ def check_npm_lock(c, p):
     # final URL sanitizer no longer recognizes.
     hosts = {}
     resolved = re.compile(r'"resolved"\s*:\s*("(?:[^"\\]|\\.)*")'
-                          r'|^\s+resolved\s+("(?:[^"\\]|\\.)*")', re.M)
+                          r'|^\s+resolved\s+("(?:[^"\\]|\\.)*")'
+                          r'|\btarball:\s*("(?:[^"\\]|\\.)*"|[^\s,}]+)', re.M)
     for match in resolved.finditer(text):
         try:
-            url = json.loads(match[1] or match[2])
+            raw = match[1] or match[2] or match[3]
+            url = json.loads(raw) if raw.startswith('"') else raw
             parsed = urlsplit(url)
+            if re.match(r"(git(\+[a-z]+)?|github|gitlab|bitbucket|file|link)$", parsed.scheme.lower()):
+                if "outside" not in hosts:
+                    hosts["outside"] = text.count("\n", 0, match.start()) + 1
+                continue
             if parsed.scheme.lower() not in ("http", "https"):
                 continue
             host = parsed.hostname
@@ -574,6 +602,10 @@ def check_npm_lock(c, p):
             continue
         if host not in hosts:
             hosts[host] = text.count("\n", 0, match.start()) + 1
+    if "outside" in hosts:
+        c.add("Medium", "lockfile resolves a package from git or a local path, not a registry", p,
+              hosts.pop("outside"), impact="Bypasses registry integrity and advisory coverage; the source can change",
+              fix="Depend on a published, version-pinned release")
     default = {"registry.npmjs.org", "registry.yarnpkg.com"}
     for h in sorted(hosts.keys() - default):
         c.add("Low", f"lockfile resolves packages from non-default host {h}", p, hosts[h],
@@ -598,7 +630,9 @@ def check_npmrc(c, p):
         m = (re.match(r"\s*(@[\w-]+:)?registry\s*=\s*(\S+)", ln)
              or re.match(r"""\s*()["']?npmRegistryServer["']?\s*:\s*(\S+)""", ln))
         if m and registry_host(m.group(2)) not in default:
-            c.add("Info", f"{p.name} points {m.group(1) or 'all packages'} at {m.group(2)}", p, i,
+            # An indented .yarnrc.yml npmRegistryServer sits under npmScopes/npmRegistries.
+            target = m.group(1) or ("a scope" if ln[:1].isspace() and "npmRegistryServer" in ln else "all packages")
+            c.add("Info", f"{p.name} points {target} at {m.group(2)}", p, i,
                   impact="Confirm the registry is trusted and scoped names cannot be claimed publicly",
                   fix="Scope private registries to your own @scope", category=CAT_BUILD)
         if (re.search(r"(_authToken|_auth|_password)\s*=\s*[^$\s]", ln)
@@ -637,14 +671,14 @@ def check_composer(c, p):
     for section in ("require", "require-dev"):
         for name, spec in mapping(data.get(section)).items():
             spec = str(spec).strip()
+            # Platform constraints (php, ext-*, lib-*) are not installed packages.
+            if name in ("php", "php-64bit", "composer-plugin-api") or name.startswith(("ext-", "lib-")):
+                continue
             unbounded = any(
                 any(x.startswith(">") for x in alt.replace(",", " ").split())
                 and not any(x.startswith("<") for x in alt.replace(",", " ").split())
                 for alt in re.split(r"\|\|?", spec))
-            if (spec in ("*", "") or spec.startswith("dev-") or "@dev" in spec
-                    # Platform constraints (php, ext-*, lib-*) are not installed packages.
-                    or (unbounded and name not in ("php", "php-64bit", "composer-plugin-api")
-                        and not name.startswith(("ext-", "lib-")))):
+            if spec in ("*", "") or spec.startswith("dev-") or "@dev" in spec or unbounded:
                 c.add("Medium", f"composer dependency {name} floats ({spec})", p, line_of(text, f'"{name}"'),
                       impact="Unreviewed code is pulled on update", fix="Require a tagged version range")
 
@@ -673,7 +707,7 @@ def check_requirements(c, p):
                   fix="Use a single trusted index or pin hashes", category=CAT_BUILD)
         elif s.startswith("-") or s.startswith("."):
             continue
-        elif re.match(r"^(git\+|https?://|hg\+|svn\+)", s) or " @ " in s:
+        elif re.match(r"^(git\+|https?://|hg\+|svn\+|bzr\+)", s) or " @ " in s:
             c.add("Medium", "Python dependency fetched from a URL (see source location)", p, i,
                   impact="Bypasses index integrity and advisory coverage", fix="Pin to a released version")
         elif "==" not in s and "--hash" not in s:
@@ -717,7 +751,7 @@ def check_workflow(c, p):
     text = read(p)
     for i, ln in enumerate(text.splitlines(), 1):
         # Only a YAML `uses:` key; comments and shell text mentioning it are not steps.
-        m = re.match(r"""^\s*(?:-\s+)?["']?uses["']?\s*:\s*([^\s#]+)""", ln)
+        m = re.match(r"""^\s*(?:-\s+)?\{?\s*["']?uses["']?\s*:\s*([^\s#,}]+)""", ln)
         if m:
             ref = m.group(1).strip("'\"")
             if ref.startswith("./") or ref.startswith("docker://"):
@@ -741,6 +775,10 @@ def check_workflow(c, p):
         script = "\n".join(line for _, line in block)
         scalar_start = next((line.lstrip() for _, line in block
                              if line.strip() and not line.lstrip().startswith("#")), "")
+        if scalar_start.startswith("'"):
+            # YAML single-quoted scalar: '' is one quote. Decoding keeps line
+            # breaks, so expression offsets still map to source lines.
+            script = script.replace("''", "'")
         if scalar_start.startswith('"') and "\\" in script:
             # YAML double-quoted scalars decode escapes before GitHub evaluates
             # expressions; raw text could hide both an opener and a source name.
@@ -934,6 +972,8 @@ def osv_fixed(v, name):
         if (aff.get("package") or {}).get("name") != name:
             continue
         for rng in aff.get("ranges") or []:
+            if rng.get("type") == "GIT":
+                continue  # A fixed commit hash is not a version to upgrade to.
             fixed += [e["fixed"] for e in rng.get("events") or [] if "fixed" in e]
     return ", ".join(dict.fromkeys(fixed))
 
@@ -962,8 +1002,8 @@ def parse_osv(c, data, root, lock):
             vulnerabilities = pk.get("vulnerabilities", [])
             if not isinstance(groups, list) or not isinstance(vulnerabilities, list):
                 raise ValueError("invalid OSV groups/vulnerabilities")
-            group_sev = {}
-            for g in groups:
+            group_sev, group_of, reported = {}, {}, set()
+            for number, g in enumerate(groups):
                 ids, aliases = g.get("ids", []), g.get("aliases", [])
                 if not isinstance(ids, list) or not isinstance(aliases, list):
                     raise ValueError("invalid OSV group IDs")
@@ -971,6 +1011,7 @@ def parse_osv(c, data, root, lock):
                     if not isinstance(identifier, str):
                         raise ValueError("invalid OSV group ID")
                     group_sev[identifier] = g.get("max_severity", "")
+                    group_of[identifier] = number
             for v in vulnerabilities:
                 if (not isinstance(v, dict) or not isinstance(v.get("id"), str) or not v["id"]
                         or not isinstance(v.get("summary", ""), str)):
@@ -978,9 +1019,16 @@ def parse_osv(c, data, root, lock):
                 aliases = v.get("aliases", [])
                 if not isinstance(aliases, list) or not all(isinstance(a, str) for a in aliases):
                     raise ValueError("invalid OSV aliases")
+                # One finding per OSV group: GHSA/PYSEC/CVE records of one issue are aliases.
+                group = group_of.get(v["id"])
+                if group is not None and group in reported:
+                    continue
+                reported.add(group)
+                ids = list(groups[group].get("ids", [])) if group is not None else []
+                malicious = [a for a in aliases + ids if a.startswith("MAL-")]
                 aliases = [a for a in aliases if a.startswith("CVE-")][:2]
                 vuln(c, osv_severity(v, group_sev), info["name"], info.get("version", ""),
-                     [v["id"]] + aliases, v.get("summary", ""), lock, "osv-scanner",
+                     [v["id"]] + aliases + malicious + ids, v.get("summary", ""), lock, "osv-scanner",
                      osv_fixed(v, info["name"]), osv_refs(v))
 
 
@@ -1051,8 +1099,9 @@ def audit_composer(c, root, lock, abandoned_only=False):
     try:
         lockdata = json.loads(read(lock))
         installed = {x["name"]: x.get("version", "") for x in
-                     lockdata.get("packages", []) + lockdata.get("packages-dev", [])}
-    except (json.JSONDecodeError, KeyError):
+                     packages_list(lockdata.get("packages")) + packages_list(lockdata.get("packages-dev"))
+                     if isinstance(x.get("name"), str)}
+    except (ValueError, RecursionError, AttributeError):
         installed = {}
     advisories = {} if abandoned_only else (data.get("advisories") or {})
     if isinstance(advisories, dict):
@@ -1161,15 +1210,17 @@ def isolated_npm_audit(c, lock, exe):
             manifest = lock.parent / "package.json"
             if manifest.exists():
                 (work / "package.json").write_bytes(manifest.read_bytes())
-            empty = work / "empty-npmrc"
-            empty.write_text("", encoding="utf-8")
+            # Two files: npm 10 refuses to load one file as both user and global config.
+            user, globalconfig = work / "empty-user-npmrc", work / "empty-global-npmrc"
+            user.write_text("", encoding="utf-8")
+            globalconfig.write_text("", encoding="utf-8")
             env = {k: v for k, v in os.environ.items() if not k.lower().startswith("npm_config_")}
             env.update({"npm_config_cache": str(work / "cache"), "npm_config_update_notifier": "false"})
             return run([exe, "audit", "--json", "--package-lock-only",
                         "--include=prod", "--include=dev", "--include=optional",
                         "--include=peer", "--ignore-scripts", "--package-lock=true",
                         "--registry=https://registry.npmjs.org/",
-                        "--userconfig=" + str(empty), "--globalconfig=" + str(empty),
+                        "--userconfig=" + str(user), "--globalconfig=" + str(globalconfig),
                         "--workspaces=null", "--prefix=" + str(work)], work, env=env)
     except (OSError, ValueError):
         incomplete(c, "npm audit", lock, "could not prepare isolated audit input")
@@ -1298,6 +1349,8 @@ def audits(c, root, files):
                 c.not_run.append({"tool": "govulncheck", "reason": "run `govulncheck ./...` in the module manually"})
         elif p not in covered and (p.name in KNOWN_LOCKFILES or p.name in ECOSYSTEM
                                     or is_requirements(p, ("in",))):
+            if not declares_dependencies(p):
+                continue
             if p.name in LOCKS:
                 associated = matching_lockfiles(c, p)
                 if associated is None or any(lock in files for lock in associated):
@@ -1366,7 +1419,13 @@ def lock_context(lock):
 
 
 def npm_needles(name):
-    return [f"'{name}'", f'"{name}"', f"'{name}/", f'"{name}/', f"`{name}`", f"`{name}/"]
+    """Import forms only: a quoted word such as 'debug' elsewhere is not a use."""
+    needles = []
+    for quote in ("'", '"', "`"):
+        for tail in (quote, "/"):
+            target = quote + name + tail
+            needles += ["require(" + target, "from " + target, "import(" + target, "import " + target]
+    return needles
 
 
 def triage(c, root):
@@ -1386,7 +1445,9 @@ def triage(c, root):
         else:
             exposure = "unknown"
         direct = "direct" if name in ctx["direct"] else ("transitive" if ctx["direct"] else "unknown")
-        needles = ctx["needles"].get(name) or ([] if Path(lock).name == "composer.lock" else npm_needles(name))
+        npm_family = Path(lock).name in LOCKS["package.json"]
+        # Other ecosystems have no needle model: report "unknown", never a false "no".
+        needles = ctx["needles"].get(name) or (npm_needles(name) if npm_family else [])
         referenced = "yes" if needles and any(n in t for t in texts for n in needles) else ("no" if needles else "unknown")
         if f.get("malicious"):
             verdict = "Likely"
@@ -1420,7 +1481,7 @@ def scan(root, audit):
             check_lockfile(c, p)
         if n == "package.json":
             check_npm(c, p)
-        elif n in ("package-lock.json", "yarn.lock", "npm-shrinkwrap.json"):
+        elif n in ("package-lock.json", "yarn.lock", "npm-shrinkwrap.json", "pnpm-lock.yaml"):
             check_npm_lock(c, p)
         elif n == ".npmrc" or n == ".yarnrc" or n == ".yarnrc.yml":
             check_npmrc(c, p)
@@ -1467,7 +1528,11 @@ def finding_key(f):
 
 
 def merge_into(path, result, audit=None):
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    """Replace D-* findings in path under the shared writer lock, atomically."""
+    original = Path(path).read_bytes()
+    data = json.loads(original.decode("utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("findings file must hold a JSON object")
     old = [f for f in data.get("findings", []) if str(f.get("id", "")).startswith("D-")]
     # Never silently reuse a reachability decision after code/config changes.
     # Keep a matching review as history, requiring revalidation on every scan.
@@ -1493,7 +1558,8 @@ def merge_into(path, result, audit=None):
     # contract_check.py compares this with the D-* count to reject hand-written D-* findings.
     data["dependency_scan"] = {"tool": "deps_scan.py", "audit": audit,
                                "findings": len(result["findings"]), "not_run": len(result["not_run"])}
-    Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    # Same lock and compare-and-replace as findings.py merge.
+    write_report(Path(path), data, original)
 
 
 def main(argv=None):
@@ -1517,7 +1583,15 @@ def main(argv=None):
     elif not a.into:
         print(blob)
     if a.into:
-        merge_into(a.into, result, audit=a.audit)
+        if not os.path.isfile(a.into):
+            print(f"deps_scan.py: {a.into} missing; merge the first fragment with findings.py first",
+                  file=sys.stderr)
+            return 2
+        try:
+            merge_into(a.into, result, audit=a.audit)
+        except (OSError, ValueError, MergeConflict) as exc:
+            print(f"deps_scan.py: {a.into}: {exc}", file=sys.stderr)
+            return 2
     counts = {}
     for f in result["findings"]:
         counts[f["severity"]] = counts.get(f["severity"], 0) + 1

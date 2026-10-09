@@ -7,7 +7,8 @@ Each PATH (repository-relative) is read from the commit's Git blob, compared
 with the checked-out file, and written to <findings dir>/evidence/source/PATH.
 The findings file gains `schema_version: 2`, the `assessment` pin and one
 `SRC-NNN` evidence record per new path; the path -> evidence ID map is printed
-as JSON so claims can cite the IDs. Re-running with the same paths is a no-op.
+as JSON so claims can cite the IDs. Re-running with the same paths rechecks the
+existing artifacts and changes nothing; a missing or changed artifact is an error.
 
 Only `rev-parse`, `ls-tree` and `cat-file` are run, with hooks, fsmonitor, replace
 objects and lazy fetches disabled; no application code or filter runs. A path
@@ -171,6 +172,8 @@ def capture(repo, findings_path, paths, commit="HEAD"):
         # Every source/artifact/report child remains subject to no-follow checks.
         repository = Path(repo).resolve()
         findings_path = Path(findings_path)
+        if not os.path.lexists(findings_path):
+            raise CaptureError(f"{findings_path.name} not found; run findings.py merge with the meta fragment first")
         source_root = _Root(repository, until)
         out_root = _Root(findings_path.parent.resolve(), until)
         return _capture(repository, out_root, source_root, findings_path.name, paths, commit, until)

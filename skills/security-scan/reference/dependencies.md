@@ -6,12 +6,17 @@ every scan, not only when asked: third-party code is usually most of what ships.
 
 ## 1. Run the scanner
 
-From this skill's directory:
+From this skill's directory, writing into the run's output directory `<out>`:
 
 ```
-python3 scripts/deps_scan.py <repo> --out deps.json            # static only, no network
-python3 scripts/deps_scan.py <repo> --audit --out deps.json --into findings.json  # + vulnerability databases
+python3 scripts/deps_scan.py <repo> --out <out>/deps.json            # static only, no network
+python3 scripts/deps_scan.py <repo> --audit --out <out>/deps.json --into <out>/findings.json  # + vulnerability databases
 ```
+
+`--into` needs the `findings.json` created by the first `findings.py merge`
+(it exits 2 when the file is missing) and writes under the same writer lock.
+Run it once, at the end of REVIEW, and record per-package review afterwards:
+a rescan resets each `D-*` validation to `Unverified`.
 
 `--into` replaces the `D-*` findings in `findings.json`, records every audit
 that did not run under `limitations`, and stamps `dependency_scan` with the
