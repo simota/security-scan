@@ -19,6 +19,8 @@ from pathlib import Path, PurePosixPath
 import re
 import sys
 
+# Sibling modules must import under python3 -I / PYTHONSAFEPATH as well.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import contract_check
 from expert import derive_expert
 

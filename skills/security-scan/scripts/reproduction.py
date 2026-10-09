@@ -11,6 +11,8 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
+# Sibling modules must import under python3 -I / PYTHONSAFEPATH as well.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import reproduction_runtime as runtime
 from verification_workflow import _finding, _validate_base, input_digest
 

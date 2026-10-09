@@ -8,8 +8,12 @@ omission challenge, simulated reception and the non-participant QA audit
 records; supplied summaries and statuses are never trusted. It checks declared
 records and their consistency, not that a worker really ran or judged well.
 """
+from pathlib import Path
 import re
+import sys
 
+# Sibling modules must import under python3 -I / PYTHONSAFEPATH as well.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from three_pass import derive_three_pass
 from verification import _Validator, integrity_state
 

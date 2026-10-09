@@ -17,6 +17,8 @@ import tempfile
 import uuid
 from datetime import datetime, timezone
 
+# Sibling modules must import under python3 -I / PYTHONSAFEPATH as well.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from verification import CLAIMS, DEFINITIVE, derive_verification, integrity_state, parse_timestamp
 from three_pass import (REASONS as THREE_PASS_REASONS, enabled as three_pass_enabled,
                         validate_profile, validate_coverage_checks, discovery_state, stage_gaps, derive_three_pass)

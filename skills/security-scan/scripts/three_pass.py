@@ -3,8 +3,12 @@
 This validates submitted observations. It neither discovers vulnerabilities nor
 runs reviewers, recorded commands, application code, or network requests.
 """
+from pathlib import Path
 import re
+import sys
 
+# Sibling modules must import under python3 -I / PYTHONSAFEPATH as well.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from verification import CLAIMS, _Validator, integrity_state
 
 CODE_ID = re.compile(r"^F-\d{3}$")

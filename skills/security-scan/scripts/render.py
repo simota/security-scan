@@ -21,6 +21,9 @@ import time
 from collections import Counter
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote, urlsplit
+
+# Sibling modules must import under python3 -I / PYTHONSAFEPATH as well.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from url_redaction import redact_urls
 from verification import CLAIMS, derive_verification, validate_verification
 from verification_workflow import derive_workflow, validate_workflows
