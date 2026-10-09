@@ -16,7 +16,7 @@ Before sending:
 <!-- Conclusion first, e.g. "One confirmed flaw lets a customer read another tenant's orders; until it is fixed, restrict that API." -->
 
 
-| Severity | Count | Of which Valid |
+| Severity | Count | Valid with sufficient verification |
 |---|---|---|
 | High | {{n_high}} | |
 | Medium | {{n_medium}} | |
@@ -53,7 +53,7 @@ No requests were sent to any deployed environment.
 
 ## 4. Dependencies and supply chain
 
-<!-- D-* findings: package, affected and fixed versions, advisory URL. Also the audits that did not run (dependency_scan.not_run). -->
+<!-- D-* findings: package, affected and fixed versions, advisory URL. Also the audits that did not run (the "Dependency audit not run:" lines in limitations, or not_run in deps.json). -->
 - 
 
 ## 5. Checked and sound

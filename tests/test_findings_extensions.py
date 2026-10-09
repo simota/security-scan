@@ -168,6 +168,7 @@ class FindingsExtensionTests(unittest.TestCase):
         # Exercise the final report/file gate with synthetic, explicitly inert run records.
         import deps_scan
         deps_scan.merge_into(self.out, {"findings": [], "not_run": []}, audit=True)
+        (self.out.parent / "deps.json").write_text('{"inventory": [], "findings": [], "not_run": []}\n')
         data = self.data()
         files = [data["expert"]["consent"]["record"]]
         files += [row["record"] for row in data["expert"]["preflight"]]

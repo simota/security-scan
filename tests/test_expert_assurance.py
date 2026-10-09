@@ -299,6 +299,7 @@ class ExpertAuditIntegrityTests(unittest.TestCase):
 
     def save_and_render(self):
         (self.out / "findings.json").write_text(json.dumps(self.data))
+        (self.out / "deps.json").write_text('{"inventory": [], "findings": [], "not_run": []}\n')
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(render.main([str(self.out / "findings.json"), "--out", str(self.out),
                                           "--no-pdf", "--evidence-root", str(self.out),
@@ -340,6 +341,7 @@ class ExpertAuditIntegrityTests(unittest.TestCase):
     def test_saved_receipt_cannot_replace_a_fresh_check(self):
         self.data["_evidence_integrity"] = self.checked.receipt
         (self.out / "findings.json").write_text(json.dumps(self.data))
+        (self.out / "deps.json").write_text('{"inventory": [], "findings": [], "not_run": []}\n')
         code, result, _ = self.audit_cli(roots=False, repository=False)
         self.assertEqual((code, result["status"]), (3, "held"))
         (self.out / "evidence" / "route-source.txt").write_text("Changed synthetic bytes\n")
@@ -415,6 +417,7 @@ class ExpertAuditIntegrityTests(unittest.TestCase):
         skeptics = self.data["expert"]["panels"][0]["skeptics"]
         skeptics.append(copy.deepcopy(skeptics[0]))
         (self.out / "findings.json").write_text(json.dumps(self.data))
+        (self.out / "deps.json").write_text('{"inventory": [], "findings": [], "not_run": []}\n')
         code, result, stderr = self.audit_cli()
         self.assertEqual((code, result), (2, None))
         self.assertIn("duplicate panel actor", stderr)

@@ -187,6 +187,8 @@ class ExpertAuditTests(unittest.TestCase):
 
     def write(self):
         (self.out / "findings.json").write_text(json.dumps(self.data))
+        (self.out / "deps.json").write_text('{"inventory": [], "findings": [], "not_run": []}\n')
+        (self.out / "evidence").mkdir(exist_ok=True)
         self.assertEqual(render.main([str(self.out / "findings.json"), "--out", str(self.out), "--no-pdf"]), 0)
 
     def result(self):
@@ -219,6 +221,8 @@ class ExpertAuditTests(unittest.TestCase):
     def test_invalid_cwe_is_a_schema_error(self):
         self.data["findings"][0]["cwe"] = "639"
         (self.out / "findings.json").write_text(json.dumps(self.data))
+        (self.out / "deps.json").write_text('{"inventory": [], "findings": [], "not_run": []}\n')
+        (self.out / "evidence").mkdir(exist_ok=True)
         self.assertEqual(render.main([str(self.out / "findings.json"), "--out", str(self.out), "--no-pdf"]), 2)
 
 

@@ -17,6 +17,8 @@ class ExpertReportScopeTests(unittest.TestCase):
 
     def pages(self, lang):
         self.findings.write_text(json.dumps(self.data), encoding="utf-8")
+        (self.out / "deps.json").write_text('{"inventory": [], "findings": [], "not_run": []}\n')
+        (self.out / "evidence").mkdir(exist_ok=True)
         self.assertEqual(render.main([str(self.findings), "--out", str(self.out),
                                       "--lang", lang, "--no-pdf"]), 0)
         return [(self.out / name).read_text(encoding="utf-8")

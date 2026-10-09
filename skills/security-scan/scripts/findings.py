@@ -246,6 +246,12 @@ def main(argv=None):
         for _, fragment in fragments:
             if any(key in fragment for key in (*PROFILES, "test_runs")) and base.get("schema_version") != 2:
                 raise render.SchemaError("extension profiles and test_runs require evidence_capture.py first")
+            # Evidence IDs come from evidence_capture.py; records citing guessed IDs
+            # merged earlier would make the capture itself fail, with no way to remove them.
+            if base.get("schema_version") != 2 and ("evidence" in fragment or any(
+                    isinstance(f, dict) and "verification" in f for f in fragment.get("findings", []))):
+                raise render.SchemaError("verification and evidence require evidence_capture.py first; "
+                                         "cite the IDs it prints")
             base = merge(base, fragment)
         render.validate_data(copy.deepcopy(base))
         # Shape errors fail; incomplete later phases are permitted and stay held.

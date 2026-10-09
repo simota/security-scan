@@ -21,6 +21,8 @@
 | 深刻度 | {{severity}} |
 | 確度 | {{confidence}}（Environment-dependent なら、前提となる設定を「未確定事項」に書く） |
 | 検証判定 | {{validation.verdict}}（方法: {{validation.method}}） |
+| 検証の根拠 | 静的な裏付け / 実行による裏付け / 不十分（ダッシュボードの表示どおり） |
+| 再テスト | 確認済み / 未確認 / 未着手（ダッシュボードの表示どおり） |
 | 観点 | {{category}} |
 | CWE | {{cwe}} |
 | 場所 | `{{location}}` |

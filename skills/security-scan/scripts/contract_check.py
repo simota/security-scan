@@ -26,15 +26,23 @@ DEP_ID = re.compile(r"D-[0-9]{3}")
 LOCATION = re.compile(r"[^:\s\x00-\x1f\x7f](?:[^:\x00-\x1f\x7f]*[^:\s\x00-\x1f\x7f])?:[0-9]+(?:-[0-9]+)?")
 VERDICTS = {"Valid", "Likely", "Unverified", "Unlikely", "FalsePositive", "NotApplicable"}
 CODE_FIELDS = ("actor", "request", "impact", "fix")
+CLAIMS = ("reachability", "preconditions", "defenses", "impact")
+SEVERITY_RANK = {"High": 0, "Medium": 1, "Low": 2, "Info": 3}
+RENDERED = ("dashboard.html", "assessment.html", "assessment.pdf")
 
 
 def perspective_names():
     """Canonical names, read from the table in reference/perspectives.md."""
-    names = []
+    names, in_table = [], False
     for line in (SKILL / "reference" / "perspectives.md").read_text(encoding="utf-8").splitlines():
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        if line.startswith("|") and len(cells) == 2 and cells[0] not in ("Perspective", "") \
-                and not set(cells[0]) <= set("-: "):
+        if not line.startswith("|"):
+            if names:
+                break  # Only the first table under the "| Perspective |" header names perspectives.
+            continue
+        if cells[0] == "Perspective":
+            in_table = True
+        elif in_table and len(cells) == 2 and cells[0] and not set(cells[0]) <= set("-: "):
             names.append(cells[0])
     return names
 
@@ -74,6 +82,10 @@ def check(data, out_dir, pdf=True, allow=()):
     numbers = sorted(int(CODE_ID.fullmatch(f["id"]).group(1)) for f in code)
     if numbers != list(range(1, len(numbers) + 1)):
         add("F-*: number code findings F-001..F-%03d without gaps" % len(numbers))
+    ranks = [SEVERITY_RANK.get(f.get("severity"), len(SEVERITY_RANK))
+             for f in sorted(code, key=lambda f: f["id"])]
+    if ranks != sorted(ranks):
+        add("F-*: number code findings in severity order (High first), then path")
 
     stamp = data.get("dependency_scan")
     if not isinstance(stamp, dict) or stamp.get("tool") != "deps_scan.py":
@@ -105,14 +117,33 @@ def check(data, out_dir, pdf=True, allow=()):
         validation = f.get("validation") if isinstance(f.get("validation"), dict) else {}
         if validation.get("verdict") not in VERDICTS:
             add(f"{fid}: validation.verdict must be recorded explicitly")
-        if not isinstance(f.get("verification"), dict):
-            add(f"{fid}: structured verification (four claims, falsification) is required")
+        verification = f.get("verification")
+        claims = verification.get("claims") if isinstance(verification, dict) else None
+        checks = verification.get("falsification") if isinstance(verification, dict) else None
+        if (not isinstance(claims, dict) or any(not isinstance(claims.get(k), dict) for k in CLAIMS)
+                or not isinstance(checks, list) or not checks):
+            add(f"{fid}: structured verification (four claims, at least one falsification check) is required")
 
     # Hidden entries (.DS_Store and the like) are file-manager noise, not outputs.
     present = {p.name for p in out_dir.iterdir() if not p.name.startswith(".")}
-    expected = {"findings.json", "dashboard.html", "assessment.html"} | ({"assessment.pdf"} if pdf else set())
+    expected = {"findings.json", "deps.json", "dashboard.html", "assessment.html"} | ({"assessment.pdf"} if pdf else set())
+    if data.get("schema_version") == 2:
+        expected.add("evidence")
+    hints = {"deps.json": "run deps_scan.py <repo> [--audit] --out {out}/deps.json --into {out}/findings.json",
+             "evidence": "run evidence_capture.py <repo> --findings {out}/findings.json <paths>",
+             "assessment.pdf": "run render.py findings.json --out {out} (if it exits 3 with no PDF engine, "
+                               "record that in limitations and pass --no-pdf)"}
     for name in sorted(expected - present):
-        add(f"outputs: {name} missing; run render.py findings.json --out {out_dir}")
+        hint = hints.get(name, "run render.py findings.json --out {out}").format(out=out_dir)
+        add(f"outputs: {name} missing; {hint}")
+    # A report rendered before the last merge or --into does not show the record.
+    try:
+        recorded = (out_dir / "findings.json").stat().st_mtime
+        for name in RENDERED:
+            if name in present and (out_dir / name).stat().st_mtime < recorded:
+                add(f"outputs: {name} is older than findings.json; render after the last merge or --into")
+    except OSError:
+        pass
     extra = {"run"} if "expert" in data else set()  # expert grade keeps its run records beside the report
     for name in sorted(present - OUTPUTS - extra - set(allow)):
         add(f"outputs: unexpected '{name}'; write only the contract outputs unless the requester asked for more")
