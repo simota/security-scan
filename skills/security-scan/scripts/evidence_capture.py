@@ -26,12 +26,13 @@ from pathlib import Path
 import re
 import secrets
 import selectors
+import stat
 import subprocess
 import sys
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from evidence_integrity import EvidenceError, _Root, _parts, _deadline
+from evidence_integrity import EvidenceError, _Root, _parts, _deadline, _json_object
 from render import SchemaError, derive_expert, validate_data
 
 GIT_BINARY = "/usr/bin/git"  # Never resolve a program through target PATH/config.
@@ -55,7 +56,10 @@ def git(repo, *args, limit=4096, until=None):
     """Read bounded trusted-Git output; never accumulate raw stderr."""
     until = min(until or time.monotonic() + MAX_SECONDS, time.monotonic() + GIT_TIMEOUT)
     command = [GIT_BINARY, "--no-replace-objects", "-c", "core.hooksPath=/dev/null",
-               "-c", "core.fsmonitor=false", "-c", "protocol.allow=never", "-C", str(repo), *args]
+               "-c", "core.fsmonitor=false", "-c", "protocol.allow=never",
+               # Command-line -c beats repository config such as protocol.ext.allow=always.
+               "-c", "protocol.ext.allow=never", "-c", "protocol.file.allow=never",
+               "-C", str(repo), *args]
     process = None
     try:
         process = subprocess.Popen(command, env=GIT_ENV, stdin=subprocess.DEVNULL,
@@ -131,10 +135,12 @@ def _write_report(root, name, raw, original, identity):
     current, current_identity = root.read(name, MAX_FILE_BYTES, with_identity=True)
     if current != original or current_identity != identity:
         raise CaptureError("findings file changed during capture")
+    mode = stat.S_IMODE(root.entry_stat(name).st_mode)
     temporary = ".capture-" + secrets.token_hex(12)
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
                  0o600, dir_fd=root.fd)
     try:
+        os.fchmod(fd, mode)  # Keep the report's own permissions across the replace.
         with os.fdopen(fd, "wb") as stream:
             stream.write(raw)
         root.check()
@@ -180,11 +186,20 @@ def capture(repo, findings_path, paths, commit="HEAD"):
 def _capture(repo, out_root, source_root, findings_name, paths, commit, until):
     original, identity = out_root.read(findings_name, MAX_FILE_BYTES, with_identity=True)
     try:
-        data = json.loads(original)
+        data = json.loads(original, object_pairs_hook=_json_object)
     except RecursionError:
         raise CaptureError("findings nesting is too deep") from None
     if not isinstance(data, dict):
         raise CaptureError("findings file must hold a JSON object")
+    # Paths are recorded relative to REPO and verified against REPO/.git: a
+    # subdirectory or a linked worktree (.git file) would pin evidence that
+    # evidence_integrity.py can never match.
+    try:
+        git_dir = source_root.entry_stat(".git")
+    except EvidenceError:
+        git_dir = None
+    if git_dir is None or not stat.S_ISDIR(git_dir.st_mode):
+        raise CaptureError("REPO must be the top level of a checkout with a .git directory")
     validate_findings(data)
     if not isinstance(paths, (list, tuple)) or not 0 < len(paths) <= MAX_PATHS:
         raise CaptureError(f"capture requires 1 to {MAX_PATHS} paths")
