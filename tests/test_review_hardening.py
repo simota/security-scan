@@ -362,7 +362,8 @@ class ReviewHardeningTests(unittest.TestCase):
     def test_legacy_bun_and_known_unhandled_inputs_are_not_silent(self):
         for name in ("bun.lockb", "requirements.lock", "pom.xml", "gradle.lockfile", "pyproject.toml"):
             with self.subTest(name=name):
-                path = self.write(name)
+                # A pyproject.toml counts only when it declares dependencies.
+                path = self.write(name, '[project]\ndependencies = ["fixture"]\n' if name == "pyproject.toml" else "{}")
                 c = self.collector()
                 with patch.object(self.deps, "audit_osv", return_value=set()):
                     self.deps.audits(c, self.root, [path])
