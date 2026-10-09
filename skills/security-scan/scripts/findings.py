@@ -10,9 +10,12 @@ shell heredoc or a generated script). It holds any of these top-level keys:
 and the ledger's `entries`, so send the whole list in one fragment) are
 replaced, not recursively merged. `findings`, `evidence` and `test_runs` records are matched by
 `id`, a known record updated key by key (so a later fragment can add just
-`verification` to F-003) and a new one appended; the list sections (`perspectives`, `checked_ok`, `decisions`,
+`verification` to F-003) and a new one appended; a `perspectives` entry
+replaces the recorded entry with the same `name` (so a later fragment can
+correct a result), and the other list sections (`checked_ok`, `decisions`,
 `limitations`, `next_steps`) are appended without duplicates. FINDINGS is
-created when absent. Profiles and test runs require a captured version-2 record.
+created when absent and written atomically, under the same writer lock as
+verification_workflow.py, only if no other writer changed it meanwhile. Profiles and test runs require a captured version-2 record.
 `schema_version`, `assessment` and `meta.commit` come only from evidence_capture.py;
 workflow journals come only from verification_workflow.py. The merged report
 must pass render.py's schema check
@@ -29,9 +32,12 @@ input or schema error.
 import argparse
 import copy
 import json
+import os
 from pathlib import Path
 import re
+import stat
 import sys
+import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import render  # noqa: E402
@@ -49,16 +55,17 @@ PROSE = ("title", "actor", "request", "impact", "fix")
 # Literal attack strings, not descriptions of them. Prose names the weakness
 # and the parameter; the payload itself never belongs in the report.
 PAYLOAD = re.compile(
-    r"<script\b|javascript:|onerror\s*=|'\s*(?:or|and)\s+['\d]|union\s+select|"
+    r"<script\b|javascript:(?!\s|$)|onerror\s*=|'\s*(?:or|and)\s+['\d]|union\s+select|"
     r"(?:\.\./){2,}|;\s*(?:rm|curl|wget|nc|bash|sh)\s|\$\(\s*(?:curl|wget|id|cat)\b|"
     r"\{\{\s*\d+\s*\*\s*\d+\s*\}\}|169\.254\.169\.254|/etc/passwd",
     re.IGNORECASE,
 )
 
 
-def read_json(path):
+def read_json(path, raw=None):
     try:
-        return json.loads(Path(path).read_text(encoding="utf-8"), object_pairs_hook=unique_object)
+        raw = Path(path).read_bytes() if raw is None else raw
+        return json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object)
     except (OSError, UnicodeError, ValueError, RecursionError) as e:
         raise render.SchemaError(f"{path}: {e}") from None
 
@@ -154,9 +161,59 @@ def merge(base, fragment):
     for key in LISTS:
         items = base.setdefault(key, [])
         for item in fragment.get(key, []):
+            if key == "perspectives" and isinstance(item, dict) and "name" in item:
+                same = [i for i, old in enumerate(items) if isinstance(old, dict) and old.get("name") == item["name"]]
+                if same:
+                    items[same[0]] = item
+                    for i in reversed(same[1:]):
+                        del items[i]
+                    continue
             if item not in items:
                 items.append(item)
     return base
+
+
+class MergeConflict(Exception):
+    pass
+
+
+def write_report(path, base, original):
+    """Replace path atomically unless another writer changed it since it was read."""
+    def current():
+        return path.read_bytes() if path.exists() else None
+
+    lock = path.with_name(path.name + ".workflow.lock")
+    try:
+        fd = os.open(str(lock), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        raise MergeConflict(f"{lock}: a writer lock exists; check the other writer before removing a stale lock")
+    os.close(fd)
+    temp = None
+    try:
+        if path.is_symlink() or current() != original:
+            raise MergeConflict(f"{path}: file changed concurrently; no update written")
+        mode = stat.S_IMODE(path.stat().st_mode) if original is not None else None
+        fd, temp = tempfile.mkstemp(prefix="." + path.name + ".", dir=str(path.parent))
+        with os.fdopen(fd, "wb") as stream:
+            stream.write((json.dumps(base, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temp, mode if mode is not None else 0o666 & ~current_umask())
+        os.replace(temp, path)
+        temp = None
+    finally:
+        if temp is not None and os.path.exists(temp):
+            os.unlink(temp)
+        try:
+            lock.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def current_umask():
+    mask = os.umask(0)
+    os.umask(mask)
+    return mask
 
 
 def main(argv=None):
@@ -168,9 +225,10 @@ def main(argv=None):
     args = p.parse_args(argv)
 
     try:
-        base = read_json(args.findings) if args.findings.exists() else {}
+        original = args.findings.read_bytes() if args.findings.exists() else None
+        base = read_json(args.findings, original) if original is not None else {}
         fragments = [(str(path), read_json(path)) for path in args.fragments]
-    except render.SchemaError as e:
+    except (render.SchemaError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
     refused = []
@@ -195,7 +253,11 @@ def main(argv=None):
     except render.SchemaError as e:
         print(f"error: merged report does not match the schema: {e}", file=sys.stderr)
         return 2
-    args.findings.write_text(json.dumps(base, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    try:
+        write_report(args.findings, base, original)
+    except (MergeConflict, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     print(f"merged {len(fragments)} fragment(s) into {args.findings}: {len(base['findings'])} finding(s)")
     return 0
 

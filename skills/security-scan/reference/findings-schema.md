@@ -48,7 +48,7 @@ python3 scripts/findings.py merge <out>/findings.json <scratch>/frag-002.json
 ```
 
 A fragment holds `meta`, `findings`, `evidence`, `test_runs`, `expert`,
-`three_pass`, `evidence_integrity`, `perspectives`, `checked_ok`, `decisions`,
+`three_pass`, `evidence_integrity`, `invariant_ledger`, `perspectives`, `checked_ok`, `decisions`,
 `limitations` and `next_steps`. First capture source to create the version-2
 assessment pin; only then merge extension profiles or test runs. For example,
 write a new scratch fragment containing `{"evidence_integrity":{"required":true}}`
@@ -61,13 +61,18 @@ Merge semantics are explicit:
 - `findings`, `evidence` and `test_runs` match by nonblank `id`: existing records
   are updated key by key; new IDs append. Duplicate IDs within one fragment
   are refused. Omitted IDs are retained, including exclusions and old runs.
-- `meta`, `expert`, `three_pass` and `evidence_integrity` update their immediate
-  keys. Nested objects and lists replace the whole previous value, rather than
+- `meta`, `expert`, `three_pass`, `evidence_integrity` and `invariant_ledger`
+  update their immediate keys. Nested objects and lists replace the whole previous value, rather than
   merging recursively. To update `expert.spawns` or `three_pass.discovery`,
   supply the complete new list/object for that field. Other profile fields stay
   unchanged. An empty list explicitly clears that field where its schema allows.
-- The ordinary `perspectives`, `checked_ok`, `decisions`, `limitations` and
-  `next_steps` lists append without duplicates.
+- A `perspectives` entry replaces the recorded entry with the same `name`, so a
+  later fragment can correct a `Not checked` result; new names append.
+- The ordinary `checked_ok`, `decisions`, `limitations` and `next_steps` lists
+  append without duplicates.
+- The merge takes the same `findings.json.workflow.lock` writer lock as
+  `verification_workflow.py`, refuses when the file changed after it was read,
+  and replaces it atomically, keeping its permissions.
 
 The combined result must have valid shapes and evidence/run references. An
 initial expert profile needs its E0 `version`, `mode`, `host` and `consent`;

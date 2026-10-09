@@ -98,7 +98,7 @@ python3 skills/security-scan/scripts/contract_check.py out      # exit 1 lists e
 The check covers shape and provenance markers, not whether a finding is true;
 hosts can still find different issues, but no longer report them differently.
 After source capture, fragments can also add `test_runs`, `three_pass`,
-`evidence_integrity` and incremental `expert` records. Profile fields merge one
+`evidence_integrity`, `invariant_ledger` and incremental `expert` records. Profile fields merge one
 level deep; nested lists are replaced explicitly. Assessment pins and workflow
 journals stay owned by their respective capture/workflow commands.
 

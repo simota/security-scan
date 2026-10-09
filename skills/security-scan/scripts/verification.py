@@ -7,6 +7,21 @@ Artifact paths, hashes and reviewer identities are records, not attestations.
 import re
 from datetime import datetime
 
+# One explicit ISO-8601 profile, so the same record validates identically on
+# Python 3.9 and 3.11+ (whose fromisoformat accepts many more spellings).
+_TIMESTAMP = re.compile(r"([0-9]{4}-[0-9]{2}-[0-9]{2})[T ]([0-9]{2}:[0-9]{2}(?::[0-9]{2})?)"
+                        r"(?:\.([0-9]{1,6}))?(Z|[+-][0-9]{2}:[0-9]{2})")
+
+
+def parse_timestamp(value):
+    """Parse an ISO-8601 timestamp that names its offset; raise ValueError otherwise."""
+    match = _TIMESTAMP.fullmatch(value) if isinstance(value, str) else None
+    if not match:
+        raise ValueError("not an ISO-8601 timestamp with timezone")
+    day, clock, fraction, offset = match.groups()
+    text = day + "T" + clock + ("." + fraction.ljust(6, "0") if fraction else "")
+    return datetime.fromisoformat(text + ("+00:00" if offset == "Z" else offset))
+
 CLAIMS = ("reachability", "preconditions", "defenses", "impact")
 LEVELS = ("legacy", "incomplete", "static_supported", "runtime_supported", "environment_unverified")
 RETESTS = ("not_requested", "fix_claimed", "verified", "incomplete")
@@ -117,9 +132,7 @@ class _Validator:
         for key in ("case_id", "expected", "observed", "command", "recorded_at"):
             self.text(run, key, where)
         try:
-            timestamp = datetime.fromisoformat(run["recorded_at"].replace("Z", "+00:00"))
-            if timestamp.utcoffset() is None:
-                raise ValueError()
+            parse_timestamp(run["recorded_at"])
         except ValueError:
             self.error(where + ".recorded_at", "must be an ISO-8601 timestamp with timezone")
         self.enum(run, "role", ("security", "positive_control", "regression"), where)

@@ -11,12 +11,13 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import sys
 import tempfile
 import uuid
 from datetime import datetime, timezone
 
-from verification import CLAIMS, DEFINITIVE, derive_verification, integrity_state
+from verification import CLAIMS, DEFINITIVE, derive_verification, integrity_state, parse_timestamp
 from three_pass import (REASONS as THREE_PASS_REASONS, enabled as three_pass_enabled,
                         validate_profile, validate_coverage_checks, discovery_state, stage_gaps, derive_three_pass)
 
@@ -29,7 +30,9 @@ REASONS = ("not_started", "awaiting_submission", "stages_complete", "input_chang
            "verification_incomplete", "environment_unknown", "review_disagreement",
            "runtime_contradiction", "runtime_incomplete", "runtime_boundary_unverified",
            "evidence_integrity_unchecked", "evidence_integrity_failed") + THREE_PASS_REASONS
-_DERIVED = {"_verification", "_workflow", "verdict", "source_link", "snippet"}
+# Keys render.py strips or derives; excluding them keeps the CLI's and the
+# report's input digests identical.
+_DERIVED = {"_verification", "_workflow", "_evidence_integrity", "verdict", "source_link", "snippet"}
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -51,8 +54,8 @@ def _text(obj, key, where):
     value = obj.get(key)
     if not isinstance(value, str) or not value.strip():
         _error(where + "." + key, "required nonblank string")
-    if any(ord(c) < 32 or ord(c) == 127 for c in value):
-        _error(where + "." + key, "must not contain control characters")
+    if any(ord(c) < 32 or ord(c) == 127 or 0xD800 <= ord(c) <= 0xDFFF for c in value):
+        _error(where + "." + key, "must not contain control characters or lone surrogates")
     return value
 
 
@@ -72,9 +75,7 @@ def _timestamp(value, where):
     if not isinstance(value, str):
         _error(where, "must be an ISO-8601 timestamp with timezone")
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        if parsed.utcoffset() is None:
-            raise ValueError()
+        parse_timestamp(value)
     except ValueError:
         _error(where, "must be an ISO-8601 timestamp with timezone")
 
@@ -87,7 +88,10 @@ def _json(value):
 
 
 def _hash(value):
-    return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
+    try:
+        return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
+    except UnicodeError:
+        _error("input", "must not contain lone surrogates")
 
 
 def _normalized_finding(finding):
@@ -629,6 +633,13 @@ def resume(data, finding_id, actor, reason, integrity=None):
         _error("workflow", "initialize before resuming")
     if state["status"] in ("ready", "complete"):
         return state
+    if (state["status"] != "stale" and len(state["stages"]) == len(STAGES)
+            and state["stages"][-1]["status"] == "complete"):
+        # Every stage is recorded; the hold comes from present evidence, not a
+        # blocked stage, so there is nothing to resume without a new round.
+        _error("workflow", "all stages are recorded; status {} ({}) comes from the current evidence. "
+               "Re-check with the evidence flags, or invalidate and then resume to start a new round"
+               .format(state["status"], ", ".join(state["reasons"])))
     candidate = copy.deepcopy(finding)
     workflow = candidate["verification_workflow"]
     restart = state["status"] == "stale"
@@ -719,8 +730,10 @@ def _save(path, data, original):
     if path.is_symlink() or path.read_bytes() != original:
         _error(str(path), "file changed concurrently; no update written")
     content = (json.dumps(data, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")
+    mode = stat.S_IMODE(path.stat().st_mode)
     fd, temp = tempfile.mkstemp(prefix="." + path.name + ".", dir=str(path.parent))
     try:
+        os.chmod(temp, mode)  # mkstemp creates 0600; keep the report's own permissions.
         with os.fdopen(fd, "wb") as stream:
             stream.write(content)
             stream.flush()
@@ -814,7 +827,10 @@ def main(argv=None):
         if args.command == "status" and args.require_complete and (not result or any(not state["opted_in"] or state["status"] != "complete" for state in result.values())):
             return 3
         return 0
-    except (WorkflowError, OSError, KeyError, TypeError) as exc:
+    except RecursionError:
+        print("workflow error: input: JSON nesting is too deep", file=sys.stderr)
+        return 2
+    except (WorkflowError, ValueError, OSError, KeyError, TypeError) as exc:
         print("workflow error: " + str(exc), file=sys.stderr)
         return 2
     finally:
