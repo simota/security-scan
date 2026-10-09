@@ -181,8 +181,9 @@ def export_records(manifest, result, out):
                "limitation": LIMITATION + " Manual review/import only; never change a finding verdict automatically."}
     evidence_dir = out / "evidence"
     evidence_dir.mkdir(mode=0o700)
-    # A stale, failed or timed-out replay is not current evidence: export nothing.
-    cycles = [] if result["status"] in ("stale", "error", "timeout", "unsupported") else result.get("cycles", [])
+    # Only a completed, repeatable replay is evidence. A stale, failed, timed-out
+    # or partly errored ("incomplete") replay exports nothing.
+    cycles = result.get("cycles", []) if result["status"] == "completed" and result.get("repeatable") is True else []
     for cycle in cycles:
         for case in cycle.get("reproduction", {}).get("cases", []):
             identifier = "repro-{}-{}-{}-{}".format(manifest["bundle_id"][:12], cycle["cycle"], case["phase"], case["role"])
@@ -228,7 +229,10 @@ def run(bundle, findings, out, timeout=10, evidence_root=None, evidence_reposito
             # No shell, plan-derived argv, project hooks, imports or stored commands.
             program = ("__file__ = " + repr(str(bundle / "run.py")) + "\n" +
                        runtime.read_bytes(Path(__file__).with_name("reproduction_runtime.py")).decode("utf-8") +
-                       '\n\nif __name__ == "__main__":\n    sys.exit(entry("run", evidence_checked=True))\n')
+                       # The child stops a second before the parent would kill it, so a
+                       # slow replay reports "timeout" itself and cleans up its fixture.
+                       '\n\nif __name__ == "__main__":\n    sys.exit(entry("run", evidence_checked=True, timeout={}))\n'
+                       .format(max(1, timeout - 1)))
             process = subprocess.run([sys.executable, "-I", "-S", "-c", program,
                                       "--findings", str(runtime.safe_path(findings, False))],
                                      cwd=str(bundle), env={"PATH": os.defpath}, stdin=subprocess.DEVNULL,
