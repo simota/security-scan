@@ -167,6 +167,7 @@ LABELS['en'].update({'eyebrow': 'SECURITY REVIEW',
  'needs_validation': 'Open, needs validation',
  'closed_count': 'Fix recorded / accepted',
  'unverified_line': '{n} included findings are Unverified, including {high} High.',
+ 'none_unverified_line': 'No included finding is Unverified.',
  'counts_note': 'Report-wide totals include Open, Fixed and Accepted. Excluded findings do not '
                 'contribute to these totals.',
  'count_basis': 'Severity is potential impact; confidence is certainty. Validation records whether the '
@@ -231,6 +232,7 @@ LABELS['ja'].update({'eyebrow': 'SECURITY REVIEW',
  'needs_validation': '未対応・要検証',
  'closed_count': '修正の申告 / 受容',
  'unverified_line': '集計対象のうち {n} 件は未検証（Unverified）です。このうち High は {high} 件です。',
+ 'none_unverified_line': '集計対象に未検証（Unverified）の指摘はありません。',
  'counts_note': '全体集計には Open・Fixed・Accepted を含みます。除外した指摘は含みません。',
  'count_basis': '重大度は想定される影響、確度は確かさ、妥当性はこの対象に指摘が成立するかを表します。',
  'coverage_heading': '診断範囲・確認状況・制約',
@@ -590,7 +592,6 @@ EXPERT_LABELS = {
         "e_gaps": "Open gates",
         "e_note": "The status and counts describe declared records for discovery, condition tracing, refutation and severity review. They do not establish whether the final audit of run files and report outputs passed.",
         "e_safety": "Worker labels and records are declarations; their number does not certify independence or correctness, and no detection rate or guarantee that all vulnerabilities were found follows from them.",
-        "e_gap": "Gate not met",
     },
     "ja": {
         "e_title": "診断の方法と品質保証", "e_status": "エキスパート宣言レコードのゲート状態", "cwe": "CWE",
@@ -611,7 +612,6 @@ EXPERT_LABELS = {
         "e_gaps": "未充足のゲート",
         "e_note": "状態と数値は、発見・成立条件の追跡・反証・重大度評価についての申告記録を示します。実行記録ファイルとレポート出力を対象とする最終監査の合格を示すものではありません。",
         "e_safety": "ワーカー名と記録は申告です。人数は独立性や正しさを保証せず、検出率やすべての脆弱性の発見を意味しません。",
-        "e_gap": "未充足",
     },
 }
 for _lang, _labels in EXPERT_LABELS.items():
@@ -644,6 +644,86 @@ _GAP_LABELS = {
 for _code, (_en, _ja) in _GAP_LABELS.items():
     LABELS["en"]["v_gap_" + _code] = _en
     LABELS["ja"]["v_gap_" + _code] = _ja
+
+# Expert gate codes (expert.py) are shown as text; a ':<id>' suffix stays as is.
+_NOT_SPAWNED = ("Actor has no worker record", "実施者のワーカー記録がありません")
+_NOT_INDEPENDENT = ("Actor is not independent", "実施者が独立していません")
+_UNKNOWN_FINDING = ("Refers to an unknown finding", "存在しない指摘を参照しています")
+_EXPERT_GAP_LABELS = {
+    "consent_missing_host": ("Consent does not cover the host engine", "同意記録に実行ホストのエンジンが含まれていません"),
+    "mode_without_host_preflight": ("Host preflight record missing", "実行ホストの事前確認の記録がありません"),
+    "spawns_over_ceiling": ("Worker count exceeds the approved ceiling", "ワーカー数が承認上限を超えています"),
+    "spawn_on_unapproved_engine": ("Worker on an unapproved engine", "未承認エンジンのワーカーがあります"),
+    "actor_reused_across_roles": ("Actor reused across roles", "実施者が複数の役割を兼務しています"),
+    "recon_not_redundant": ("Recon lacks a second independent actor", "攻撃面調査に独立した2人目の実施者がいません"),
+    "recon_not_reconciled": ("Recon results not reconciled", "攻撃面調査の結果が統合されていません"),
+    "recon_disagreements_open": ("Recon disagreements unresolved", "攻撃面調査の食い違いが未解決です"),
+    "three_pass_missing": ("Three-pass profile missing", "3パスの記録がありません"),
+    "three_pass_incomplete": ("Three-pass review incomplete", "3パスの確認が未完了です"),
+    "discovery_unknown_cell": ("Discovery names an unplanned scope cell", "発見記録に計画外の対象があります"),
+    "cell_not_redundant": ("Scope cell lacks redundant discovery", "対象の重複確認が不足しています"),
+    "finding_without_discovery": ("Finding has no discovery record", "発見記録のない指摘があります"),
+    "variant_hits_unaccounted": ("Variant hits are not all dispositioned", "類似箇所の判定が不足しています"),
+    "variant_missing": ("No variant search for the finding", "類似箇所調査がありません"),
+    "omission_missing": ("No omission challenge recorded", "見落とし検証の記録がありません"),
+    "verifier_is_discoverer": ("Verifier is the discoverer", "検証者が発見者と同一です"),
+    "skeptic_evidence_integrity_failed": ("Refutation evidence failed integrity checks", "反証の根拠が整合性確認に失敗しています"),
+    "skeptic_evidence_integrity_unchecked": ("Refutation evidence not integrity-checked", "反証の根拠の整合性が未確認です"),
+    "panel_too_small": ("Refutation panel too small", "反証パネルの人数が不足しています"),
+    "panel_too_large": ("Refutation panel too large", "反証パネルの人数が上限を超えています"),
+    "panel_monoculture": ("Refutation panel uses a single engine", "反証パネルが単一エンジンです"),
+    "panel_refutation_unresolved": ("Majority refutation unresolved", "過半数の反証が未解決です"),
+    "panel_missing": ("No refutation panel", "反証パネルがありません"),
+    "rater_recalibrated": ("Rater was re-scored after calibration", "評価者の較正がやり直されています"),
+    "rating_duplicate": ("Duplicate rating by one rater", "同じ評価者による重複した評価があります"),
+    "rater_not_calibrated": ("Rater not calibrated", "評価者が較正を満たしていません"),
+    "severity_not_double_rated": ("Severity lacks two ratings", "重大度の評価が2件ありません"),
+    "severity_disagreement_unresolved": ("Severity disagreement unresolved", "重大度の不一致が未解決です"),
+    "cwe_missing": ("CWE missing", "CWE が未記録です"),
+    "reception_actor_reused": ("Reception persona actor reused", "受け手確認の実施者が重複しています"),
+    "reception_missing": ("Reception review missing", "受け手確認がありません"),
+    "qa_missing": ("QA record missing", "QA の記録がありません"),
+    "qa_not_independent": ("QA reviewer not independent", "QA 担当者が独立していません"),
+    "qa_imbalance": ("QA found an imbalance", "QA で偏りが指摘されています"),
+    **{code: _NOT_SPAWNED for code in (
+        "recon_actor_not_spawned", "discovery_actor_not_spawned", "variant_actor_not_spawned",
+        "conditions_actor_not_spawned", "falsification_actor_not_spawned", "decision_actor_not_spawned",
+        "verifier_not_spawned", "reviewer_not_spawned", "rater_not_spawned", "persona_not_spawned")},
+    **{code: _NOT_INDEPENDENT for code in (
+        "omission_actor_not_independent", "reviewer_not_independent", "skeptic_not_independent",
+        "rater_not_independent")},
+    **{code: _UNKNOWN_FINDING for code in (
+        "discovery_unknown_finding", "variant_unknown_finding", "omission_unknown_finding",
+        "rating_unknown_finding")},
+}
+for _code, (_en, _ja) in _EXPERT_GAP_LABELS.items():
+    LABELS["en"]["e_gap_" + _code] = _en
+    LABELS["ja"]["e_gap_" + _code] = _ja
+for _code, _en, _ja in (("pass", "pass", "合格"), ("imbalance", "imbalance found", "偏りあり"),
+                        ("missing", "not recorded", "未記録")):
+    LABELS["en"]["e_qa_" + _code] = _en
+    LABELS["ja"]["e_qa_" + _code] = _ja
+
+# Recorded verification values shown as text. A separate prefix keeps value
+# labels apart from section titles such as v_environment. Execution context
+# stays key=value so it remains machine-readable in extracted PDF text.
+for _code, _en, _ja in (
+        ("wt_clean", "clean", "未変更（クリーン）"), ("wt_dirty", "uncommitted changes", "未コミットの変更あり"),
+        ("kind_source", "source", "ソース"), ("kind_runtime", "runtime", "実行結果"),
+        ("kind_environment", "environment", "環境"),
+        ("fk_none", "none", "なし"), ("fk_assertion", "assertion failure", "安全条件の不成立"),
+        ("fk_infrastructure", "infrastructure failure", "実行基盤の失敗"),
+        ("basis_condition_absent", "required condition absent", "成立条件が存在しない"),
+        ("basis_not_applicable", "not applicable", "対象外"),
+        ("before_run_id", "before-fix run ID", "修正前の実行 ID"),
+        ("after_run_id", "after-fix run ID", "修正後の実行 ID")):
+    LABELS["en"]["vx_" + _code] = _en
+    LABELS["ja"]["vx_" + _code] = _ja
+
+
+def expert_gap_label(code, L):
+    head, _, arg = code.partition(":")
+    return L.get("e_gap_" + head, head) + (": " + arg if arg else "")
 
 
 class SchemaError(Exception):
@@ -830,6 +910,12 @@ def validate_data(data):
         for k in ("result", "note"):
             text_field(perspective, k, where)
     data["perspectives"] = lens
+    if "three_pass" in data or "expert" in data:
+        # These gates select code findings by F-NNN; any other id would be
+        # silently outside them, letting an open finding pass "complete".
+        for f in findings:
+            if not re.fullmatch(r"[FD]-[0-9]{3}", str(f["id"])):
+                raise SchemaError(f"{f['id']}: three-pass and expert records need F-NNN or D-NNN ids")
     validate_verification(data, SchemaError)
     validate_workflows(data, SchemaError)
     validate_ledger(data, SchemaError)
@@ -986,7 +1072,7 @@ ASSESSMENT_LABELS = {
         "a_evidence_missing": "Validation evidence has not been recorded.",
         "a_back_to_register": "Back to finding register",
         "a_excluded_note": "These findings are retained for traceability, but excluded from the priority queue and all non-excluded totals. Their verdict and evidence explain why they were ruled out.",
-        "a_no_decisions": "No decisions were recorded.",
+        "a_no_decisions": "No decisions were recorded.", "a_running_footer": "SECURITY ASSESSMENT",
         "a_no_next_steps": "No additional next steps were recorded.",
     },
     "ja": {
@@ -1026,7 +1112,7 @@ ASSESSMENT_LABELS = {
         "a_evidence_missing": "妥当性の根拠は記録されていません。",
         "a_back_to_register": "指摘事項の索引に戻る",
         "a_excluded_note": "経緯を追跡できるよう記録を残していますが、優先対応一覧と除外対象を除く集計には含めていません。除外した理由は妥当性の判定と根拠に記載しています。",
-        "a_no_decisions": "判断が必要な事項は記録されていません。",
+        "a_no_decisions": "判断が必要な事項は記録されていません。", "a_running_footer": "セキュリティ診断書",
         "a_no_next_steps": "追加の対応手順は記録されていません。",
     },
 }
@@ -1277,6 +1363,10 @@ def verification_view(data, finding, state, lang):
     def label(value):
         return L.get("v_" + str(value), str(value))
 
+    def value(prefix, raw):
+        """A recorded code as a label; unknown codes stay visible verbatim."""
+        return L.get("vx_" + prefix + str(raw), text(raw))
+
     def refs(record):
         ids = record.get("evidence_ids", [])
         return L["v_refs"] + ": " + ", ".join(text(i) for i in ids) if ids else ""
@@ -1312,7 +1402,8 @@ def verification_view(data, finding, state, lang):
         section("v_legacy_note", [text(raw_verification)])
     if verification:
         assessment = data["assessment"]
-        section("v_scope", [join(*(L["v_" + key] + ": " + text(assessment.get(key))
+        section("v_scope", [join(*(L["v_" + key] + ": " + (value("wt_", assessment.get(key)) if key == "worktree"
+                                                           else text(assessment.get(key)))
                                   for key in ("repository", "commit", "worktree")),
                                  "diff_sha256: " + text(assessment["diff_sha256"])
                                  if assessment.get("diff_sha256") else "")])
@@ -1338,14 +1429,17 @@ def verification_view(data, finding, state, lang):
                                             text(environment.get("reason")), refs(environment))])
         if verification.get("exclusion"):
             exclusion = verification["exclusion"]
-            section("v_exclusion", [join(text(exclusion["basis"]), text(exclusion["reason"]), refs(exclusion))])
+            basis = value("basis_", exclusion["basis"])
+            if basis != text(exclusion["basis"]):
+                basis += " (" + text(exclusion["basis"]) + ")"
+            section("v_exclusion", [join(basis, text(exclusion["reason"]), refs(exclusion))])
         if finding.get("remediation"):
             remediation = finding["remediation"]
             section("v_remediation", [join(L["v_commit"] + ": " + text(remediation["commit"]),
                                            "diff_sha256: " + text(remediation["diff_sha256"])
                                            if remediation.get("diff_sha256") else "",
-                                           *(key + ": " + text(remediation[key]) for key in ("before_run_id", "after_run_id")
-                                             if key in remediation))])
+                                           *(value("", key) + ": " + text(remediation[key])
+                                             for key in ("before_run_id", "after_run_id") if key in remediation))])
     run_index = {record["id"]: record for record in data.get("test_runs", [])} if verification else {}
     run_items = []
     for run_id in state.get("run_ids", []):
@@ -1361,7 +1455,7 @@ def verification_view(data, finding, state, lang):
                               L["v_context"] + ":\n" + context,
                               L["v_expected"] + ": " + text(run.get("expected")),
                               L["v_observed"] + ": " + text(run.get("observed")),
-                              L["v_failure"] + ": " + text(run.get("failure_kind")),
+                              L["v_failure"] + ": " + value("fk_", run.get("failure_kind")),
                               L["v_exit"] + ": " + text(run.get("exit_code")),
                               L["v_time"] + ": " + text(run.get("recorded_at")),
                               L["v_command"] + ": " + text(run.get("command")), refs(run)))
@@ -1376,7 +1470,7 @@ def verification_view(data, finding, state, lang):
         path = match.group("path") if match else normalized_location
         withheld = (sensitive_path(path) or sensitive_path(record.get("source_path", ""))
                     or finding.get("category", "").lower() == "secrets")
-        evidence_items.append(join(text(evidence_id) + " · " + text(record["kind"]),
+        evidence_items.append(join(text(evidence_id) + " · " + value("kind_", record["kind"]),
                                    L["v_location"] + ": " + text(record["location"]),
                                    L["v_commit"] + ": " + text(record["commit"]),
                                    L["i_source_path"] + ": " + text(record["source_path"]) if record.get("source_path") else "",
@@ -1608,9 +1702,10 @@ def expert_view(data, lang, integrity=None):
     lines = [L["e_mode"] + ": " + (L["e_full"] if state["mode"] == "full" else L["e_single"]),
              L["e_engines"] + ": " + (L["e_cross"] if state["cross_engine"] else L["e_mono"]) +
              (" (" + ", ".join(redact(e) for e in state["engines"]) + ")" if state["engines"] else "")]
+    counts = dict(counts, qa=L.get("e_qa_" + str(counts.get("qa")), counts.get("qa")))
     lines += [L[key].format(**counts) for key in ("e_workers", "e_recon", "e_discovery", "e_variants",
                                                   "e_omission", "e_panels", "e_severity", "e_reception", "e_qa")]
-    gaps = [L["e_gap"] + ": " + redact(code) for code in state["gaps"]]
+    gaps = [redact(expert_gap_label(code, L)) for code in state["gaps"]]
     return {"status": L["e_" + state["status"]], "lines": lines, "gaps": gaps,
             "note": L["e_note"], "safety": L["e_safety"]}
 
@@ -1660,6 +1755,11 @@ def verification_summary_parts(model, L):
 
 
 def integrity_summary_view(states, findings, L):
+    # Legacy findings have no evidence catalogue to check; they are not
+    # "declared references only". With none left, there is nothing to summarize.
+    findings = [f for f in findings if states[f["id"]].get("level") != "legacy"]
+    if not findings:
+        return None
     counts = Counter(states[f["id"]].get("integrity", {}).get("status", "declared") for f in findings)
     return {"text": L["i_summary"].format(**{key: counts[key] for key in ("checked", "incomplete", "declared")}),
             "note": L["i_note"],
@@ -1840,17 +1940,18 @@ def render_assessment_html(data, L, lang, integrity=None):
                 f"{state}{action}{context}</div>{content}"
                 f"<p class='record-footer'><a href='#finding-register'>{esc(L['a_back_to_register'])}</a></p></article>")
 
-    decisions_html = (f"<section><h2>{esc(L['decisions'])}</h2>{bullets(data.get('decisions', []), 'a_no_decisions')}</section>"
-                      if data.get("decisions") else "")
-    next_steps_html = (f"<section><h2>{esc(L['next_steps'])}</h2>{bullets(data.get('next_steps', []), 'a_no_next_steps')}</section>"
-                       if data.get("next_steps") else "")
+    # Always shown, as in the dashboard: an empty list is a recorded "none".
+    decisions_html = f"<section><h2>{esc(L['decisions'])}</h2>{bullets(data.get('decisions', []), 'a_no_decisions')}</section>"
+    next_steps_html = f"<section><h2>{esc(L['next_steps'])}</h2>{bullets(data.get('next_steps', []), 'a_no_next_steps')}</section>"
     excluded_html = (f"<section class='excluded-section' id='excluded-findings'><h2>{esc(L['excluded'])}</h2>"
                      f"<p class='section-note'>{esc(L['a_excluded_note'])}</p>" +
                      "".join(card(f, True) for f in excluded) + "</section>" if excluded else "")
 
+    # The running footer is CSS text, not a label: localize it explicitly.
+    assessment_css = ASSESSMENT_CSS.replace('"SECURITY ASSESSMENT"', '"' + L["a_running_footer"] + '"')
     return f"""<!doctype html>
 <html lang="{esc(lang)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{esc(L['title'])} - {esc(m['project'])}</title><style>{ASSESSMENT_CSS}</style></head><body>
+<title>{esc(L['title'])} - {esc(m['project'])}</title><style>{assessment_css}</style></head><body>
 <header class="report-header"><p class="kicker">{esc(L['a_kicker'])}</p><h1>{esc(L['title'])}</h1>
 <p class="project">{esc(m['project'])}</p>{meta_top}{scope_lines}</header>
 <main>
@@ -1977,10 +2078,10 @@ button,.button,.filters select,.filters input{border-radius:2px}
 .card .n .pair{display:inline-block;white-space:nowrap;margin-right:18px}.card .n .u{font-family:var(--sans);font-size:11px;letter-spacing:.06em;color:var(--muted);margin-left:6px}
 td .verification-level{font-family:var(--sans);font-size:11px;font-weight:400;color:var(--muted);margin-top:4px}
 .snippet .hit{background:var(--tint)}
-@media(max-width:850px){main{padding:22px 18px}.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.hero{display:block}.hero-aside{text-align:left;max-width:none;margin-top:12px}.coverage-columns{grid-template-columns:1fr}.filters{grid-template-columns:repeat(2,minmax(0,1fr))}table,tbody,tr,td{display:block}thead{display:none}tr.row{padding:14px;border-bottom:1px solid var(--line);display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}tr.row td{border:0;padding:0;font-size:12px}tr.row td:before{content:attr(data-label);display:block;color:var(--muted);font-size:10px;margin-bottom:3px}tr.row td:nth-child(6){grid-column:1/-1;grid-row:1}.finding-toggle{font-size:15px}tr.row td:nth-child(7){grid-column:span 2}.detail-actions{align-items:flex-start}tr.detail>td{padding:16px}tr.detail dl{grid-template-columns:1fr;gap:3px}tr.detail dd{margin-bottom:10px}}
+@media(max-width:850px){main{padding:22px 18px}.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.hero{display:block}.hero-aside{text-align:left;max-width:none;margin-top:12px}.coverage-columns{grid-template-columns:1fr}.filters{grid-template-columns:repeat(2,minmax(0,1fr))}table,tbody,tr,td{display:block}thead{display:none}tr.row{padding:14px;border-bottom:1px solid var(--line);display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}tr.row td{border:0;padding:0;font-size:12px}tr.row td:before{content:attr(data-label);display:block;color:var(--muted);font-size:10px;margin-bottom:3px}tr.row td:nth-child(6){grid-column:1/-1;grid-row:1}.finding-toggle{font-size:15px}tr.row td:nth-child(7){grid-column:span 2}.detail-actions{align-items:flex-start}tr.detail>td{padding:16px}tr.detail dl{grid-template-columns:minmax(0,1fr);gap:3px}tr.detail dd{margin-bottom:10px}}
 @media(max-width:480px){main{padding:16px 12px}.masthead{align-items:flex-start;flex-direction:column;gap:12px}.tools{width:100%}.tools .button{flex:1}.card{padding:14px}.card .n{font-size:28px}.panel{padding:16px}.section-head{display:block}.filters{grid-template-columns:1fr 1fr;gap:10px}.filters label:first-child,.filters .search{grid-column:1/-1}.filter-bottom{align-items:flex-start;flex-direction:column}.scope-meta{grid-template-columns:1fr;gap:2px}.scope-meta dd{margin-bottom:8px}.priority-top{flex-wrap:wrap}}
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
-@media print{body{background:white}.tools,.filters-panel,.chart-section,.skip{display:none}main{padding:0;max-width:none}.panel,.card{break-inside:avoid}.tablewrap{overflow:visible}.footer{margin-top:16px}}
+@media print{body{background:white}.tools,.filters-panel,.chart-section,.skip{display:none}main{padding:0;max-width:none}.panel,.card{break-inside:avoid}.tablewrap{overflow:visible}.snippet{white-space:pre-wrap;overflow:visible}.footer{margin-top:16px}}
 </style>
 </head>
 <body>
@@ -2026,10 +2127,10 @@ byId('meta').textContent=[D.meta.date,D.meta.assessor].filter(Boolean).join(' ·
 document.querySelectorAll('[data-l]').forEach(function(e){e.textContent=L[e.getAttribute('data-l')];});
 byId('theme').onclick=function(){var root=document.documentElement,dark=root.dataset.theme?root.dataset.theme==='dark':window.matchMedia('(prefers-color-scheme: dark)').matches;root.dataset.theme=dark?'light':'dark';};
 var summary=byId('summary');
-summary.appendChild(el('strong',null,fmt(L.unverified_line,{n:R.unverified,high:R.unverified_high})));
+summary.appendChild(el('strong',null,R.unverified?fmt(L.unverified_line,{n:R.unverified,high:R.unverified_high}):L.none_unverified_line));
 summary.appendChild(el('p',null,F.length?(D.open_hm?fmt(L.risk_summary,{n:D.open_hm}):(R.open_count?fmt(L.open_summary,{n:R.open_count}):L.no_open)):L.no_findings));
 var verificationSummary=byId('verification-summary'),verificationSentence=el('p');verificationSummary.setAttribute('aria-labelledby','verification-heading');verificationSummary.appendChild(el('h2',{id:'verification-heading'},L.v_title));D.verification_summary.forEach(function(part){verificationSentence.appendChild(part.key?el('strong',{'data-verification-count':part.key},part.count):document.createTextNode(part.text));});verificationSummary.appendChild(verificationSentence);verificationSummary.appendChild(el('p',{'class':'muted'},L.v_note));
-var integritySummary=el('div',{'class':'integrity-summary'});integritySummary.appendChild(el('h3',null,L.i_title));integritySummary.appendChild(el('p',null,D.integrity_summary.text));integritySummary.appendChild(el('p',{'class':'muted'},D.integrity_summary.note));verificationSummary.appendChild(integritySummary);
+if(D.integrity_summary){var integritySummary=el('div',{'class':'integrity-summary'});integritySummary.appendChild(el('h3',null,L.i_title));integritySummary.appendChild(el('p',null,D.integrity_summary.text));integritySummary.appendChild(el('p',{'class':'muted'},D.integrity_summary.note));verificationSummary.appendChild(integritySummary);}
 function workflowNode(f){var view=ownValue(D.workflow_views,f.id);if(!view)return null;var box=el('div',{'class':'workflow-record'});box.appendChild(el('h4',null,L.w_title));box.appendChild(el('p',{'class':'workflow-status'},L.w_status+': '+view.status));box.appendChild(el('p',{'class':'workflow-next'},L.w_next+': '+view.next_stage));box.appendChild(el('p',{'class':'muted'},L.w_note));if(view.gaps.length){box.appendChild(el('h5',null,L.w_gaps));var ul=el('ul',{'class':'workflow-gaps'});view.gaps.forEach(function(gap){ul.appendChild(el('li',null,gap));});box.appendChild(ul);}view.sections.forEach(function(section){var group=el('section');group.appendChild(el('h5',null,section.title));section.items.forEach(function(item){group.appendChild(el('p',{'class':'prose'},item));});box.appendChild(group);});box.appendChild(el('p',{'class':'muted'},L.w_safety));return box;}
 function verificationNode(f){var view=D.verification_views[f.id],box=el('div',{'class':'verification-record'});box.appendChild(el('h4',null,L.v_title));box.appendChild(el('p',{'class':'verification-level'},view.level));box.appendChild(el('p',null,L.v_retest+': '+view.retest));if(view.gaps.length){var ul=el('ul',{'class':'verification-gaps'});view.gaps.forEach(function(gap){ul.appendChild(el('li',null,gap));});box.appendChild(ul);}view.sections.forEach(function(section){var group=el('section');group.appendChild(el('h5',null,section.title));section.items.forEach(function(item){group.appendChild(el('p',{'class':'prose'},item));});box.appendChild(group);});return box;}
 
@@ -2116,7 +2217,9 @@ def render_dashboard(data, L, lang, integrity=None):
         "parts": list(PARTS),
         "order": {"severity": SEVERITIES, "confidence": CONFIDENCES, "status": STATUSES, "verdict": VERDICTS},
         "excluded_verdicts": sorted(EXCLUDED),
-        **{k: data[k] for k in ("checked_ok", "decisions", "limitations", "next_steps", "perspectives")},
+        **{k: data[k] for k in ("checked_ok", "decisions", "limitations", "next_steps")},
+        # Only the displayed perspective fields: extension keys stay out of the payload.
+        "perspectives": [{k: p[k] for k in ("name", "result", "note") if k in p} for p in data["perspectives"]],
     }
     # Escape every less-than sign: <!-- and <script also change HTML parsing.
     blob = json.dumps(payload, ensure_ascii=False).replace("<", "\\u003c")

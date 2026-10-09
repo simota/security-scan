@@ -11,7 +11,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from verification import CLAIMS, _Validator, identity, integrity_state
 
-CODE_ID = re.compile(r"^F-\d{3}$")
+CODE_ID = re.compile(r"F-[0-9]{3}\Z")
 
 REASONS = (
     "three_pass_discovery_incomplete", "three_pass_candidates_untracked",

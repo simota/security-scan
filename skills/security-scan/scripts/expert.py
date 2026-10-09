@@ -27,7 +27,7 @@ ROLES = ("recon", "discovery", "variant", "conditions", "falsification", "skepti
 SEVERITY_ORDER = ("High", "Medium", "Low", "Info")
 EXCLUDED = ("FalsePositive", "NotApplicable")
 CWE = re.compile(r"^CWE-\d{1,5}$")
-CODE_ID = re.compile(r"^F-\d{3}$")
+CODE_ID = re.compile(r"F-[0-9]{3}\Z")
 
 # Calibration key for reference/expert-mode.md §Calibration anchors. Raters receive
 # only the anchor text; the orchestrator compares their scores with this key.

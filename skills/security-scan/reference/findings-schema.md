@@ -557,9 +557,10 @@ Without it, findings are validated as before. Shape:
   paths_read, paths_total}` plus optional `finding_ids` and `reason`
   - `id`: `INV-<nn>`, unique; `family`: `OWN`, `ROLE`, `PROP`, `STATE`, `QTY`,
     `ID` or `TRUST`; `invariant` and `source` (`path:line`) nonblank
-  - `status`: `holds` (every path read: `paths_read == paths_total >= 1`),
-    `partial` (`paths_read < paths_total`: "holds on N/M, rest not read"),
-    `violated` (nonempty `finding_ids` of `F-*` findings in this report) or
+  - `status`: `holds` (every path read: `paths_read == paths_total >= 1`; no
+    `finding_ids`), `partial` (`paths_read < paths_total`: "holds on N/M, rest
+    not read"), `violated` (`finding_ids` of `F-*` findings in this report, at
+    least one not ruled out as FalsePositive/NotApplicable) or
     `not_checked` (nonblank `reason`)
 - `units` (optional): `{unit, record_inputs, trace_rows, blank_cells}` plus
   optional boolean `closed`; a unit marked `closed: true` is a schema error

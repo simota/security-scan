@@ -35,7 +35,7 @@ LABELS = {
            "inputs": "レコード指定入力", "rows": "トレース行", "blank": "空欄", "state": "状態",
            "closed": "完了", "open": "未完了",
            "holds": "全 {total} 経路で成立", "partial": "{read}/{total} 経路で成立、残りは未読",
-           "violated": "違反（{findings}）; {read}/{total} 経路を確認", "not_checked": "未確認（{reason}）"},
+           "violated": "違反（{findings}）。{read}/{total} 経路を確認", "not_checked": "未確認（{reason}）"},
 }
 
 
@@ -74,6 +74,9 @@ def validate_ledger(data, error_type=ValueError):
     if not isinstance(entries, list) or not entries:
         fail("invariant_ledger.entries: requires a nonempty list")
     finding_ids = {f["id"] for f in data["findings"] if str(f.get("id", "")).startswith("F-")}
+    excluded_ids = {f["id"] for f in data["findings"]
+                    if isinstance(f.get("validation"), dict)
+                    and f["validation"].get("verdict") in ("FalsePositive", "NotApplicable")}
     seen = set()
     for i, entry in enumerate(entries):
         at = f"invariant_ledger.entries[{i}]"
@@ -100,8 +103,10 @@ def validate_ledger(data, error_type=ValueError):
             fail(f"{at}.status: holds requires every path read (paths_read == paths_total >= 1)")
         if status == "partial" and read >= total:
             fail(f"{at}.status: partial requires paths_read < paths_total")
-        if status == "violated" and not refs:
-            fail(f"{at}.finding_ids: violated requires the finding IDs")
+        if status == "violated" and not any(ref not in excluded_ids for ref in refs):
+            fail(f"{at}.finding_ids: violated requires an included (not ruled-out) finding")
+        if status == "holds" and refs:
+            fail(f"{at}.finding_ids: an invariant that holds cites no findings")
         if status == "not_checked":
             _text(entry, "reason", at, fail)
     units = ledger.get("units", [])
