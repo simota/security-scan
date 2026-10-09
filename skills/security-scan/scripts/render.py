@@ -1112,7 +1112,7 @@ ASSESSMENT_LABELS = {
         "a_evidence_missing": "妥当性の根拠は記録されていません。",
         "a_back_to_register": "指摘事項の索引に戻る",
         "a_excluded_note": "経緯を追跡できるよう記録を残していますが、優先対応一覧と除外対象を除く集計には含めていません。除外した理由は妥当性の判定と根拠に記載しています。",
-        "a_no_decisions": "判断が必要な事項は記録されていません。", "a_running_footer": "セキュリティ診断書",
+        "a_no_decisions": "判断が必要な事項は記録されていません。", "a_running_footer": "セキュリティ診断",
         "a_no_next_steps": "追加の対応手順は記録されていません。",
     },
 }

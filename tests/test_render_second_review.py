@@ -72,7 +72,7 @@ class ReportScopeTests(unittest.TestCase):
 
     def test_running_footer_is_localized(self):
         page = render.render_assessment_html(load(legacy()), render.LABELS["ja"], "ja")
-        self.assertIn('content:"セキュリティ診断書"', page)
+        self.assertIn('content:"セキュリティ診断"', page)
         self.assertNotIn('"SECURITY ASSESSMENT"', page)
 
     def test_legacy_findings_have_no_integrity_summary(self):

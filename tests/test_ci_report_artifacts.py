@@ -117,7 +117,7 @@ class ReportArtifactTests(unittest.TestCase):
     def normalized(text):
         # Drop only generated page furniture before checking paragraphs that may
         # cross a page boundary; retain the original extraction in the artifact.
-        footer = re.compile(r"\s*(?:SECURITY ASSESSMENT(?:\s+\d+\s*/\s*\d+)?|\d+\s*/\s*\d+)\s*")
+        footer = re.compile(r"\s*(?:(?:SECURITY ASSESSMENT|セキュリティ診断)(?:\s+\d+\s*/\s*\d+)?|\d+\s*/\s*\d+)\s*")
         content = " ".join(line for line in text.splitlines() if not footer.fullmatch(line))
         # PDF line wrapping can insert spaces between Japanese glyphs or split words.
         return "".join(content.split())
