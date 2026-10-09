@@ -9,7 +9,7 @@ import sys
 
 # Sibling modules must import under python3 -I / PYTHONSAFEPATH as well.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from verification import CLAIMS, _Validator, integrity_state
+from verification import CLAIMS, _Validator, identity, integrity_state
 
 CODE_ID = re.compile(r"^F-\d{3}$")
 
@@ -138,10 +138,10 @@ def stage_gaps(data, finding, stages, integrity=None, error_type=ValueError):
         return []
     gaps = list(discovery["reasons"])
     by_stage = {stage["stage"]: stage for stage in stages}
-    actors = [discovery["actor"].strip().casefold()]
+    actors = [identity(discovery["actor"])]
     for stage in ("conditions", "falsification"):
         if stage in by_stage:
-            actor = by_stage[stage]["actor"].strip().casefold()
+            actor = identity(by_stage[stage]["actor"])
             if actor in actors:
                 gaps.append("three_pass_independence_missing")
             actors.append(actor)
@@ -151,9 +151,9 @@ def stage_gaps(data, finding, stages, integrity=None, error_type=ValueError):
     checks = verification.get("falsification", [])
     if any(check.get("claim") not in CLAIMS for check in checks) or not set(CLAIMS).issubset({check.get("claim") for check in checks if isinstance(check.get("claim"), str)}):
         gaps.append("three_pass_negative_checks_incomplete")
-    actor = by_stage["falsification"]["actor"].strip().casefold()
+    actor = identity(by_stage["falsification"]["actor"])
     claim_refs = {ref for claim in verification.get("claims", {}).values() for ref in claim.get("evidence_ids", [])}
-    if not any(review["reviewer"].strip().casefold() == actor and
+    if not any(identity(review["reviewer"]) == actor and
                claim_refs.issubset(review.get("evidence_ids", [])) and
                (review["conclusion"] == "agree" or "resolution" in review)
                for review in verification.get("reviews", [])):

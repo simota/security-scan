@@ -632,6 +632,7 @@ _GAP_LABELS = {
     "retest_before_unverified": ("The vulnerable version lacks a qualifying assertion failure.", "修正前の版で安全条件が失敗した根拠が不足しています。"),
     "retest_after_unverified": ("The fixed version lacks a successful security retest.", "修正後の版で安全条件を再検査した成功記録がありません。"),
     "retest_case_mismatch": ("Before and after runs do not test the same case.", "修正前後で検査ケースが一致していません。"),
+    "retest_order_invalid": ("A fixed-version run is older than the vulnerable-version failure it retests.", "修正後の検査が、再検査対象である修正前の失敗より前に記録されています。"),
     "retest_context_mismatch": ("Before and after execution conditions do not match.", "修正前後の実行条件が一致していません。"),
     "retest_version_mismatch": ("A retest does not match its intended source version.", "再検査の対象版が指定された版と一致していません。"),
     "retest_control_missing": ("Positive-control evidence is missing.", "正常系の対照検査がありません。"),
@@ -696,7 +697,9 @@ def validate_json_values(data):
                     key.encode("utf-8")
                 except UnicodeEncodeError:
                     raise SchemaError(f"{where or 'top level'}: invalid Unicode object key") from None
-                pending.append((f"{where}.{key}" if where else key, entry))
+                # Keys go into error messages: show control/format characters escaped.
+                shown = key if key.isprintable() else ascii(key)
+                pending.append((f"{where}.{shown}" if where else shown, entry))
 
 
 def load(path):

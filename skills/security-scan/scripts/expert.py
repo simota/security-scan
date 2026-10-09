@@ -15,7 +15,7 @@ import sys
 # Sibling modules must import under python3 -I / PYTHONSAFEPATH as well.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from three_pass import derive_three_pass
-from verification import _Validator, integrity_state
+from verification import _Validator, identity, integrity_state
 
 VERSION = 1
 DISCOVERY_ANGLES = ("entry-first", "sink-first", "control-first")
@@ -75,7 +75,7 @@ def _count(record, key, where, error_type):
 
 def _actor_key(value):
     """Use the workflow's declared-identity comparison for every expert role."""
-    return value.strip().casefold() if isinstance(value, str) else None
+    return identity(value) if isinstance(value, str) else None
 
 
 def calibrated(scores):

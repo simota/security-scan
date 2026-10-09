@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 # Sibling modules must import under python3 -I / PYTHONSAFEPATH as well.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from verification import CLAIMS, DEFINITIVE, derive_verification, integrity_state, parse_timestamp
+from verification import CLAIMS, DEFINITIVE, derive_verification, identity, integrity_state, parse_timestamp
 from three_pass import (REASONS as THREE_PASS_REASONS, enabled as three_pass_enabled,
                         validate_profile, validate_coverage_checks, discovery_state, stage_gaps, derive_three_pass)
 
@@ -104,6 +104,8 @@ def _normalized_finding(finding):
     for key in ("actor", "request", "impact", "fix"):
         result.setdefault(key, "")
     result["category"] = result.get("category") or "Uncategorized"
+    if result.get("cwe") == "":
+        del result["cwe"]  # render.validate_data drops an empty cwe as omitted.
     validation = result.setdefault("validation", {})
     if isinstance(validation, dict):
         for key, value in (("verdict", "Unverified"), ("method", ""), ("evidence", "")):
@@ -321,7 +323,7 @@ def _replay(workflow):
                 _error(at, "out-of-order stage or skipped stage")
             if output["input_digest"] != before or output["actor"] != event["actor"]:
                 _error(at, "submission identity or digest mismatch")
-            if output["stage"] == "falsification" and output["actor"].strip().casefold() == stages[0]["actor"].strip().casefold():
+            if output["stage"] == "falsification" and identity(output["actor"]) == identity(stages[0]["actor"]):
                 _error(at, "conditions and falsification require different declared actors")
             status = event.get("status")
             if status not in OUTCOMES or (output["status"] != "complete" and status != output["status"]):
@@ -343,7 +345,7 @@ def _replay(workflow):
                 if any(not isinstance(review, dict) or
                        (review.get("conclusion") != "agree" and "resolution" not in review) for review in reviews):
                     _error(at, "completed falsification cannot contain unresolved dissent")
-                if not any(str(review.get("reviewer", "")).strip().casefold() == output["actor"].strip().casefold()
+                if not any(identity(str(review.get("reviewer", ""))) == identity(output["actor"])
                            for review in reviews):
                     _error(at, "falsification must include its declared actor's review")
             if status != "complete" and not reasons:
@@ -518,11 +520,11 @@ def submit(data, finding_id, output, integrity=None):
         _error("submission.stage", "out-of-order submission; use next or resume")
     if output["input_digest"] != state["input_digest"]:
         _error("submission.input_digest", "stale handoff")
-    if output["stage"] == "falsification" and output["actor"].strip().casefold() == state["stages"][0]["actor"].strip().casefold():
+    if output["stage"] == "falsification" and identity(output["actor"]) == identity(state["stages"][0]["actor"]):
         _error("submission.actor", "conditions and falsification require different declared actors")
     if three_pass_enabled(data) and output["stage"] in ("conditions", "falsification"):
-        discovery_actor = data["three_pass"]["discovery"]["actor"].strip().casefold()
-        if output["actor"].strip().casefold() == discovery_actor:
+        discovery_actor = identity(data["three_pass"]["discovery"]["actor"])
+        if identity(output["actor"]) == discovery_actor:
             _error("submission.actor", "three-pass discovery, conditions and falsification require different declared actors")
     if "coverage_checks" in output:
         validate_coverage_checks(data, output["coverage_checks"], WorkflowError)
@@ -567,7 +569,7 @@ def submit(data, finding_id, output, integrity=None):
                 candidate["verification"]["coverage_checks"] = copy.deepcopy(checks)
             candidate["verification"]["falsification"] = copy.deepcopy(output["checks"])
             candidate["verification"]["reviews"] = copy.deepcopy(output["reviews"])
-            if not any(isinstance(review, dict) and str(review.get("reviewer", "")).strip().casefold() == output["actor"].strip().casefold() for review in output["reviews"]):
+            if not any(isinstance(review, dict) and identity(str(review.get("reviewer", ""))) == identity(output["actor"]) for review in output["reviews"]):
                 _error("submission.reviews", "must include the falsification actor's own review")
             verification = _verification_state(data, candidate, integrity)
             if "falsification_incomplete" in verification["gaps"]:
@@ -715,7 +717,7 @@ def _read_json(path):
         obj = {}
         for key, value in pairs:
             if key in obj:
-                _error(str(path), "duplicate JSON key " + key)
+                _error(str(path), "duplicate JSON key " + (key if key.isprintable() else ascii(key)))
             obj[key] = value
         return obj
     def invalid_constant(value):
