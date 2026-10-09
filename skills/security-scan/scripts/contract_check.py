@@ -23,7 +23,7 @@ OUTPUTS = {"findings.json", "deps.json", "dashboard.html", "assessment.html", "a
 # contain spaces (render.py accepts them) but not control characters.
 CODE_ID = re.compile(r"F-([0-9]{3})")
 DEP_ID = re.compile(r"D-[0-9]{3}")
-LOCATION = re.compile(r"[^:\x00-\x1f\x7f]*[^:\s\x00-\x1f\x7f]:[0-9]+(?:-[0-9]+)?")
+LOCATION = re.compile(r"[^:\s\x00-\x1f\x7f](?:[^:\x00-\x1f\x7f]*[^:\s\x00-\x1f\x7f])?:[0-9]+(?:-[0-9]+)?")
 VERDICTS = {"Valid", "Likely", "Unverified", "Unlikely", "FalsePositive", "NotApplicable"}
 CODE_FIELDS = ("actor", "request", "impact", "fix")
 

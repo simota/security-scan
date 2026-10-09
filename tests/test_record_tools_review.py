@@ -94,7 +94,7 @@ class ContractReviewTests(unittest.TestCase):
         for value in ("F-٠٠١", "F-００１", "F-001\n"):
             self.assertIsNone(self.contract.CODE_ID.fullmatch(value), value)
         self.assertIsNotNone(self.contract.LOCATION.fullmatch("src/my orders.py:2"))
-        for value in ("src/orders.py:2\n", "src/orders.py:٢", "src/orders.py"):
+        for value in ("src/orders.py:2\n", "src/orders.py:٢", "src/orders.py", " src/orders.py:2"):
             self.assertIsNone(self.contract.LOCATION.fullmatch(value), value)
 
     def test_non_list_sections_are_violations_not_crashes(self):
