@@ -166,7 +166,7 @@ class ReproductionTests(unittest.TestCase):
     def test_timeout_is_captured_with_no_successful_runs(self):
         self.generate()
         with patch.object(subprocess, "run", side_effect=subprocess.TimeoutExpired("auditor runtime", 1)):
-            result = repro.run(self.bundle, self.findings, self.out, 1)
+            result = repro.run(self.bundle, self.findings, self.out, 2)
         self.assertEqual(result["status"], "timeout")
         self.assertFalse(result["repeatable"])
         self.assertEqual(json.loads((self.out / "records.json").read_text())["test_runs"], [])

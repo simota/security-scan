@@ -209,11 +209,15 @@ class DepsScanSecondReviewTests(unittest.TestCase):
                 self.write("pyproject.toml", text)
                 self.assertIn("pyproject.toml has no lockfile", self.titles())
 
-    def test_setup_files_with_install_requires_are_inventoried(self):
-        self.write("setup.cfg", "[flake8]\nmax-line-length = 100\n")
+    def test_setup_files_with_install_requires_are_unaudited_inputs(self):
+        tool_only = self.write("setup.cfg", "[flake8]\nmax-line-length = 100\n")
+        library = self.write("setup.py", "setup(install_requires=['django'])\n")
+        # Libraries do not commit lockfiles: no lockfile finding, but not silently audited either.
         self.assertFalse(self.titles())
-        self.write("setup.py", "setup(install_requires=['django'])\n")
-        self.assertIn("setup.py has no lockfile", self.titles())
+        c = self.deps.Collector(self.root)
+        with patch.object(self.deps, "audit_osv", return_value=set()):
+            self.deps.audits(c, self.root, [tool_only, library])
+        self.assertEqual([n["reason"].split(":")[0] for n in c.not_run], ["setup.py"])
 
     def test_tool_only_pyproject_is_not_an_unaudited_input(self):
         project = self.write("pyproject.toml", "[tool.black]\nline-length = 100\n")
@@ -287,7 +291,17 @@ class DepsScanSecondReviewTests(unittest.TestCase):
         self.deps.vuln(c, "high", "debug", "1.0", ["GHSA-1"], "s", self.root / "package-lock.json", "t")
         self.deps.vuln(c, "high", "jinja2", "2.0", ["PYSEC-1"], "s", self.root / "requirements.txt", "t")
         self.deps.triage(c, self.root)
-        self.assertEqual([f["validation"]["referenced"] for f in c.findings], ["no", "unknown"])
+        # A quoted word that is not an import is "unknown", never a confident "yes".
+        self.assertEqual([f["validation"]["referenced"] for f in c.findings], ["unknown", "unknown"])
+
+    def test_npm_import_forms_count_as_references(self):
+        for source in ("require( 'minimist' )", "require.resolve('minimist')", "import( 'minimist' )",
+                       "import x from'minimist'", "require(\n  'minimist')", "jest.mock('minimist/sub')",
+                       "import type { X } from \"minimist\""):
+            with self.subTest(source=source):
+                self.assertEqual(self.deps.npm_referenced("minimist", [source]), "yes")
+        self.assertEqual(self.deps.npm_referenced("minimist", ["const a = 1"]), "no")
+        self.assertEqual(self.deps.npm_referenced("min", ["require('minimist')"]), "no")
 
     def test_lockfile_git_sources_and_pnpm_tarballs(self):
         self.write("package-lock.json", {"lockfileVersion": 3, "packages": {"node_modules/b": {

@@ -8,6 +8,7 @@ Writes DIR/dashboard.html (self-contained), DIR/assessment.html and DIR/assessme
 Standard library only.
 """
 import argparse
+import hashlib
 import html
 import json
 import math
@@ -2260,6 +2261,11 @@ def main(argv=None):
         # input decoder but exceed the encoder limit inside the report payload.
         dashboard = render_dashboard(data, L, a.lang, integrity=integrity)
         assessment = render_assessment_html(data, L, a.lang, integrity=integrity)
+        # Bind each page to the exact findings.json bytes it shows, so
+        # contract_check.py can tell a stale report without trusting mtimes.
+        digest = hashlib.sha256(Path(a.findings).read_bytes()).hexdigest()
+        stamp = f'<meta name="security-scan-source" content="sha256:{digest}">'
+        dashboard, assessment = (page.replace("<head>", "<head>" + stamp, 1) for page in (dashboard, assessment))
     except RecursionError:
         print("render.py: report: JSON nesting is too deep to render", file=sys.stderr)
         return 2

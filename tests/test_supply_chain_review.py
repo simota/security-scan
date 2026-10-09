@@ -1,6 +1,8 @@
 """Third-round deps_scan checks: privileged workflows, plaintext sources, images."""
+import json
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from test_deps_scan_review import DepsScanReviewTests
 
@@ -79,6 +81,52 @@ class SupplyChainReviewTests(unittest.TestCase):
         self.assertIn(("Dockerfile:3", "build downloads a remote file with ADD and no --checksum"), found)
         self.assertNotIn("Dockerfile:4", [loc for loc, _ in found])
         self.assertEqual([loc for loc, t in found if t.startswith("compose image")], ["compose.yaml:3"])
+
+    def test_git_sources_in_pnpm_and_yarn_lockfiles(self):
+        cases = {
+            "pnpm-lock.yaml": "packages:\n  a@1.0.0:\n    resolution: {commit: abc, repo: https://github.com/u/r.git, type: git}\n",
+            "yarn.lock": 'a@github:u/r:\n  resolved "https://codeload.github.com/u/r/tar.gz/abc"\n',
+        }
+        for name, text in cases.items():
+            with self.subTest(name=name):
+                for old in list(self.root.iterdir()):
+                    old.unlink()
+                self.write(name, text)
+                titles = [t for _, _, t in self.findings()]
+                self.assertIn("lockfile resolves a package from git or a local path, not a registry", titles)
+        for old in list(self.root.iterdir()):
+            old.unlink()
+        self.write("pnpm-lock.yaml", "packages:\n  x@1.0.0:\n    resolution: {tarball: 'https://pkgs.invalid/x.tgz'}\n")
+        self.assertIn("lockfile resolves packages from non-default host pkgs.invalid", [t for _, _, t in self.findings()])
+
+    def test_script_inputs_of_other_actions_are_data(self):
+        expr = "${{ github.event.issue.title }}"
+        self.write(".github/workflows/a.yml",
+                   "on: issues\njobs:\n  call:\n    uses: ./.github/workflows/b.yml\n    with:\n      script: " + expr + "\n"
+                   "  j:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: other/action@" + "0" * 40 + "\n"
+                   "        with:\n          script: " + expr + "\n"
+                   "      - name: real\n        uses: actions/github-script@" + "0" * 40 + "\n"
+                   "        with:\n          script: console.log('" + expr + "')\n")
+        locations = [loc for _, loc, t in self.findings() if t.startswith("untrusted")]
+        self.assertEqual(locations, [".github/workflows/a.yml:16"])
+
+    def test_osv_group_keeps_fix_versions_from_every_alias(self):
+        lock = self.write("poetry.lock", "")
+        payload = {"results": [{"source": {"path": str(lock), "type": "lockfile"}, "packages": [
+            {"package": {"name": "fixture", "version": "1.0", "ecosystem": "PyPI"},
+             "vulnerabilities": [
+                 {"id": "GHSA-aaaa-aaaa-aaaa", "summary": "s"},
+                 {"id": "PYSEC-1", "summary": "s", "affected": [{"package": {"name": "fixture"},
+                  "ranges": [{"type": "ECOSYSTEM", "events": [{"fixed": "1.2.6"}]}]}],
+                  "references": [{"type": "FIX", "url": "https://github.com/o/r/commit/abc"}]}],
+             "groups": [{"ids": ["GHSA-aaaa-aaaa-aaaa", "PYSEC-1"], "max_severity": "7.5"}]}]}]}
+        c = self.deps.Collector(self.root)
+        with patch.object(self.deps.shutil, "which", return_value="/tools/osv-scanner"), \
+             patch.object(self.deps, "run", return_value=(1, json.dumps(payload), "")):
+            self.deps.audit_osv(c, self.root, [lock])
+        self.assertEqual(len(c.findings), 1)
+        self.assertEqual(c.findings[0]["fix"], "Upgrade to 1.2.6")
+        self.assertIn("https://github.com/o/r/commit/abc", [r["url"] for r in c.findings[0]["references"]])
 
     def test_this_repository_stays_clean(self):
         root = Path(__file__).resolve().parents[1]

@@ -251,8 +251,8 @@ The repository runner writes a new results directory containing:
   outcomes, semantic hashes, repeatability, timeout and tool-version metadata.
 - `records.json`: separate evidence/test-run records for manual review/import,
   exported only for a `completed`, repeatable run. A stale, errored, timed-out
-  or `incomplete` run exports no records. The child runtime stops one second
-  before the `--timeout` deadline and reports `timeout` itself.
+  or `incomplete` run exports no records. The child runtime keeps a quarter of
+  `--timeout` (at least 2 seconds) as margin and reports `timeout` itself.
 - `evidence/`: one sanitized JSON observation per completed case, referenced by
   hash from the exported records. Unsupported cases have no invented observations.
 
@@ -277,7 +277,7 @@ reported rather than silently described as identical.
   exit `3` with `unsupported`.
 
 `run --timeout SECONDS` sets the outer subprocess limit, default 10 seconds,
-allowed range 1–60. The standalone repeat runner also has its own bounded
+allowed range 2–60. The standalone repeat runner also has its own bounded
 execution. A hard timeout cannot guarantee that cleanup completed; rerun the
 verified cleanup command against unchanged inputs and inspect any refusal.
 Never convert a timeout into successful red evidence.

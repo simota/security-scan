@@ -33,13 +33,17 @@ class IdentityAndRetestTests(unittest.TestCase):
         self.assertEqual(self.derive()["gaps"], [])
         author = self.record["reviewer"]
         for spelling in (author + "​", "­" + author, "ｓ" + author[1:] if author[0] == "s" else author.upper(),
-                         " ".join(author)):
+                         author + "\ufe0f", "\u115f" + author, "  " + author + "\u3164 "):
             with self.subTest(spelling=spelling):
                 data = copy.deepcopy(self.data)
                 data["findings"][0]["verification"]["reviews"][0]["reviewer"] = spelling
                 state = verification.derive_verification(data, RecordError)[self.finding["id"]]
                 self.assertIn("review_missing", state["gaps"])
                 self.assertNotEqual(state["retest"], "verified")
+
+    def test_distinct_spaced_names_stay_distinct(self):
+        self.assertNotEqual(verification.identity("Ann Lee"), verification.identity("AnnLee"))
+        self.assertEqual(verification.identity(" Ann\u3000 Lee "), verification.identity("ann lee"))
 
     def test_after_fix_runs_older_than_the_failure_do_not_verify(self):
         for run in self.data["test_runs"]:

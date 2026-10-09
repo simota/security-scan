@@ -46,8 +46,6 @@ LOCKS = {
     "go.mod": ["go.sum"],
     "Cargo.toml": ["Cargo.lock"],
     "pyproject.toml": ["poetry.lock", "uv.lock", "pdm.lock", "Pipfile.lock", "requirements.lock"],
-    "setup.py": ["poetry.lock", "uv.lock", "pdm.lock", "Pipfile.lock", "requirements.lock"],
-    "setup.cfg": ["poetry.lock", "uv.lock", "pdm.lock", "Pipfile.lock", "requirements.lock"],
     "Pipfile": ["Pipfile.lock"],
 }
 ECOSYSTEM = {"package.json": "npm", "composer.json": "composer", "Gemfile": "bundler", "go.mod": "go",
@@ -297,7 +295,7 @@ def workflow_run_blocks(c, path, text):
     flow collections and unsupported forms are explicitly incomplete.
     """
     mapping = re.compile(r'''^( *)(- +)?(?:([A-Za-z0-9_.-]+)|"([A-Za-z0-9_.-]+)"|'([A-Za-z0-9_.-]+)')\s*:\s*(.*)$''')
-    stack, block, run_lines = [], None, []
+    stack, block, run_lines, step_uses = [], None, [], {}
     if text.lstrip().startswith(("{", "[")):
         incomplete(c, "workflow run scan", path, "flow-style workflow requires manual review")
     for number, line in enumerate(text.splitlines(), 1):
@@ -339,10 +337,16 @@ def workflow_run_blocks(c, path, text):
         key, value = next(x for x in match.group(3, 4, 5) if x is not None), match[6]
         while stack and stack[-1][0] >= level:
             stack.pop()
-        # run: is a shell script; with.script (actions/github-script) is JavaScript.
-        # Both evaluate ${{ }} before the code runs.
+        # The `uses:` of the step at this level; a new sequence item starts a new step.
+        if match[2]:
+            step_uses[level] = None
+        if key == "uses":
+            step_uses[level] = value.split("#", 1)[0].strip().strip("'\"")
+        # run: is a shell script; with.script of actions/github-script is JavaScript.
+        # Both evaluate ${{ }} before the code runs. Other actions' script inputs are data.
         is_run = bool(stack) and (key == "run" and stack[-1][1] == "steps"
-                                  or key == "script" and stack[-1][1] == "with")
+                                  or key == "script" and stack[-1][1] == "with"
+                                  and str(step_uses.get(stack[-1][0]) or "").startswith("actions/github-script@"))
         if (value.startswith(("*", "&", "!"))
                 or key == "steps" and value and not value.startswith("#")
                 or value.startswith(("{", "[")) and (key == "jobs" or stack and stack[-1][1] == "jobs")):
@@ -583,9 +587,12 @@ def check_npm_lock(c, p):
     for match in resolved.finditer(text):
         try:
             raw = match[1] or match[2] or match[3]
-            url = json.loads(raw) if raw.startswith('"') else raw
+            url = json.loads(raw) if raw.startswith('"') else raw.strip("'")
             parsed = urlsplit(url)
-            if re.match(r"(git(\+[a-z]+)?|github|gitlab|bitbucket|file|link)$", parsed.scheme.lower()):
+            # Git hosts' archive endpoints are git sources served as tarballs.
+            archive = re.match(r"(codeload\.github\.com|gitlab\.com|bitbucket\.org)$", parsed.hostname or "") and (
+                parsed.hostname == "codeload.github.com" or "/-/archive/" in parsed.path or "/get/" in parsed.path)
+            if archive or re.match(r"(git(\+[a-z]+)?|github|gitlab|bitbucket|file|link)$", parsed.scheme.lower()):
                 if "outside" not in hosts:
                     hosts["outside"] = text.count("\n", 0, match.start()) + 1
                 continue
@@ -602,6 +609,10 @@ def check_npm_lock(c, p):
             continue
         if host not in hosts:
             hosts[host] = text.count("\n", 0, match.start()) + 1
+    # pnpm records git dependencies as resolution: {commit, repo, type: git}.
+    git_resolution = re.search(r"\bresolution:\s*\{[^}\n]*\btype:\s*git\b", text)
+    if git_resolution and "outside" not in hosts:
+        hosts["outside"] = text.count("\n", 0, git_resolution.start()) + 1
     if "outside" in hosts:
         c.add("Medium", "lockfile resolves a package from git or a local path, not a registry", p,
               hosts.pop("outside"), impact="Bypasses registry integrity and advisory coverage; the source can change",
@@ -1194,11 +1205,17 @@ def parse_osv(c, data, root, lock):
                     continue
                 reported.add(group)
                 ids = list(groups[group].get("ids", [])) if group is not None else []
+                # Fix versions and references may sit on any alias record of the group.
+                members = [v] + [x for x in vulnerabilities if x is not v and isinstance(x, dict)
+                                 and group is not None and group_of.get(x.get("id")) == group]
+                aliases = aliases + [a for x in members[1:] for a in x.get("aliases") or [] if isinstance(a, str)]
                 malicious = [a for a in aliases + ids if a.startswith("MAL-")]
-                aliases = [a for a in aliases if a.startswith("CVE-")][:2]
+                aliases = sorted({a for a in aliases if a.startswith("CVE-")})[:2]
+                fixed = ", ".join(dict.fromkeys(x for m in members for x in osv_fixed(m, info["name"]).split(", ") if x))
+                refs = [r for m in members for r in osv_refs(m)]
                 vuln(c, osv_severity(v, group_sev), info["name"], info.get("version", ""),
                      [v["id"]] + aliases + malicious + ids, v.get("summary", ""), lock, "osv-scanner",
-                     osv_fixed(v, info["name"]), osv_refs(v))
+                     fixed, refs)
 
 
 def audit_osv(c, root, files):
@@ -1587,14 +1604,20 @@ def lock_context(lock):
     return ctx
 
 
-def npm_needles(name):
-    """Import forms only: a quoted word such as 'debug' elsewhere is not a use."""
-    needles = []
-    for quote in ("'", '"', "`"):
-        for tail in (quote, "/"):
-            target = quote + name + tail
-            needles += ["require(" + target, "from " + target, "import(" + target, "import " + target]
-    return needles
+def npm_import(name):
+    """Import forms of an npm package: require/import calls, static imports, test mocks."""
+    target = r"""\s*['"`]""" + re.escape(name) + r"""['"`/]"""
+    return re.compile(r"(?:\brequire(?:\.resolve)?|\bimport|\bjest\.(?:mock|requireActual))\s*\(" + target
+                      + r"|\b(?:from|import)" + target)
+
+
+def npm_referenced(name, texts):
+    """yes for an import form; unknown when the quoted name appears another way; else no."""
+    pattern = npm_import(name)
+    if any(pattern.search(t) for t in texts):
+        return "yes"
+    quoted = [q + name + q for q in ("'", '"', "`")] + [q + name + "/" for q in ("'", '"', "`")]
+    return "unknown" if any(n in t for t in texts for n in quoted) else "no"
 
 
 def triage(c, root):
@@ -1616,8 +1639,13 @@ def triage(c, root):
         direct = "direct" if name in ctx["direct"] else ("transitive" if ctx["direct"] else "unknown")
         npm_family = Path(lock).name in LOCKS["package.json"]
         # Other ecosystems have no needle model: report "unknown", never a false "no".
-        needles = ctx["needles"].get(name) or (npm_needles(name) if npm_family else [])
-        referenced = "yes" if needles and any(n in t for t in texts for n in needles) else ("no" if needles else "unknown")
+        needles = ctx["needles"].get(name)
+        if needles:
+            referenced = "yes" if any(n in t for t in texts for n in needles) else "no"
+        elif npm_family:
+            referenced = npm_referenced(name, texts)
+        else:
+            referenced = "unknown"
         if f.get("malicious"):
             verdict = "Likely"
             why = "malicious-package report: treat as valid until removed"

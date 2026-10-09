@@ -270,7 +270,7 @@ class ReproductionAdversarialTests(unittest.TestCase):
         self.generate()
         error = subprocess.TimeoutExpired(["trusted-runtime"], 1, output=b"private partial output")
         with patch.object(self.repro.subprocess, "run", side_effect=error):
-            result = self.repro.run(self.bundle, self.findings, self.out, timeout=1)
+            result = self.repro.run(self.bundle, self.findings, self.out, timeout=2)
         self.assertEqual(result["status"], "timeout")
         self.assertFalse(result["repeatable"])
         records = self.runtime.load_json(self.out / "records.json")
@@ -300,7 +300,10 @@ class ReproductionAdversarialTests(unittest.TestCase):
 
         with patch.object(self.repro.subprocess, "run", side_effect=fake_run):
             self.repro.run(self.bundle, self.findings, self.out, timeout=30)
-        self.assertIn('entry("run", evidence_checked=True, timeout=29)', captured["program"])
+        self.assertIn('entry("run", evidence_checked=True, timeout=23)', captured["program"])
+        self.assertEqual([self.repro.child_timeout(t) for t in (2, 3, 10, 60)], [1, 1, 8, 45])
+        with self.assertRaises(self.repro.BundleError):
+            self.repro.run(self.bundle, self.findings, self.root / "too-short", timeout=1)
 
     def test_child_reports_timeout_when_a_cycle_times_out(self):
         manifest = self.generate()
