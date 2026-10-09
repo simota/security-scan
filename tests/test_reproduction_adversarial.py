@@ -300,7 +300,11 @@ class ReproductionAdversarialTests(unittest.TestCase):
             result = self.repro.run(self.bundle, self.findings, self.out)
         self.assertEqual(result["status"], "stale")
         self.assertFalse(result["repeatable"])
-        self.assertEqual(self.runtime.load_json(self.out / "records.json")["status"], "stale")
+        records = self.runtime.load_json(self.out / "records.json")
+        self.assertEqual(records["status"], "stale")
+        # Stale replays export no evidence or test runs that could be imported as current.
+        self.assertEqual((records["evidence"], records["test_runs"]), ([], []))
+        self.assertEqual(list((self.out / "evidence").iterdir()), [])
 
     def test_successful_mocked_records_cannot_certify_actual_finding_or_fix(self):
         self.generate()

@@ -28,8 +28,13 @@ def run_file(out_dir, rel):
     pure = PurePosixPath(str(rel))
     if pure.is_absolute() or ".." in pure.parts or not pure.parts or pure.parts[0] != "run":
         return False
-    path = out_dir / pure
-    return path.is_file() and not path.is_symlink() and path.stat().st_size > 0
+    # Every component, not just the last: a symlinked run/ would resolve outside OUT_DIR.
+    path = out_dir
+    for part in pure.parts:
+        path = path / part
+        if path.is_symlink():
+            return False
+    return path.is_file() and path.stat().st_size > 0
 
 
 def visible_text(markup):

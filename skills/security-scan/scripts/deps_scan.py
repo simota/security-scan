@@ -50,6 +50,15 @@ ECOSYSTEM = {"package.json": "npm", "composer.json": "composer", "Gemfile": "bun
              "requirements.txt": "python", "pom.xml": "maven", "build.gradle": "gradle",
              "build.gradle.kts": "gradle"}
 
+def is_requirements(p, suffixes=("txt", "in")):
+    """requirements*.txt, dev-requirements.txt / test_requirements.in, and files under requirements/."""
+    p = Path(p)
+    ext = p.suffix[1:]
+    return ext in suffixes and (re.match(r"^requirements", p.name) is not None
+                                or re.search(r"[-_.]requirements$", p.stem) is not None
+                                or p.parent.name == "requirements")
+
+
 CAT_DEP = "Dependencies and platform"
 CAT_BUILD = "Build and delivery"
 
@@ -125,6 +134,8 @@ def walk(root, not_run=None):
                             "skipped symlink, non-regular or unreadable path"})
 
     for d, dirs, files in os.walk(root, onerror=lambda e: skipped(e.filename or root)):
+        dirs.sort()
+        files.sort()
         kept = []
         for name in dirs:
             if name in SKIP_DIRS or name.startswith(".cache"):
@@ -464,8 +475,17 @@ def isolated_composer_audit(c, root, lock, exe):
 
 # ---------- per-ecosystem static checks ----------
 
+def declares_python_dependencies(text):
+    """A pyproject.toml that only configures tools has nothing to lock."""
+    return re.search(r"^\s*(dependencies|optional-dependencies)\s*=|"
+                     r"^\s*\[(project\.optional-dependencies|tool\.poetry(\.group\.[^\]]+)?\.dependencies|"
+                     r"tool\.pdm\.dev-dependencies|dependency-groups)\]", text, re.M) is not None
+
+
 def check_lockfile(c, p):
     locks = LOCKS.get(p.name)
+    if p.name == "pyproject.toml" and not declares_python_dependencies(read(p)):
+        return
     associated = matching_lockfiles(c, p) if locks else []
     if locks and associated is not None and not associated:
         c.add("Medium", f"{p.name} has no lockfile", p,
@@ -473,26 +493,57 @@ def check_lockfile(c, p):
               fix=f"Commit one of: {', '.join(locks)}")
 
 
-def check_npm(c, p):
+def load_json_object(c, p, tool):
+    """Parse a manifest/lockfile; a non-object or unparseable file is incomplete, not a crash."""
     text = read(p)
     try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
+        value = json.loads(text.lstrip("﻿"))
+    except (ValueError, RecursionError):
+        value = None
+    if not isinstance(value, dict):
+        incomplete(c, tool, p, "unparseable or non-object JSON requires manual review")
+        return text, None
+    return text, value
+
+
+def mapping(value):
+    return value if isinstance(value, dict) else {}
+
+
+NPM_EXTERNAL_SOURCE = re.compile(r"^(git(\+\w+)?:|git@|github:|gitlab:|bitbucket:|gist:|https?:|file:|link:)"
+                                 r"|^[\w.-]+/[\w.-]+(#.*)?$")
+
+
+def npm_floating(spec):
+    """True when any alternative of an npm range has no upper bound."""
+    for alternative in spec.split("||"):
+        parts = alternative.split()
+        if not parts or any(x.lower() in ("*", "x", "latest") for x in parts):
+            return True
+        if (any(x.startswith(">") for x in parts) and not any(x.startswith("<") for x in parts)
+                and " - " not in alternative):
+            return True
+    return False
+
+
+def check_npm(c, p):
+    text, data = load_json_object(c, p, "package.json scan")
+    if data is None:
         return
     for section in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
-        for name, spec in (data.get(section) or {}).items():
-            spec = str(spec)
+        for name, spec in mapping(data.get(section)).items():
+            spec = str(spec).strip()
             ln = line_of(text, f'"{name}"')
-            if re.match(r"^(git(\+\w+)?:|github:|https?:|file:|link:)|^[\w.-]+/[\w.-]+(#.*)?$", spec):
+            if NPM_EXTERNAL_SOURCE.match(spec):
                 c.add("Medium", f"npm dependency {name} is fetched outside the registry ({spec})", p, ln,
                       impact="Bypasses registry integrity and advisory coverage; the source can change",
                       fix="Depend on a published, version-pinned release")
-            elif spec in ("*", "latest", "") or spec.startswith(">") or spec == "x":
+            elif npm_floating(spec):
                 c.add("Medium", f"npm dependency {name} floats to any version ({spec or 'empty'})", p, ln,
                       impact="A newly published malicious or broken release is installed automatically",
                       fix="Use a bounded range and the lockfile")
     for hook in ("preinstall", "install", "postinstall", "prepare"):
-        if hook in (data.get("scripts") or {}):
+        if hook in mapping(data.get("scripts")):
             c.add("Info", f"package.json defines a '{hook}' lifecycle script", p, line_of(text, f'"{hook}"'),
                   impact="Runs automatically on install; review what it executes",
                   fix="Keep it minimal; consider installing with --ignore-scripts in CI", category=CAT_BUILD)
@@ -528,49 +579,72 @@ def check_npm_lock(c, p):
         c.add("Low", f"lockfile resolves packages from non-default host {h}", p, hosts[h],
               impact="Packages come from a registry outside the public one; confirm it is trusted",
               fix="Confirm the host is an approved internal mirror", confidence="Suspected")
-    if "integrity" not in text and p.name == "package-lock.json":
+    if p.name == "package-lock.json" and not re.search(r'"integrity"\s*:', text):
         c.add("Low", "package-lock.json has no integrity hashes", p,
               impact="Tampered tarballs are not detected", fix="Regenerate the lockfile with a current npm")
 
 
+def registry_host(url):
+    try:
+        return (urlsplit(url.strip("'\"")).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
 def check_npmrc(c, p):
     text = read(p)
+    default = {"registry.npmjs.org", "registry.yarnpkg.com"}
     for i, ln in enumerate(text.splitlines(), 1):
-        m = re.match(r"\s*(@[\w-]+:)?registry\s*=\s*(\S+)", ln)
-        if m and "registry.npmjs.org" not in m.group(2):
-            c.add("Info", f".npmrc points {m.group(1) or 'all packages'} at {m.group(2)}", p, i,
+        m = (re.match(r"\s*(@[\w-]+:)?registry\s*=\s*(\S+)", ln)
+             or re.match(r"""\s*()["']?npmRegistryServer["']?\s*:\s*(\S+)""", ln))
+        if m and registry_host(m.group(2)) not in default:
+            c.add("Info", f"{p.name} points {m.group(1) or 'all packages'} at {m.group(2)}", p, i,
                   impact="Confirm the registry is trusted and scoped names cannot be claimed publicly",
                   fix="Scope private registries to your own @scope", category=CAT_BUILD)
-        if re.search(r"_authToken\s*=\s*[^$\s]", ln):
-            c.add("High", ".npmrc contains a literal registry token", p, i,
+        if (re.search(r"(_authToken|_auth|_password)\s*=\s*[^$\s]", ln)
+                or re.match(r"""\s*["']?(npmAuthToken|npmAuthIdent)["']?\s*:\s*["']?[^$\s"']""", ln)):
+            c.add("High", f"{p.name} contains a literal registry credential", p, i,
                   impact="Anyone with repository access can publish or read private packages",
                   fix="Remove it, rotate the token, use an environment variable", category="Secrets")
 
 
 def check_composer(c, p):
-    text = read(p)
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
+    text, data = load_json_object(c, p, "composer.json scan")
+    if data is None:
         return
     if data.get("minimum-stability") in ("dev", "alpha", "beta", "RC") and not data.get("prefer-stable"):
         c.add("Low", f"composer minimum-stability is {data['minimum-stability']} without prefer-stable", p,
               line_of(text, "minimum-stability"), impact="Unstable releases may be installed",
               fix="Set prefer-stable: true or raise minimum-stability")
-    for repo in data.get("repositories") or []:
-        if isinstance(repo, dict) and repo.get("type") in ("vcs", "path", "package", "artifact"):
-            c.add("Low", f"composer repository of type {repo.get('type')}: {repo.get('url', '')}", p,
+    repos = data.get("repositories") or []
+    # Composer accepts both a list and a name-keyed object of repositories.
+    for repo in (repos.values() if isinstance(repos, dict) else repos if isinstance(repos, list) else []):
+        if not isinstance(repo, dict):
+            continue
+        kind = repo.get("type")
+        if kind in ("vcs", "git", "github", "gitlab", "bitbucket", "path", "package", "artifact") or (
+                kind == "composer" and registry_host(str(repo.get("url", ""))) not in ("repo.packagist.org",
+                                                                                      "packagist.org")):
+            c.add("Low", f"composer repository of type {kind}: {repo.get('url', '')}", p,
                   line_of(text, '"repositories"'),
                   impact="Packages outside Packagist lack its advisory and integrity coverage",
                   fix="Prefer published releases; pin references", confidence="Suspected")
-    plugins = (data.get("config") or {}).get("allow-plugins")
+    plugins = mapping(data.get("config")).get("allow-plugins")
     if plugins is True:
         c.add("Medium", "composer allow-plugins is true for every package", p, line_of(text, "allow-plugins"),
               impact="Any dependency's plugin code runs during install",
               fix="List allowed plugins explicitly", category=CAT_BUILD)
     for section in ("require", "require-dev"):
-        for name, spec in (data.get(section) or {}).items():
-            if str(spec).strip() in ("*", "dev-master", "dev-main") or str(spec).startswith("dev-"):
+        for name, spec in mapping(data.get(section)).items():
+            spec = str(spec).strip()
+            unbounded = any(
+                any(x.startswith(">") for x in alt.replace(",", " ").split())
+                and not any(x.startswith("<") for x in alt.replace(",", " ").split())
+                for alt in re.split(r"\|\|?", spec))
+            if (spec in ("*", "") or spec.startswith("dev-") or "@dev" in spec
+                    # Platform constraints (php, ext-*, lib-*) are not installed packages.
+                    or (unbounded and name not in ("php", "php-64bit", "composer-plugin-api")
+                        and not name.startswith(("ext-", "lib-")))):
                 c.add("Medium", f"composer dependency {name} floats ({spec})", p, line_of(text, f'"{name}"'),
                       impact="Unreviewed code is pulled on update", fix="Require a tagged version range")
 
@@ -581,6 +655,11 @@ def check_requirements(c, p):
         s = ln.split("#", 1)[0].strip()
         if not s:
             continue
+        editable = re.match(r"^(-e|--editable)(\s+|=)(.*)$", s)
+        if editable:
+            s = editable.group(3).strip()
+            if not re.match(r"^(git\+|https?://|hg\+|svn\+|bzr\+)", s):
+                continue  # A local editable path is first-party code, not a fetched dependency.
         if s.startswith("--extra-index-url"):
             c.add("Medium", "pip --extra-index-url mixes a second index with PyPI", p, i,
                   impact="A public package can shadow an internal one with the same name",
@@ -588,6 +667,10 @@ def check_requirements(c, p):
         elif s.startswith("--index-url") or s.startswith("-i "):
             c.add("Info", "pip index overridden (see source location)", p, i, impact="Confirm the index is trusted",
                   category=CAT_BUILD)
+        elif re.match(r"^(--find-links|-f)(\s|=)", s):
+            c.add("Medium", "pip --find-links adds a package source beside the index", p, i,
+                  impact="Packages found there can shadow or replace index releases",
+                  fix="Use a single trusted index or pin hashes", category=CAT_BUILD)
         elif s.startswith("-") or s.startswith("."):
             continue
         elif re.match(r"^(git\+|https?://|hg\+|svn\+)", s) or " @ " in s:
@@ -602,7 +685,8 @@ def check_requirements(c, p):
 def check_gemfile(c, p):
     text = read(p)
     for i, ln in enumerate(text.splitlines(), 1):
-        if re.search(r"^\s*gem\s.*(git:|github:|path:)", ln):
+        if (re.search(r"^\s*gem\s.*(\b(git|github|path)\s*:|:(git|github|path)\s*=>)", ln)
+                or re.match(r"""^\s*(git|github|path)\s*\(?\s*['"]""", ln)):
             c.add("Medium", "gem fetched outside rubygems (see source location)", p, i,
                   impact="Bypasses rubygems integrity and advisory coverage", fix="Use a released gem version")
         if re.search(r"^\s*source\s+['\"](?!https://rubygems\.org)", ln):
@@ -612,8 +696,19 @@ def check_gemfile(c, p):
 
 def check_gomod(c, p):
     text = read(p)
+    in_block = False
     for i, ln in enumerate(text.splitlines(), 1):
-        if re.match(r"\s*replace\s", ln) and "=>" in ln and re.search(r"=>\s*\.{1,2}/", ln):
+        code = ln.split("//", 1)[0]
+        if in_block:
+            if code.strip() == ")":
+                in_block = False
+                continue
+        elif re.match(r"\s*replace\s*\(\s*$", code):
+            in_block = True
+            continue
+        elif not re.match(r"\s*replace\s", code):
+            continue
+        if "=>" in code and re.search(r"=>\s*(\.{1,2}/|/|\.{1,2}\s*$)", code):
             c.add("Info", f"go.mod replaces a module with a local path: {ln.strip()}", p, i,
                   impact="Builds depend on code outside module verification", category=CAT_BUILD)
 
@@ -621,7 +716,8 @@ def check_gomod(c, p):
 def check_workflow(c, p):
     text = read(p)
     for i, ln in enumerate(text.splitlines(), 1):
-        m = re.search(r"uses:\s*([^\s#]+)", ln)
+        # Only a YAML `uses:` key; comments and shell text mentioning it are not steps.
+        m = re.match(r"""^\s*(?:-\s+)?["']?uses["']?\s*:\s*([^\s#]+)""", ln)
         if m:
             ref = m.group(1).strip("'\"")
             if ref.startswith("./") or ref.startswith("docker://"):
@@ -635,7 +731,8 @@ def check_workflow(c, p):
                 c.add(sev, f"action {ref} is pinned to a mutable tag, not a commit SHA", p, i, category=CAT_BUILD,
                       impact="A moved or compromised tag changes the code that runs with your secrets",
                       fix="Pin to the full commit SHA and note the version in a comment")
-        if re.search(r"^\s*pull_request_target\s*:", ln) or re.search(r"on:\s*\[?.*pull_request_target", ln):
+        if (re.search(r"""^\s*(?:-\s+)?["']?pull_request_target["']?\s*(:|$)""", ln)
+                or re.search(r"""^\s*["']?on["']?\s*:.*\bpull_request_target\b""", ln)):
             c.add("Medium", "workflow triggers on pull_request_target", p, i, category=CAT_BUILD,
                   confidence="Suspected",
                   impact="Runs with repository secrets on events from forks; dangerous if it checks out PR code",
@@ -663,11 +760,15 @@ def check_workflow(c, p):
 
 def check_dockerfile(c, p):
     text = read(p)
+    stages = set()
     for i, ln in enumerate(text.splitlines(), 1):
-        m = re.match(r"\s*FROM\s+(?:--platform=\S+\s+)?(\S+)", ln, re.I)
+        m = re.match(r"\s*FROM\s+(?:--platform=\S+\s+)?(\S+)(?:\s+AS\s+(\S+))?", ln, re.I)
         if m:
             img = m.group(1)
-            if img.lower() == "scratch" or "$" in img or "@sha256:" in img:
+            earlier_stage = img.lower() in stages
+            if m.group(2):
+                stages.add(m.group(2).lower())
+            if earlier_stage or img.lower() == "scratch" or "$" in img or "@sha256:" in img:
                 continue
             name = img.split("/")[-1]
             if ":" not in name or name.endswith(":latest"):
@@ -681,25 +782,27 @@ def check_dockerfile(c, p):
 
 # ---------- inventory ----------
 
+def packages_list(value):
+    return [x for x in value if isinstance(x, dict)] if isinstance(value, list) else []
+
+
 def inventory_composer_lock(c, p):
-    try:
-        data = json.loads(read(p))
-    except json.JSONDecodeError:
+    _, data = load_json_object(c, p, "composer.lock inventory")
+    if data is None:
         return
-    pkgs = data.get("packages", []) + data.get("packages-dev", [])
+    pkgs = packages_list(data.get("packages")) + packages_list(data.get("packages-dev"))
     c.inventory.append({"ecosystem": "composer", "lockfile": c.rel(p), "packages": len(pkgs),
                         "notable": {x["name"]: x.get("version") for x in pkgs
                                     if x.get("name") in ("laravel/framework", "symfony/http-kernel",
                                                          "guzzlehttp/guzzle", "laravel/sanctum")},
-                        "platform": data.get("platform") or {}})
+                        "platform": mapping(data.get("platform"))})
 
 
 def inventory_npm_lock(c, p):
-    try:
-        data = json.loads(read(p))
-    except json.JSONDecodeError:
+    _, data = load_json_object(c, p, "package-lock.json inventory")
+    if data is None:
         return
-    n = len(data.get("packages") or data.get("dependencies") or {})
+    n = len(mapping(data.get("packages")) or mapping(data.get("dependencies")))
     c.inventory.append({"ecosystem": "npm", "lockfile": c.rel(p), "packages": n})
 
 
@@ -801,7 +904,7 @@ def vuln(c, sev, pkg, version, ids, summary, path, tool, fixed="", refs=None):
           f"{' ' + version if version else ''} ({ids})",
           path, impact=summary or f"Reported by {tool}",
           fix=(f"Upgrade to {fixed}" if fixed else "Upgrade to a fixed version or remove the dependency"))
-    c.findings[-1].update({"package": pkg, "version": version, "lockfile": str(path), "malicious": malicious,
+    c.findings[-1].update({"package": pkg, "version": version, "lockfile": c.rel(path), "malicious": malicious,
                            "references": dedupe_refs(refs or []), "advisory_ids": advisory_ids})
     c.findings[-1] = safe_output(c.findings[-1])
 
@@ -1019,10 +1122,10 @@ def audit_npm(c, root, lock):
     if not exe:
         c.not_run.append({"tool": "npm audit", "reason": "npm not installed"})
         return
-    code, out, err = run([exe, "audit", "--json", "--package-lock-only",
-                          "--include=prod", "--include=dev", "--include=optional",
-                          "--include=peer", "--ignore-scripts", "--package-lock=true",
-                          "--workspaces=null", "--prefix=" + str(lock.parent)], lock.parent)
+    result = isolated_npm_audit(c, lock, exe)
+    if result is None:
+        return
+    code, out, err = result
     data = audit_json(c, "npm audit", lock, code, out)
     if data is None:
         return
@@ -1043,6 +1146,34 @@ def audit_npm(c, root, lock):
         refs = [{"type": "advisory", "url": x.get("url", ""), "title": x.get("title", "")} for x in via]
         vuln(c, v.get("severity", "unknown"), name, "", ids,
              f"{via[0].get('title', '')} (affected: {v.get('range', '')})", lock, "npm audit", fixed, refs)
+
+
+def isolated_npm_audit(c, lock, exe):
+    """Audit a copy of the lock against the public registry with no repo/user npm config.
+
+    A project .npmrc (or inherited npm_config_* variables) could otherwise point
+    the advisory request at a server that answers "no vulnerabilities".
+    """
+    try:
+        with tempfile.TemporaryDirectory(prefix="security-scan-npm-") as tmp:
+            work = Path(tmp)
+            (work / "package-lock.json").write_bytes(lock.read_bytes())
+            manifest = lock.parent / "package.json"
+            if manifest.exists():
+                (work / "package.json").write_bytes(manifest.read_bytes())
+            empty = work / "empty-npmrc"
+            empty.write_text("", encoding="utf-8")
+            env = {k: v for k, v in os.environ.items() if not k.lower().startswith("npm_config_")}
+            env.update({"npm_config_cache": str(work / "cache"), "npm_config_update_notifier": "false"})
+            return run([exe, "audit", "--json", "--package-lock-only",
+                        "--include=prod", "--include=dev", "--include=optional",
+                        "--include=peer", "--ignore-scripts", "--package-lock=true",
+                        "--registry=https://registry.npmjs.org/",
+                        "--userconfig=" + str(empty), "--globalconfig=" + str(empty),
+                        "--workspaces=null", "--prefix=" + str(work)], work, env=env)
+    except (OSError, ValueError):
+        incomplete(c, "npm audit", lock, "could not prepare isolated audit input")
+        return None
 
 
 def audit_simple(c, root, tool, cmd, cwd, parse, target=None):
@@ -1152,7 +1283,7 @@ def audits(c, root, files):
                     "bun.lock": "bun audit", "bun.lockb": "bun audit"}[p.name]
             c.not_run.append({"tool": tool, "reason": f"{c.rel(p)} not audited; run it in that directory "
                                                       "or install osv-scanner"})
-        elif re.match(r"^requirements.*\.txt$", p.name) and p not in covered:
+        elif is_requirements(p, ("txt",)) and p not in covered:
             audit_requirements(c, root, p)
         elif p.name in ("poetry.lock", "uv.lock", "Pipfile.lock", "pdm.lock") and p not in covered:
             c.not_run.append({"tool": "Python lockfile audit", "reason": f"{c.rel(p)}: requires osv-scanner; "
@@ -1162,10 +1293,11 @@ def audits(c, root, files):
                        "automatic Cargo fallback is disabled for read-only safety; requires osv-scanner")
         elif p.name == "Gemfile.lock" and p not in covered:
             c.not_run.append({"tool": "bundle-audit", "reason": "run `bundle-audit check --update` manually; no JSON parser here"})
-        elif p.name == "go.sum" and p.parent / "go.mod" not in covered:
-            c.not_run.append({"tool": "govulncheck", "reason": "run `govulncheck ./...` in the module manually"})
+        elif p.name == "go.sum":
+            if p.parent / "go.mod" not in covered:
+                c.not_run.append({"tool": "govulncheck", "reason": "run `govulncheck ./...` in the module manually"})
         elif p not in covered and (p.name in KNOWN_LOCKFILES or p.name in ECOSYSTEM
-                                    or re.match(r"^requirements.*\.in$", p.name)):
+                                    or is_requirements(p, ("in",))):
             if p.name in LOCKS:
                 associated = matching_lockfiles(c, p)
                 if associated is None or any(lock in files for lock in associated):
@@ -1197,43 +1329,39 @@ def lock_context(lock):
     """For a lockfile: runtime/dev package sets, direct dependencies, and code needles per package."""
     ctx = {"runtime": set(), "dev": set(), "direct": set(), "needles": {}}
     lock = Path(lock)
-    if lock.name == "composer.lock":
+    def load(path):
         try:
-            data = json.loads(read(lock))
-        except json.JSONDecodeError:
-            return ctx
+            value = json.loads(read(path).lstrip("\ufeff"))
+        except (ValueError, RecursionError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    if lock.name == "composer.lock":
+        data = load(lock)
         for key, bucket in (("packages", "runtime"), ("packages-dev", "dev")):
-            for x in data.get(key, []):
+            for x in packages_list(data.get(key)):
+                if not isinstance(x.get("name"), str):
+                    continue
                 ctx[bucket].add(x["name"])
                 ns = []
                 for kind in ("psr-4", "psr-0"):
-                    ns += [n.rstrip("\\") for n in ((x.get("autoload") or {}).get(kind) or {}) if n.strip("\\")]
+                    ns += [n.rstrip("\\") for n in mapping(mapping(x.get("autoload")).get(kind)) if n.strip("\\")]
                 ctx["needles"][x["name"]] = [n + "\\" for n in ns]
-        try:
-            man = json.loads(read(lock.parent / "composer.json"))
-            ctx["direct"] = set((man.get("require") or {})) | set((man.get("require-dev") or {}))
-        except json.JSONDecodeError:
-            pass
+        man = load(lock.parent / "composer.json")
+        ctx["direct"] = set(mapping(man.get("require"))) | set(mapping(man.get("require-dev")))
         return ctx
     # npm-family lockfiles: direct dependencies and dev flags from package.json
-    try:
-        man = json.loads(read(lock.parent / "package.json"))
-    except json.JSONDecodeError:
-        man = {}
-    prod = set(man.get("dependencies") or {}) | set(man.get("optionalDependencies") or {})
-    dev = set(man.get("devDependencies") or {})
+    man = load(lock.parent / "package.json")
+    prod = set(mapping(man.get("dependencies"))) | set(mapping(man.get("optionalDependencies")))
+    dev = set(mapping(man.get("devDependencies")))
     ctx["direct"] = prod | dev
     ctx["runtime"] |= prod
     ctx["dev"] |= dev
     if lock.name == "package-lock.json":
-        try:
-            data = json.loads(read(lock))
-            for k, v in (data.get("packages") or {}).items():
-                name = k.rsplit("node_modules/", 1)[-1]
-                if name:
-                    (ctx["dev"] if v.get("dev") else ctx["runtime"]).add(name)
-        except json.JSONDecodeError:
-            pass
+        for k, v in mapping(load(lock).get("packages")).items():
+            name = k.rsplit("node_modules/", 1)[-1]
+            if name and isinstance(v, dict):
+                (ctx["dev"] if v.get("dev") else ctx["runtime"]).add(name)
     return ctx
 
 
@@ -1248,7 +1376,7 @@ def triage(c, root):
     texts = source_index(root)
     ctxs = {}
     for f in deps:
-        lock = f["lockfile"]
+        lock = str(Path(root) / f["lockfile"])
         ctx = ctxs.setdefault(lock, lock_context(lock))
         name = f["package"]
         if name in ctx["dev"] and name not in ctx["runtime"]:
@@ -1298,7 +1426,7 @@ def scan(root, audit):
             check_npmrc(c, p)
         elif n == "composer.json":
             check_composer(c, p)
-        elif re.match(r"^requirements.*\.(txt|in)$", n):
+        elif is_requirements(p):
             check_requirements(c, p)
         elif n == "Gemfile":
             check_gemfile(c, p)
@@ -1306,7 +1434,8 @@ def scan(root, audit):
             check_gomod(c, p)
         elif n.startswith("Dockerfile") or n.endswith(".Dockerfile"):
             check_dockerfile(c, p)
-        elif p.suffix in (".yml", ".yaml") and ".github/workflows" in str(p).replace(os.sep, "/"):
+        elif p.suffix in (".yml", ".yaml") and (".github/workflows" in str(p).replace(os.sep, "/")
+                                                or n in ("action.yml", "action.yaml")):
             check_workflow(c, p)
         if n == "composer.lock":
             inventory_composer_lock(c, p)
@@ -1320,7 +1449,11 @@ def scan(root, audit):
     else:
         c.not_run.append({"tool": "vulnerability audit", "reason": "not requested (--audit)"})
     rank = {"High": 0, "Medium": 1, "Low": 2, "Info": 3}
-    c.findings.sort(key=lambda f: (rank[f["severity"]], f["location"]))
+    def location_key(f):
+        path, _, line = f["location"].rpartition(":")
+        return (path, int(line)) if path and line.isdigit() else (f["location"], 0)
+
+    c.findings.sort(key=lambda f: (rank[f["severity"]], location_key(f)))
     for i, f in enumerate(c.findings, 1):
         f["id"] = f"D-{i:03d}"
     return safe_output({"inventory": c.inventory, "findings": c.findings, "not_run": c.not_run})
@@ -1351,14 +1484,16 @@ def merge_into(path, result, audit=None):
             f.setdefault("validation", {"verdict": "Unverified", "method": "auto",
                                         "evidence": "Re-scan: previous manual review needs revalidation."})
     data["findings"] = [f for f in data.get("findings", []) if not str(f.get("id", "")).startswith("D-")]
-    data["findings"] += result["findings"]
-    lim = [x for x in data.get("limitations", []) if not x.startswith("Dependency audit not run:")]
-    lim += [f"Dependency audit not run: {n['tool']} - {n['reason']}" for n in result["not_run"]]
+    # Sanitize only what this scan writes: other findings (for example an F-*
+    # request URL that is the attack payload) are the assessor's record.
+    data["findings"] += safe_output(result["findings"])
+    lim = [x for x in data.get("limitations", []) if not str(x).startswith("Dependency audit not run:")]
+    lim += safe_output([f"Dependency audit not run: {n['tool']} - {n['reason']}" for n in result["not_run"]])
     data["limitations"] = lim
     # contract_check.py compares this with the D-* count to reject hand-written D-* findings.
     data["dependency_scan"] = {"tool": "deps_scan.py", "audit": audit,
                                "findings": len(result["findings"]), "not_run": len(result["not_run"])}
-    Path(path).write_text(json.dumps(safe_output(data), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def main(argv=None):

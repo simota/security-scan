@@ -19,9 +19,11 @@ import sys
 
 SKILL = Path(__file__).resolve().parents[1]
 OUTPUTS = {"findings.json", "deps.json", "dashboard.html", "assessment.html", "assessment.pdf", "evidence"}
-CODE_ID = re.compile(r"^F-(\d{3})$")
-DEP_ID = re.compile(r"^D-\d{3}$")
-LOCATION = re.compile(r"^[^\s:]+:\d+(?:-\d+)?$")
+# Used with fullmatch: ASCII digits only and no trailing newline. Paths may
+# contain spaces (render.py accepts them) but not control characters.
+CODE_ID = re.compile(r"F-([0-9]{3})")
+DEP_ID = re.compile(r"D-[0-9]{3}")
+LOCATION = re.compile(r"[^:\s\x00-\x1f\x7f](?:[^:\x00-\x1f\x7f]*[^:\s\x00-\x1f\x7f])?:[0-9]+(?:-[0-9]+)?")
 VERDICTS = {"Valid", "Likely", "Unverified", "Unlikely", "FalsePositive", "NotApplicable"}
 CODE_FIELDS = ("actor", "request", "impact", "fix")
 
@@ -45,11 +47,17 @@ def check(data, out_dir, pdf=True, allow=()):
     problems = []
     add = problems.append
     meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
-    findings = [f for f in data.get("findings", []) if isinstance(f, dict)]
+    if not isinstance(data.get("findings"), list):
+        add("findings: required list")
+    findings = [f for f in data.get("findings") or [] if isinstance(f, dict)]
+    perspectives = data.get("perspectives") if isinstance(data.get("perspectives"), list) else []
+
+    def commit(value):
+        return value.lower() if isinstance(value, str) else value
 
     if data.get("schema_version") != 2 or not isinstance(data.get("assessment"), dict):
         add("record: schema_version 2 with an assessment pin is required (run evidence_capture.py)")
-    elif meta.get("commit") != data["assessment"].get("commit"):
+    elif commit(meta.get("commit")) != commit(data["assessment"].get("commit")):
         add("record: meta.commit must equal assessment.commit")
     for key in ("project", "date", "assessor"):
         if blank(meta.get(key)):
@@ -58,12 +66,12 @@ def check(data, out_dir, pdf=True, allow=()):
     ids = [str(f.get("id", "")) for f in findings]
     for i in sorted({i for i in ids if ids.count(i) > 1}):
         add(f"{i}: duplicate id")
-    code = [f for f in findings if CODE_ID.match(str(f.get("id", "")))]
-    deps = [f for f in findings if DEP_ID.match(str(f.get("id", "")))]
+    code = [f for f in findings if CODE_ID.fullmatch(str(f.get("id", "")))]
+    deps = [f for f in findings if DEP_ID.fullmatch(str(f.get("id", "")))]
     for f in findings:
         if f not in code and f not in deps:
             add(f"{f.get('id')}: ids are F-NNN (code findings) or D-NNN (deps_scan.py only)")
-    numbers = sorted(int(CODE_ID.match(f["id"]).group(1)) for f in code)
+    numbers = sorted(int(CODE_ID.fullmatch(f["id"]).group(1)) for f in code)
     if numbers != list(range(1, len(numbers) + 1)):
         add("F-*: number code findings F-001..F-%03d without gaps" % len(numbers))
 
@@ -75,13 +83,13 @@ def check(data, out_dir, pdf=True, allow=()):
             "never hand-write, merge or split D-* findings")
 
     names = perspective_names()
-    recorded = [p.get("name") for p in data.get("perspectives", []) if isinstance(p, dict)]
+    recorded = [p.get("name") for p in perspectives if isinstance(p, dict)]
     for name in names:
         if recorded.count(name) != 1:
             add(f"perspectives: record '{name}' exactly once (findings, N/A + reason, or Not checked + need)")
     for name in sorted({str(n) for n in recorded} - set(names)):
         add(f"perspectives: '{name}' is not a name from reference/perspectives.md")
-    for p in data.get("perspectives", []):
+    for p in perspectives:
         if isinstance(p, dict) and p.get("name") in names and blank(p.get("result")):
             add(f"perspectives: '{p['name']}' has no result")
 
@@ -89,7 +97,7 @@ def check(data, out_dir, pdf=True, allow=()):
         fid = f["id"]
         if f.get("category") not in names:
             add(f"{fid}: category must be a perspective name")
-        if blank(f.get("location")) or not LOCATION.match(f["location"]):
+        if blank(f.get("location")) or not LOCATION.fullmatch(f["location"]):
             add(f"{fid}: location must be path:line or path:start-end")
         for key in CODE_FIELDS:
             if blank(f.get(key)):
@@ -100,7 +108,8 @@ def check(data, out_dir, pdf=True, allow=()):
         if not isinstance(f.get("verification"), dict):
             add(f"{fid}: structured verification (four claims, falsification) is required")
 
-    present = {p.name for p in out_dir.iterdir()}
+    # Hidden entries (.DS_Store and the like) are file-manager noise, not outputs.
+    present = {p.name for p in out_dir.iterdir() if not p.name.startswith(".")}
     expected = {"findings.json", "dashboard.html", "assessment.html"} | ({"assessment.pdf"} if pdf else set())
     for name in sorted(expected - present):
         add(f"outputs: {name} missing; run render.py findings.json --out {out_dir}")
@@ -120,6 +129,9 @@ def main(argv=None):
         data = json.loads((a.out_dir / "findings.json").read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             raise ValueError("findings.json must hold a JSON object")
+    except RecursionError:
+        print("contract_check.py: findings.json nesting is too deep", file=sys.stderr)
+        return 2
     except (OSError, ValueError) as exc:
         print(f"contract_check.py: {exc}", file=sys.stderr)
         return 2
@@ -129,7 +141,7 @@ def main(argv=None):
     if problems:
         print(f"contract_check: {len(problems)} violation(s)", file=sys.stderr)
         return 1
-    print(f"contract ok - {len(data.get('findings', []))} findings, schema 2, perspectives complete")
+    print(f"contract ok - {len(data['findings'])} findings, schema 2, perspectives complete")
     return 0
 
 

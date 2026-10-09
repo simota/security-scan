@@ -71,7 +71,7 @@ two stdlib `tomllib` ownership tests, which run on Python 3.12. For the required
 ```sh
 python3 -m venv /tmp/security-scan-ci-venv
 . /tmp/security-scan-ci-venv/bin/activate
-python -m pip install --only-binary=:all: -r scripts/ci/requirements.txt
+python -m pip install --only-binary=:all: --require-hashes -r scripts/ci/requirements.txt
 # Debian/Ubuntu: install Poppler and Japanese fonts if they are not present.
 sudo apt-get install --yes --no-install-recommends fonts-noto-cjk poppler-utils
 fc-cache -f
@@ -102,7 +102,11 @@ verified against their official release repositories:
 - [actions/upload-artifact v7.0.1](https://github.com/actions/upload-artifact/commit/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a)
 
 CI-only Python dependencies and all their runtime transitive dependencies have
-exact versions in `scripts/ci/requirements.txt`, verified against PyPI:
+exact versions and the SHA-256 hash of every wheel PyPI publishes for that
+version in `scripts/ci/requirements.txt`, installed with `--require-hashes`, so
+a file added to an existing release cannot be installed. When updating a
+version, replace its hash list from the release's PyPI JSON
+(`https://pypi.org/pypi/<name>/<version>/json`, every `bdist_wheel` digest):
 
 - [Playwright 1.62.0](https://pypi.org/project/playwright/1.62.0/)
 - [pyee 13.0.1](https://pypi.org/project/pyee/13.0.1/)
@@ -117,7 +121,8 @@ exact browser identification/version match to that list and records the
 installed `google-chrome-stable` package version as evidence without assuming a
 Debian revision suffix. It records SHA-256 hashes of the package wrapper and browser executable in
 the synthetic evidence. No alternative browser is downloaded or installed.
-Playwright provides the pinned Python API and OS-library installation only.
+Playwright provides only the pinned Python API; no Playwright browser or
+OS-dependency installation runs.
 
 This is an explicit, bounded image-version guard rather than a reproducible
 browser archive install. Unknown versions still fail. The selected distribution

@@ -5,7 +5,7 @@
 #   make status    show what is installed, per host
 #   make check     verify the skill is self-contained and internally consistent
 #   make deps      dependency + supply-chain scan of TARGET (AUDIT=1 for advisories)
-#   make demo      render examples/findings.sample.json into $(DEMO_OUT)
+#   make demo      render examples/findings.sample.ja.json (LANG_OUT=en: findings.sample.json) into $(DEMO_OUT)
 #
 # A host that is not installed is skipped and named. Narrowing is explicit:
 #
@@ -25,9 +25,10 @@ PROJECT ?=
 CODEX_HOME ?= $(HOME)/.codex
 AGY_HOME   ?= $(HOME)/.gemini/antigravity-cli
 
-tgt_claude := $(HOME)/.claude|$(HOME)/.claude/skills
-tgt_codex  := $(CODEX_HOME)|$(CODEX_HOME)/skills
-tgt_agy    := $(AGY_HOME)|$(AGY_HOME)/skills
+# Each target is one quoted 'guard|dir' word, so paths may contain spaces.
+tgt_claude := '$(HOME)/.claude|$(HOME)/.claude/skills'
+tgt_codex  := '$(CODEX_HOME)|$(CODEX_HOME)/skills'
+tgt_agy    := '$(AGY_HOME)|$(AGY_HOME)/skills'
 
 UNKNOWN := $(filter-out claude codex agy,$(AGENT))
 ifneq ($(UNKNOWN),)
@@ -35,15 +36,17 @@ $(error unknown AGENT '$(UNKNOWN)' - use claude, codex or agy, or set SKILLS_DIR
 endif
 
 ifneq ($(SKILLS_DIR),)
-TARGETS := $(SKILLS_DIR)|$(SKILLS_DIR)
+QTARGETS := '$(SKILLS_DIR)|$(SKILLS_DIR)'
+WHERE    := SKILLS_DIR=$(SKILLS_DIR)
 else ifneq ($(PROJECT),)
-TARGETS := $(PROJECT)|$(PROJECT)/.claude/skills
+QTARGETS := '$(PROJECT)|$(PROJECT)/.claude/skills'
+WHERE    := PROJECT=$(PROJECT)
 else
-TARGETS := $(sort $(foreach a,$(AGENT),$(tgt_$(a))))
+QTARGETS := $(foreach a,$(sort $(AGENT)),$(tgt_$(a)))
+WHERE    := $(AGENT)
 endif
-QTARGETS := $(foreach t,$(TARGETS),'$(t)')
 
-DOCS := README.md skills/$(NAME)/*.md skills/$(NAME)/reference/*.md
+DOCS := README.md AUDIT_SAFETY.md docs/*.md skills/$(NAME)/*.md skills/$(NAME)/reference/*.md skills/$(NAME)/templates/*.md
 
 DEMO_OUT ?= $(or $(TMPDIR),/tmp)/$(NAME)-demo
 LANG_OUT ?= ja
@@ -56,10 +59,11 @@ help: ## list targets
 	@echo "$(NAME) - skill install"
 	@echo
 	@grep -E '^[a-z-]+:.*## ' $(lastword $(MAKEFILE_LIST)) \
-	  | awk -F':.*## ' '{printf "  %-8s %s\n", $$1, $$2}'
+	  | awk -F':.*## ' '{printf "  %-10s %s\n", $$1, $$2}'
 	@echo
 	@echo "  skill:  $(SKILL)"
-	@echo "  vars:   AGENT PROJECT SKILLS_DIR DEMO_OUT LANG_OUT NO_PDF"
+	@echo "  vars:   AGENT PROJECT SKILLS_DIR CODEX_HOME AGY_HOME TARGET AUDIT OUT"
+	@echo "          DEMO_OUT DEMO_INPUT LANG_OUT NO_PDF PYTHON"
 
 link: ## symlink the skill into every installed host's skills dir
 	@n=0; \
@@ -75,7 +79,7 @@ link: ## symlink the skill into every installed host's skills dir
 	  mkdir -p "$$dir" && ln -s "$(SKILL)" "$$d" || exit 1; \
 	  echo "linked   $$d -> $(SKILL)"; n=$$((n+1)); \
 	done; \
-	if [ $$n -eq 0 ]; then echo "nothing linked - no skills directory found for: $(AGENT)" >&2; exit 1; fi; \
+	if [ $$n -eq 0 ]; then echo "nothing linked - no skills directory found for: $(WHERE)" >&2; exit 1; fi; \
 	echo "invoke it with:  security-scan   (or /security-scan in a slash-command harness)"
 
 unlink: ## remove the symlinks this Makefile created
@@ -106,13 +110,7 @@ test: ## run offline regression tests (no external audit commands)
 
 check: test ## verify the skill is self-contained and internally consistent
 	@cd "$(REPO)" || exit 1; fail=0; \
-	misses=$$( \
-	for f in $(DOCS); do \
-	  grep -ohE '`(reference|scripts)/[A-Za-z][A-Za-z0-9._-]*`' "$$f" | tr -d '`' | sort -u | while read -r ref; do \
-	    [ -f "$(SKILL)/$$ref" ] || echo "MISS $$f cites $$ref, which does not exist"; \
-	  done; \
-	done); \
-	if [ -n "$$misses" ]; then echo "$$misses" >&2; fail=1; fi; \
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) scripts/ci/check_doc_refs.py || fail=1; \
 	for f in "$(SKILL)"/reference/*.md; do \
 	  [ -e "$$f" ] || continue; b=$$(basename "$$f"); \
 	  grep -q "$$b" "$(SKILL)/SKILL.md" || { echo "MISS reference/$$b exists but SKILL.md never names it" >&2; fail=1; }; \
@@ -135,8 +133,8 @@ check: test ## verify the skill is self-contained and internally consistent
 	    || { echo "MISS render.py fails on $$sample" >&2; fail=1; }; \
 	done; \
 	rm -rf "$$out"; \
-	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) "$(SKILL)/scripts/deps_scan.py" "$(REPO)" >/dev/null 2>&1 \
-	  || { echo "MISS deps_scan.py fails on this repository" >&2; fail=1; }; \
+	err=$$(PYTHONDONTWRITEBYTECODE=1 $(PYTHON) "$(SKILL)/scripts/deps_scan.py" "$(REPO)" 2>&1 >/dev/null) \
+	  || { echo "$$err" >&2; echo "MISS deps_scan.py fails on this repository" >&2; fail=1; }; \
 	[ $$fail -eq 0 ] && echo "check ok - $$(ls "$(SKILL)"/reference/*.md | wc -l | tr -d ' ') reference files cited and headed, sample renders, deps_scan runs"; \
 	exit $$fail
 

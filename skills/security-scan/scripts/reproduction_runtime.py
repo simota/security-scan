@@ -4,6 +4,7 @@ This source is copied into each generated entrypoint. Always use Python -I.
 It exercises a MODEL, not the application's real authorization boundary.
 """
 import argparse
+from contextlib import closing
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -207,6 +208,8 @@ def scratch_path(bundle, manifest, required=False):
 
 
 def connection(scratch, readonly=False):
+    # Callers close it: sqlite3's own context manager only commits, and an open
+    # handle would keep Windows from deleting the fixture during cleanup.
     path = safe_path(scratch / "fixture.sqlite3", False)
     # URI path comes only from an owned, fixed local path; escape URI syntax.
     if readonly:
@@ -218,7 +221,7 @@ def seed(bundle, manifest):
     scratch = scratch_path(bundle, manifest)
     rows = fixture_data(manifest)
     if scratch.exists():
-        with connection(scratch, True) as db:
+        with closing(connection(scratch, True)) as db, db:
             actual = db.execute("SELECT id, owner, value FROM resources ORDER BY id").fetchall()
         expected = sorted((r["id"], r["owner"], r["value"]) for r in rows)
         if actual != expected:
@@ -228,7 +231,7 @@ def seed(bundle, manifest):
     # Reserve only our fixed filename, never open or overwrite an existing DB.
     fd = os.open(str(scratch / "fixture.sqlite3"), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     os.close(fd)
-    with connection(scratch) as db:
+    with closing(connection(scratch)) as db, db:
         db.execute("CREATE TABLE resources (id TEXT PRIMARY KEY, owner TEXT NOT NULL, value TEXT NOT NULL)")
         db.executemany("INSERT INTO resources VALUES (?, ?, ?)", [(r["id"], r["owner"], r["value"]) for r in rows])
     write_new(scratch / "owner.json", {**owner_record(manifest), "database_sha256": digest(read_bytes(scratch / "fixture.sqlite3"))})
@@ -249,7 +252,7 @@ def cleanup(bundle, manifest):
 def reproduce(bundle, manifest):
     scratch = scratch_path(bundle, manifest, required=True)
     rows = fixture_data(manifest)
-    with connection(scratch, True) as db:
+    with closing(connection(scratch, True)) as db, db:
         actual = db.execute("SELECT id, owner, value FROM resources ORDER BY id").fetchall()
         if actual != sorted((r["id"], r["owner"], r["value"]) for r in rows):
             raise BundleError("Fixture contents changed")

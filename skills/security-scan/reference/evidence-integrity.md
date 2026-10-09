@@ -77,7 +77,10 @@ with `diff_sha256`, not a command that cleans or rewrites the user's checkout.
 
 Supported Git layouts are a normal checkout with a `.git` directory or a bare
 object repository. Linked worktrees/`.git` files, alternate object stores, grafts
-and promisor packs are unsupported. Missing objects are not fetched. The verifier
+and promisor packs are unsupported; `evidence_capture.py` refuses them too, and
+refuses a subdirectory of a checkout, so it never pins evidence the verifier
+cannot match. Hardlinked object files are refused, so a `git clone` of a local
+path needs `--no-hardlinks`. Missing objects are not fetched. The verifier
 uses `/usr/bin/git`, not a repository-supplied executable or a target `PATH`.
 It requires POSIX `dir_fd`/no-follow filesystem operations; an unsupported platform
 is reported rather than silently weakening checks.

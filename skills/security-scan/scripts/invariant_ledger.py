@@ -159,7 +159,7 @@ def ledger_html(data, lang="en"):
         unit_head = "".join(f"<th scope='col'>{esc(L[k])}</th>" for k in ("unit", "inputs", "rows", "blank", "state"))
         unit_rows = "".join(
             f"<tr><td>{esc(u['unit'])}</td><td>{u['record_inputs']}</td><td>{u['trace_rows']}</td>"
-            f"<td>{u['blank_cells']}</td><td>{esc(L['closed'] if u['trace_rows'] == u['record_inputs'] and not u['blank_cells'] else L['open'])}</td></tr>"
+            f"<td>{u['blank_cells']}</td><td>{esc(L['closed'] if u.get('closed') else L['open'])}</td></tr>"
             for u in units)
         out += f"<h4>{esc(L['units'])}</h4><table class='coverage'><thead><tr>{unit_head}</tr></thead><tbody>{unit_rows}</tbody></table>"
     return out + "</section>"

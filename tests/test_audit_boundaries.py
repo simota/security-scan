@@ -70,7 +70,15 @@ class AuditBoundaryTests(unittest.TestCase):
         self.assertIn("--ignore-scripts", argv)
         self.assertIn("--workspaces=null", argv)
         self.assertIn("--package-lock=true", argv)
-        self.assertIn("--prefix=" + str(self.root), argv)
+        # The audit runs on a copy: neither the repository's .npmrc nor inherited
+        # npm_config_* variables can redirect the advisory registry.
+        self.assertNotIn("--prefix=" + str(self.root), argv)
+        self.assertIn("--registry=https://registry.npmjs.org/", argv)
+        self.assertTrue(any(a.startswith("--userconfig=") for a in argv))
+        self.assertTrue(any(a.startswith("--globalconfig=") for a in argv))
+        env = run.call_args.kwargs["env"]
+        self.assertFalse([k for k in env if k.lower().startswith("npm_config_")
+                          and k.lower() not in ("npm_config_cache", "npm_config_update_notifier")])
         self.assertFalse(c.not_run)
 
     def test_npm_shared_workspaces_are_explicitly_incomplete_without_invoking_npm(self):

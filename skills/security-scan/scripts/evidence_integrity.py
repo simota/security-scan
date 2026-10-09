@@ -28,6 +28,11 @@ import sys
 import tempfile
 import time
 
+# Sibling modules (verification) must import under `python3 -I` / PYTHONSAFEPATH too.
+_HERE = str(Path(__file__).resolve().parent)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
 RECEIPT_VERSION = 1
 GIT_BINARY = "/usr/bin/git"  # Never resolve a program through target PATH/config.
 MAX_FILE_BYTES = 16 * 1024 * 1024
@@ -204,10 +209,10 @@ class _Root:
                 raise EvidenceError("unsafe_root")
             absolute = os.path.abspath(raw)
             parts = absolute.split("/")[1:]
-            if any(p in (".", "..") for p in raw.split("/")):
-                # A literal '.' root is convenient and still unambiguous.
-                if raw != ".":
-                    raise EvidenceError("unsafe_root")
+            if any(p == ".." for p in raw.split("/")):
+                # '.' is lexical and unambiguous ('./out'); '..' could cross a
+                # symlinked parent after lexical normalization.
+                raise EvidenceError("unsafe_root")
             fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
             self.chain.append((None, None, fd, _directory_snapshot(os.fstat(fd))))
             for part in filter(None, parts):
