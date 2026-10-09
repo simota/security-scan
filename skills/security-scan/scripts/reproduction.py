@@ -87,7 +87,7 @@ def build_manifest(findings_path, finding_id, plan, evidence_root=None, evidence
     data = runtime.parse_json(raw)
     _validate_base(data)
     finding = _finding(data, finding_id)
-    if finding.get("category", "").lower() == "secrets":
+    if str(finding.get("category", "")).strip().casefold() == "secrets":
         raise BundleError("Secret findings require a manually reviewed, redacted test design")
     evidence = {item["id"]: item for item in data.get("evidence", [])}
     selected = []
@@ -179,7 +179,9 @@ def export_records(manifest, result, out):
                "limitation": LIMITATION + " Manual review/import only; never change a finding verdict automatically."}
     evidence_dir = out / "evidence"
     evidence_dir.mkdir(mode=0o700)
-    for cycle in result.get("cycles", []):
+    # A stale, failed or timed-out replay is not current evidence: export nothing.
+    cycles = [] if result["status"] in ("stale", "error", "timeout", "unsupported") else result.get("cycles", [])
+    for cycle in cycles:
         for case in cycle.get("reproduction", {}).get("cases", []):
             identifier = "repro-{}-{}-{}-{}".format(manifest["bundle_id"][:12], cycle["cycle"], case["phase"], case["role"])
             pin = {"commit": manifest["assessment"]["commit"] if case["phase"] == "before" else manifest["plan"]["after"]["commit"]}

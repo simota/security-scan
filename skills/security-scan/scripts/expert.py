@@ -41,6 +41,11 @@ def _list(value, where, error_type):
     return value
 
 
+def _verdict(finding):
+    validation = finding.get("validation")
+    return validation.get("verdict") if isinstance(validation, dict) else None
+
+
 def _text(record, key, where, error_type, required=True):
     value = record.get(key)
     if value is None and not required:
@@ -166,8 +171,7 @@ def derive_expert(data, error_type=ValueError, integrity=None):
 
     findings = {f.get("id"): f for f in data.get("findings", []) if isinstance(f, dict)}
     code = {fid: f for fid, f in findings.items() if isinstance(fid, str) and CODE_ID.match(fid)}
-    active = {fid: f for fid, f in code.items()
-              if (f.get("validation") or {}).get("verdict") not in EXCLUDED}
+    active = {fid: f for fid, f in code.items() if _verdict(f) not in EXCLUDED}
     serious = [fid for fid, f in active.items() if f.get("severity") in ("High", "Medium")]
     # Replay once and use only the effective round for stage-role gates. Retained
     # journal actors still participated in the assessment and cannot perform QA.
@@ -274,8 +278,9 @@ def derive_expert(data, error_type=ValueError, integrity=None):
             _text(item, "location", f"{where}.dispositions[{j}]", error_type)
             result = _text(item, "result", f"{where}.dispositions[{j}]", error_type)
             _text(item, "reason", f"{where}.dispositions[{j}]", error_type)
-            target = result.split(":", 1)[1] if ":" in result else ""
-            if result.split(":", 1)[0] not in ("finding", "same", "safe"):
+            kind, _, target = result.partition(":")
+            # finding:/same: must name a finding; safe takes no target.
+            if kind not in ("finding", "same", "safe") or (kind == "safe") == bool(target):
                 raise error_type(f"{where}.dispositions[{j}].result: finding:F-NNN, same:F-NNN or safe")
             if result.startswith(("finding:", "same:")) and target not in code:
                 gap(f"variant_unknown_finding:{target or result}")
@@ -375,7 +380,7 @@ def derive_expert(data, error_type=ValueError, integrity=None):
         if cross_engine and len(panel_engines) < 2:
             gap(f"panel_monoculture:{fid}")
         refuted = results.count("refuted")
-        verdict = (code.get(fid, {}).get("validation") or {}).get("verdict")
+        verdict = _verdict(code.get(fid, {}))
         if refuted * 2 > len(results) and verdict not in EXCLUDED and not _text(p, "resolution", where, error_type, False).strip():
             gap(f"panel_refutation_unresolved:{fid}")
     for fid in serious:
@@ -388,7 +393,10 @@ def derive_expert(data, error_type=ValueError, integrity=None):
         rater = participant(c, "rater", f"expert.calibration[{i}]")
         if not spawned(rater, "rater"):
             gap(f"rater_not_spawned:{rater}")
-        raters[rater] = calibrated(c.get("scores"))
+        # A failed rater is replaced, never re-scored until the key passes.
+        if rater in raters:
+            gap(f"rater_recalibrated:{rater}")
+        raters[rater] = raters.get(rater, True) and calibrated(c.get("scores"))
     ratings = {}
     for i, r in enumerate(_list(record.get("ratings", []), "expert.ratings", error_type)):
         where = f"expert.ratings[{i}]"
@@ -398,6 +406,10 @@ def derive_expert(data, error_type=ValueError, integrity=None):
         _text(r, "reason", where, error_type)
         if severity not in SEVERITY_ORDER:
             raise error_type(f"{where}.severity: one of {SEVERITY_ORDER}")
+        if fid not in code:
+            gap(f"rating_unknown_finding:{fid}")
+        elif rater in ratings.get(fid, {}):
+            gap(f"rating_duplicate:{fid}:{rater}")
         if not raters.get(rater):
             gap(f"rater_not_calibrated:{rater}")
         elif rater in discoverers.get(fid, set()) or rater == verifiers.get(fid):
