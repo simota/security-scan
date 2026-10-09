@@ -117,6 +117,7 @@ the run continues.
 | Chat summary | First line status and counts, verified findings by severity, decisions for a human |
 | `findings.json` | The single source every other output is rendered from (`deps.json` and `evidence/` support it) |
 | `dashboard.html` | Interactive, self-contained dashboard of the findings and perspective coverage |
+| `assessment.html` | The assessment document, print-styled for A4 (the source of the PDF) |
 | `assessment.pdf` | The formal assessment document: cover, summary, overview, perspectives, findings, sound items, limitations, next steps |
 
 Skip the files when only a checklist was asked for. Render them in the

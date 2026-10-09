@@ -145,6 +145,9 @@ verified merely because it contains an evidence string.
 `meta.project`, `meta.date` and every finding's `id`, `title`, `severity`,
 `confidence` and `location` are required, and `id` must be unique. Every
 `perspectives` entry needs a `name`; use the names in `reference/perspectives.md`.
+These names, and each code finding's `category`, stay the English names from
+that table in every report language: `contract_check.py` matches them exactly,
+and `--lang ja` translates labels, not these identifiers.
 Required text fields must be nonblank strings. Optional text fields may be
 omitted or use an empty string; numbers, booleans, arrays, objects and `null`
 are not converted to text. `meta.source_url` also accepts `null` as an absent

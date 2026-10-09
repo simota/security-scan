@@ -467,6 +467,8 @@ skills/security-scan/
   reference/expert-mode.md     expert-grade multi-agent run card, envelope and calibration anchors
   reference/engine-map.md      the only place host spawn tools and preflights are named
   reference/findings-schema.md findings.json and the render command
+  reference/invariants.md      invariant ledger, path trace, close-check, static reproduction
+  reference/coverage-trace.md  ASVS / API Top 10 / CWE Top 25 mapped to perspectives and hunt steps
   scripts/deps_scan.py         dependency inventory, supply-chain checks, audits (stdlib only)
   scripts/findings.py          merges JSON fragments into findings.json; refuses literal attack strings
   scripts/evidence_capture.py  assessed-revision source -> evidence/ and schema-2 records
@@ -479,9 +481,15 @@ skills/security-scan/
   scripts/verification_workflow.py ordered local review handoffs, progress and lineage
   scripts/reproduction.py      generate, verify and run isolated synthetic bundles
   scripts/reproduction_runtime.py trusted standalone seed/repro/cleanup runtime
+  scripts/three_pass.py        three-pass coverage profile checks
+  scripts/invariant_ledger.py  opt-in invariant ledger and static-reproduction checks
+  scripts/url_redaction.py     URL credential, query and fragment redaction for reports
   templates/issue.{ja,en}.md     one finding as one issue
   templates/report.{ja,en}.md    findings report to an owner or security contact
-examples/findings.sample.json  fictional legacy sample for make demo / make check
+examples/findings.sample.json  fictional legacy sample for make demo LANG_OUT=en / make check
+examples/findings.sample.ja.json  fictional Japanese legacy sample (default make demo)
+examples/findings.three-pass.sample.json  synthetic three-pass profile example
+examples/findings.workflow.sample.json    fictional verification-workflow starter input
 examples/findings.verification.sample.json  synthetic structured-verification example
 examples/reproduction.plan.sample.json      deterministic SQLite owner-scope demo plan
 ```
@@ -490,8 +498,9 @@ examples/reproduction.plan.sample.json      deterministic SQLite owner-scope dem
 
 ```sh
 make test    # offline unit/regression tests; all audit subprocesses are mocked
-make check   # tests plus citations resolve, references headed, frontmatter valid,
-             # scripts compile, sample renders
+make check   # tests plus citations and relative links resolve in every document
+             # (scripts/ci/check_doc_refs.py), references headed, frontmatter
+             # valid, scripts compile, sample renders
 ```
 
 Requirements: Python 3.9+ (Python 3.11+ for Cargo workspace ownership parsing);
