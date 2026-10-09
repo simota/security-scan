@@ -698,6 +698,10 @@ def check_requirements(c, p):
             c.add("Medium", "pip --extra-index-url mixes a second index with PyPI", p, i,
                   impact="A public package can shadow an internal one with the same name",
                   fix="Use a single index (a mirror that proxies PyPI) or pin hashes", category=CAT_BUILD)
+        elif re.match(r"^--trusted-host\b", s) or re.match(r"^(--index-url|--extra-index-url|-i|-f|--find-links)[\s=]+http://", s):
+            c.add("Medium", "pip installs from a source without TLS verification (see source location)", p, i,
+                  impact="A network attacker can serve modified packages", category=CAT_BUILD,
+                  fix="Use an https:// index with a trusted CA")
         elif s.startswith("--index-url") or s.startswith("-i "):
             c.add("Info", "pip index overridden (see source location)", p, i, impact="Confirm the index is trusted",
                   category=CAT_BUILD)
@@ -747,8 +751,151 @@ def check_gomod(c, p):
                   impact="Builds depend on code outside module verification", category=CAT_BUILD)
 
 
-def check_workflow(c, p):
+PRIVILEGED_TRIGGERS = ("pull_request_target", "workflow_run")
+UNTRUSTED_REF = re.compile(r"\$\{\{\s*github\.(?:head_ref|event\.pull_request\.head\.(?:sha|ref|repo\.full_name)"
+                           r"|event\.workflow_run\.head_(?:sha|branch|repository\.full_name))\b")
+
+
+def workflow_triggers(text):
+    """Trigger names, from `on: x`, `on: [x, y]` and block `on:` keys (conservative)."""
+    found, in_on = set(), None
+    for ln in text.splitlines():
+        m = re.match(r"""^(\s*)["']?on["']?\s*:\s*(.*)$""", ln)
+        if m and not m.group(1):
+            found |= set(re.findall(r"[a-z_]+", m.group(2).split("#")[0]))
+            in_on = 0
+            continue
+        if in_on is not None:
+            if ln.strip() and not ln[:1].isspace() and not ln.lstrip().startswith("#"):
+                in_on = None
+                continue
+            k = re.match(r"""^(\s+)(?:-\s+)?["']?([a-z_]+)["']?\s*(:|$)""", ln)
+            if k and (not in_on or len(k.group(1)) <= in_on):
+                in_on = len(k.group(1))
+                found.add(k.group(2))
+    return found
+
+
+def privileged_workflows(files, root):
+    """Workflows that run with secrets on outsider events, plus local reusable
+    workflows and actions they call (which inherit that context)."""
+    root = Path(root).resolve()
+    priv = {}
+    for p in files:
+        if ".github/workflows" in str(p).replace(os.sep, "/") and p.suffix in (".yml", ".yaml"):
+            t = workflow_triggers(read(p)) & set(PRIVILEGED_TRIGGERS)
+            if t:
+                priv[p.resolve()] = sorted(t)[0]
+    for p in list(priv):
+        repo = next((a for a in p.parents if a.name == ".github"), None)
+        if repo is None:
+            continue
+        for m in re.finditer(r"""uses\s*:\s*["']?\./([^\s"'#@]+)""", read(p)):
+            target = (repo.parent / m.group(1)).resolve()
+            for cand in (target, target / "action.yml", target / "action.yaml"):
+                # Only files of this checkout; scan() visits nothing else anyway.
+                if (cand == root or root in cand.parents) and cand.is_file():
+                    priv.setdefault(cand, priv[p])
+    return priv
+
+
+SOURCE_CONFIGS = {"pom.xml", "settings.xml", "build.gradle", "build.gradle.kts", "settings.gradle",
+                  "settings.gradle.kts", "nuget.config", "NuGet.Config", "pip.conf", "pip.ini", ".pypirc",
+                  "bunfig.toml", ".npmrc", ".yarnrc", ".yarnrc.yml", ".gitmodules", "Gemfile"}
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+TLS_OFF = re.compile(r"""^\s*(?:strict-ssl\s*=\s*false|["']?enableStrictSsl["']?\s*:\s*false|trusted-host\s*=|--trusted-host\b"""
+                     r"""|allowInsecureProtocol\s*(?:=|\()\s*true|isAllowInsecureProtocol\s*=\s*true)""", re.I)
+
+
+def check_source_transport(c, p):
+    """Package/submodule sources over plaintext http:// or git://, and disabled TLS checks."""
     text = read(p)
+    in_repo = 0
+    for i, ln in enumerate(text.splitlines(), 1):
+        if ln.lstrip().startswith(("#", "//", ";", "<!--")):
+            continue
+        if p.suffix == ".xml":
+            # Maven: only <repository>/<pluginRepository>/<mirror> URLs fetch code;
+            # project <url>, <scm> and xmlns values are metadata.
+            in_repo += len(re.findall(r"<(?:repository|pluginRepository|snapshotRepository|mirror)>", ln))
+            hit = in_repo > 0
+            in_repo -= len(re.findall(r"</(?:repository|pluginRepository|snapshotRepository|mirror)>", ln))
+            if not hit:
+                continue
+        elif p.suffix in (".gradle", ".kts") and not re.search(r"\b(url|uri|maven)\b", ln):
+            continue  # Gradle: only repository declarations fetch code.
+        elif p.name == "Gemfile" and not re.match(r"\s*(source|gem|git)\b", ln):
+            continue
+        for m in re.finditer(r"""\b(http|git)://([^\s"'<>/:]+)""", ln):
+            if m.group(2).lower() in LOCAL_HOSTS:
+                continue
+            c.add("Medium", f"{p.name} fetches code over plaintext {m.group(1)}://", p, i, category=CAT_BUILD,
+                  impact="Anyone on the network path can substitute packages that then run in builds",
+                  fix="Use https:// (or ssh for git) for every package source")
+            break
+        if TLS_OFF.search(ln):
+            c.add("Medium", f"{p.name} disables TLS verification for a package source", p, i, category=CAT_BUILD,
+                  impact="A network attacker can serve modified packages", fix="Remove it and trust the CA instead")
+
+
+def check_extra_sources(c, p):
+    text = read(p)
+    if p.name in ("pip.conf", "pip.ini"):
+        for i, ln in enumerate(text.splitlines(), 1):
+            if re.match(r"\s*extra-index-url\s*=", ln):
+                c.add("Medium", "pip config adds a second index beside PyPI", p, i, category=CAT_BUILD,
+                      impact="Dependency confusion: a public package with an internal name may be installed",
+                      fix="Use a single index that proxies PyPI, or pin hashes")
+    elif p.name.lower() == "nuget.config":
+        adds = [i for i, ln in enumerate(text.splitlines(), 1) if re.search(r"<add\s+key=", ln)]
+        if len(adds) > 1 and "<clear" not in text and "<packageSourceMapping" not in text:
+            c.add("Medium", "nuget.config mixes several package sources without packageSourceMapping", p, adds[1],
+                  category=CAT_BUILD, impact="Dependency confusion: any source may satisfy any package id",
+                  fix="Add <packageSourceMapping> so each package prefix comes from one source")
+    elif p.name == ".pypirc":
+        for i, ln in enumerate(text.splitlines(), 1):
+            if re.match(r"\s*password\s*[=:]\s*[^\s$%{]", ln):
+                c.add("High", ".pypirc contains a literal upload credential", p, i, category="Secrets",
+                      impact="Anyone with repository access can publish this project's packages",
+                      fix="Remove it, rotate the token, use trusted publishing or an environment variable")
+
+
+def check_workflow(c, p, privileged=None):
+    text = read(p)
+    lines = text.splitlines()
+    if "workflow_run" in workflow_triggers(text):
+        c.add("Medium", "workflow triggers on workflow_run", p, line_of(text, "workflow_run"), category=CAT_BUILD,
+              confidence="Suspected",
+              impact="Runs with repository secrets after fork PR workflows; dangerous if it uses their artifacts or code",
+              fix="Treat artifacts and head refs of the triggering run as untrusted data; never execute them")
+    if privileged:
+        for i, ln in enumerate(lines, 1):
+            if re.match(r"\s*(?:ref|repository)\s*:", ln) and UNTRUSTED_REF.search(ln):
+                c.add("High", f"{privileged} workflow checks out the pull request's code", p, i,
+                      category=CAT_BUILD, confidence="Suspected",
+                      impact="Fork authors' code runs with repository secrets and a write token (pwn request)",
+                      fix="Use pull_request for building PR code, or never run anything from the checkout")
+            if re.match(r"""\s*(?:-\s+)?uses\s*:\s*["']?[\w.-]+/[\w.-]*download-artifact@""", ln, re.I) \
+                    and privileged == "workflow_run":
+                c.add("Medium", "workflow_run workflow downloads artifacts from the triggering run", p, i,
+                      category=CAT_BUILD, confidence="Suspected",
+                      impact="A fork PR controls the artifact; executing or interpolating it runs with secrets",
+                      fix="Extract to a temp dir, validate as data, never execute it or write it to GITHUB_ENV")
+            if re.match(r"""\s*runs-on\s*:.*\bself-hosted\b""", ln):
+                c.add("Medium", f"{privileged} job runs on a self-hosted runner", p, i, category=CAT_BUILD,
+                      confidence="Suspected",
+                      impact="Outsider-triggered jobs can persist on the runner host and its network",
+                      fix="Use GitHub-hosted or ephemeral, isolated runners for outsider-triggered events")
+    for i, ln in enumerate(lines, 1):
+        if re.match(r"""\s*permissions\s*:\s*["']?write-all\b""", ln):
+            c.add("Medium" if privileged else "Low", "workflow grants permissions: write-all", p, i,
+                  category=CAT_BUILD, impact="Any compromised step can push code, releases and packages",
+                  fix="Grant only the scopes each job needs, read-only by default")
+        m = re.match(r"""\s*(?:-\s+)?uses\s*:\s*["']?([\w.-]+/[\w.-]+/\.github/workflows/[^\s"'#]+)""", ln)
+        if m and any(re.match(r"\s*secrets\s*:\s*inherit\b", x) for x in lines[i:i + 8]):
+            c.add("Medium", f"every secret is passed to external reusable workflow {m.group(1)}", p, i,
+                  category=CAT_BUILD, impact="A change in that repository can read all of this repository's secrets",
+                  fix="Pass only the named secrets it needs and pin it to a commit SHA")
     for i, ln in enumerate(text.splitlines(), 1):
         # Only a YAML `uses:` key; comments and shell text mentioning it are not steps.
         m = re.match(r"""^\s*(?:-\s+)?\{?\s*["']?uses["']?\s*:\s*([^\s#,}]+)""", ln)
@@ -798,11 +945,19 @@ def check_workflow(c, p):
 
 def check_dockerfile(c, p):
     text = read(p)
-    stages = set()
+    stages, args = set(), {}
     for i, ln in enumerate(text.splitlines(), 1):
+        a = re.match(r"\s*ARG\s+(\w+)=(\S+)", ln, re.I)
+        if a and not stages:
+            args[a.group(1)] = a.group(2).strip("'\"")
+        add = re.match(r"\s*ADD\s+(?:--\S+\s+)*(https?://\S+)", ln, re.I)
+        if add and "--checksum=" not in ln:
+            c.add("Low", "build downloads a remote file with ADD and no --checksum", p, i, category=CAT_BUILD,
+                  impact="The image contains whatever the URL serves at build time",
+                  fix="Add --checksum=sha256:... or download a pinned release and verify it")
         m = re.match(r"\s*FROM\s+(?:--platform=\S+\s+)?(\S+)(?:\s+AS\s+(\S+))?", ln, re.I)
         if m:
-            img = m.group(1)
+            img = re.sub(r"\$\{?(\w+)\}?", lambda v: args.get(v.group(1), v.group(0)), m.group(1))
             earlier_stage = img.lower() in stages
             if m.group(2):
                 stages.add(m.group(2).lower())
@@ -816,6 +971,20 @@ def check_dockerfile(c, p):
             c.add("Low", "remote script piped into a shell during build", p, i, category=CAT_BUILD,
                   impact="Build executes whatever the URL serves at that moment",
                   fix="Download a pinned version and verify its checksum")
+
+COMPOSE_FILE = re.compile(r"(?:docker-)?compose(?:[.-][\w.-]+)?\.ya?ml$")
+
+
+def check_compose(c, p):
+    for i, ln in enumerate(read(p).splitlines(), 1):
+        m = re.match(r"""\s*image\s*:\s*["']?([^\s"'#]+)""", ln)
+        if not m or "$" in m.group(1) or "@sha256:" in m.group(1):
+            continue
+        img = m.group(1)
+        name = img.split("/")[-1]
+        if ":" not in name or name.endswith(":latest"):
+            c.add("Low", f"compose image {img} is not pinned", p, i, category=CAT_BUILD,
+                  impact="Each pull can run a different image", fix="Pin a version tag, ideally a digest")
 
 
 # ---------- inventory ----------
@@ -1475,6 +1644,7 @@ def scan(root, audit):
     root = Path(root).resolve()
     c = Collector(root)
     files = sorted(walk(root, c.not_run))
+    privileged = privileged_workflows(files, root)
     for p in files:
         n = p.name
         if n in LOCKS:
@@ -1495,9 +1665,14 @@ def scan(root, audit):
             check_gomod(c, p)
         elif n.startswith("Dockerfile") or n.endswith(".Dockerfile"):
             check_dockerfile(c, p)
+        elif COMPOSE_FILE.fullmatch(n):
+            check_compose(c, p)
         elif p.suffix in (".yml", ".yaml") and (".github/workflows" in str(p).replace(os.sep, "/")
                                                 or n in ("action.yml", "action.yaml")):
-            check_workflow(c, p)
+            check_workflow(c, p, privileged.get(p.resolve()))
+        if n in SOURCE_CONFIGS or p.parent.name == ".cargo" and n in ("config", "config.toml"):
+            check_source_transport(c, p)
+            check_extra_sources(c, p)
         if n == "composer.lock":
             inventory_composer_lock(c, p)
         elif n == "package-lock.json":

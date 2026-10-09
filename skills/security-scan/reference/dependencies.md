@@ -22,7 +22,8 @@ a rescan resets each `D-*` validation to `Unverified`.
 that did not run under `limitations`, and stamps `dependency_scan` with the
 count it wrote; `scripts/contract_check.py` rejects a file whose `D-*` count
 differs, so `D-*` findings are never hand-written, merged or split. It covers, across npm, Composer, Python,
-Bundler, Go, Cargo, Maven/Gradle (inventory), CI workflows and Dockerfiles:
+Bundler, Go, Cargo, Maven/Gradle/NuGet (inventory and sources), CI workflows,
+Dockerfiles and Compose files:
 
 | Check | Why it matters |
 |---|---|
@@ -30,11 +31,14 @@ Bundler, Go, Cargo, Maven/Gradle (inventory), CI workflows and Dockerfiles:
 | Floating versions (`*`, `latest`, `dev-*`, unbounded `>`) | A newly published bad release is taken automatically |
 | Dependencies from git, URLs or local paths | Outside registry integrity and advisory coverage |
 | Non-default registries, `--extra-index-url`, lockfile hosts | Dependency confusion: a public name can shadow an internal one |
-| Literal tokens in `.npmrc` | Publishing credentials in the repository |
+| Literal tokens in `.npmrc`, `.yarnrc.yml`, `.pypirc` | Publishing credentials in the repository |
+| Package or submodule sources over `http://`/`git://`, TLS checks off (`strict-ssl=false`, `--trusted-host`, `allowInsecureProtocol`) | A network attacker can substitute code that runs in builds |
 | Install-time scripts, `allow-plugins: true` | Dependency code runs on every install, including CI |
 | Actions not pinned to a commit SHA | A moved or hijacked tag runs with the pipeline's secrets |
-| `pull_request_target`, event text inside `run:` | Outsider-controlled input reaches a privileged pipeline |
-| Unpinned base images, `curl … \| sh` in builds | The build executes whatever is served that day |
+| `pull_request_target`, `workflow_run`, event text inside `run:` or `github-script` | Outsider-controlled input reaches a privileged pipeline |
+| A privileged workflow (or a local workflow/action it calls) checking out the PR head, downloading the triggering run's artifacts, or running on a self-hosted runner | The "pwn request": fork code runs with secrets and a write token |
+| `permissions: write-all`, `secrets: inherit` to another repository's workflow | One compromised step or repository gets every scope or secret |
+| Unpinned base images (including `ARG` defaults) and Compose images, `ADD <url>` without `--checksum`, `curl … \| sh` in builds | The build executes whatever is served that day |
 | Known vulnerabilities (`--audit`) | Advisories matched against the exact locked versions |
 | Malicious packages (`--audit` with osv-scanner) | OSV includes OpenSSF malicious-package reports (`MAL-` IDs), reported as High |
 | Abandoned packages (Composer) | No fixes will come |

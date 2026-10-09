@@ -167,8 +167,13 @@ class DepsScanReviewTests(unittest.TestCase):
         self.assertIn("validation", c.findings[0])
 
 
-class DepsScanSecondReviewTests(DepsScanReviewTests):
+class DepsScanSecondReviewTests(unittest.TestCase):
     """Second-round regressions: audit parsing, workflow sinks and --into writes."""
+    # Borrow the fixture helpers without re-running the first class's tests.
+    setUpClass = DepsScanReviewTests.__dict__["setUpClass"]
+    setUp = DepsScanReviewTests.setUp
+    write = DepsScanReviewTests.write
+    titles = DepsScanReviewTests.titles
 
     def osv(self, lock, vulnerabilities, groups, code=1):
         payload = {"results": [{"source": {"path": str(lock), "type": "lockfile"}, "packages": [
