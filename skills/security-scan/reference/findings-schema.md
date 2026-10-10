@@ -497,7 +497,8 @@ IDs starting with `D-` belong to `scripts/deps_scan.py`: `--into findings.json`
 replaces them on each run and stamps the top-level `dependency_scan` record
 (`tool`, `audit`, `findings`, `not_run`), so do not hand-write findings with
 that prefix. `findings.py merge` refuses a fragment that creates a `D-*` ID or
-sends any key other than `id`, `validation` and `verification` for one. Code findings use `F-001`… without gaps; `scripts/contract_check.py`
+sends any key other than `id`, `validation` and `verification` for one, and any finding id
+that is not exactly `F-` or `D-` plus three ASCII digits (`d-001`, ` D-001`, `Ｄ-001` are refused). Code findings use `F-001`… without gaps; `scripts/contract_check.py`
 checks both, together with the rest of the run contract.
 
 Same rules as the report: no working payloads, no secret values.

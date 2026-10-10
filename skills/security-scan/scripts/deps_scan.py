@@ -280,7 +280,7 @@ def workspace_pattern(relative, pattern):
 def pnpm_packages(path):
     """Globs of a block-style `packages:` list; None for any other syntax."""
     out, inside = [], False
-    for ln in read(path).splitlines():
+    for ln in read(path).lstrip("\ufeff").splitlines():
         if re.match(r"packages\s*:\s*(#.*)?$", ln):
             inside = True
         elif inside and ln.strip() and not ln.lstrip().startswith("#"):
@@ -669,12 +669,13 @@ def npm_floating(spec):
     return False
 
 
-def npm_local_path(spec):
-    """A relative file:/link: or ./ path is first-party code in this checkout."""
+def npm_local_path(c, manifest, spec):
+    """A relative file:/link: or ./ path that stays inside this checkout is first-party code."""
     m = re.match(r"(file:|link:)?(.*)$", spec, re.S)
-    if m[1]:
-        return bool(m[2]) and not re.match(r"[/\\~]|[A-Za-z][\w+.-]*:", m[2])
-    return re.match(r"\.{1,2}/", m[2]) is not None
+    if not (m[2] and not re.match(r"[/\\~]|[A-Za-z][\w+.-]*:", m[2]) if m[1] else re.match(r"\.{1,2}/", m[2])):
+        return False
+    target, root = os.path.abspath(os.path.join(Path(manifest).parent, m[2])), os.path.abspath(c.root)
+    return os.path.commonpath([target, root]) == root
 
 
 def check_npm(c, p):
@@ -685,7 +686,7 @@ def check_npm(c, p):
         for name, spec in mapping(data.get(section)).items():
             spec = str(spec).strip()
             ln = line_of(text, f'"{name}"')
-            if npm_local_path(spec):
+            if npm_local_path(c, p, spec):
                 continue
             if NPM_EXTERNAL_SOURCE.match(spec):
                 c.add("Medium", f"npm dependency {name} is fetched outside the registry ({spec})", p, ln,
@@ -1011,7 +1012,7 @@ def privileged_workflows(files, root):
     pending = list(priv)
     while pending:
         p = pending.pop()
-        for m in re.finditer(r"""uses\s*:\s*["']?(?:\.|\$)/([^\s"'#@]+)""", read(p)):
+        for m in re.finditer(r"""uses[ \t]*:[ \t]*["']?(?:\.|\$)/([^\s"'#@]+)""", read(p)):
             target = (root / m.group(1)).resolve()
             for cand in (target, target / "action.yml", target / "action.yaml"):
                 # Only files of this checkout; scan() visits nothing else anyway.
@@ -1039,7 +1040,7 @@ def check_source_transport(c, p):
     text = read(p)
     if p.suffix in (".xml", ".config"):
         text = xml_code(text)
-    in_repo, depth, repo_depth = 0, 0, None
+    in_repo, depth, repo_depth, pending, spans = 0, 0, None, False, None
     for i, ln in enumerate(text.splitlines(), 1):
         if ln.lstrip().startswith(("#", "//", ";", "<!--")):
             continue
@@ -1054,18 +1055,31 @@ def check_source_transport(c, p):
         if p.suffix in (".gradle", ".kts"):
             # Gradle: only repository declarations and applied scripts fetch code;
             # pom/license `url` values are publication metadata.
+            # String contents are blanked (same length) so their braces do not count;
+            # spans are the parts of the line inside a repositories block.
             code = re.sub(r"(?<!:)//.*", "", ln)
-            hit = repo_depth is not None or re.search(r"\brepositories\s*\{|\bapply\s*\(?\s*from\s*[:=]", code)
-            for ch in re.findall(r"[{}]", code):
-                if ch == "{":
-                    if repo_depth is None and re.search(r"\brepositories\s*\{", code):
-                        repo_depth = depth
-                    depth += 1
-                else:
-                    depth -= 1
+            bare = re.sub(r""""(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'""",
+                          lambda m: m[0][0] + " " * (len(m[0]) - 2) + m[0][-1], code)
+            if pending and bare.strip() and not bare.lstrip().startswith("{"):
+                pending = False
+            spans, start = [], 0 if repo_depth is not None else None
+            for m in re.finditer(r"\brepositories(?:[ \t]*\.[ \t]*\w+)?(?=[ \t]*(?:\{|$))|[{}]", bare):
+                if m[0] == "{":
+                    if pending and repo_depth is None:
+                        repo_depth, start = depth, m.start()
+                    pending, depth = False, depth + 1
+                elif m[0] == "}":
+                    pending, depth = False, depth - 1
                     if repo_depth is not None and depth <= repo_depth:
                         repo_depth = None
-            if not hit:
+                        spans.append((start, m.end()))
+                else:
+                    pending = True  # Its block opens at the next brace, here or on the next line.
+            if repo_depth is not None:
+                spans.append((start, len(ln)))
+            if re.search(r"\bapply\s*\(?\s*from\s*[:=]", bare):
+                spans.append((0, len(ln)))
+            if not spans:
                 continue
         elif p.suffix == ".xml":
             # Maven: only <repository>/<pluginRepository>/<mirror> URLs fetch code;
@@ -1078,7 +1092,7 @@ def check_source_transport(c, p):
         elif p.name == "Gemfile" and not re.match(r"\s*(source|gem|git)\b", ln):
             continue
         for m in re.finditer(r"""\b(http|git)://([^\s"'<>/:]+)""", ln):
-            if m.group(2).lower() in LOCAL_HOSTS:
+            if m.group(2).lower() in LOCAL_HOSTS or spans and not any(a <= m.start() < b for a, b in spans):
                 continue
             c.add("Medium", f"{p.name} fetches code over plaintext {m.group(1)}://", p, i, category=CAT_BUILD,
                   impact="Anyone on the network path can substitute packages that then run in builds",
@@ -1097,15 +1111,15 @@ def check_extra_sources(c, p):
     elif p.name.lower() == "nuget.config":
         text = xml_code(text)
         adds = []  # (line, key) of <add> inside <packageSources>
-        for block in re.finditer(r"<packageSources\b[^>]*>(.*?)(?:</packageSources>|\Z)", text, re.S | re.I):
-            for m in re.finditer(r"""<add\s[^>]*?\bkey\s*=\s*["']([^"']*)""", block[1], re.I):
+        for block in re.finditer(r"<packageSources\b[^<>]*>(.*?)(?:</packageSources>|\Z)", text, re.S | re.I):
+            for m in re.finditer(r"""<add\s[^<>]*?\bkey\s*=\s*["']([^"']*)""", block[1], re.I):
                 adds.append((text.count("\n", 0, block.start(1) + m.start()) + 1, m[1].lower()))
         mapped = {}
-        for block in re.finditer(r"<packageSourceMapping\b[^>]*>(.*?)(?:</packageSourceMapping>|\Z)", text, re.S | re.I):
-            for src in re.finditer(r"""<packageSource\s[^>]*?\bkey\s*=\s*["']([^"']*)["'][^>]*>(.*?)(?:</packageSource>|\Z)""",
+        for block in re.finditer(r"<packageSourceMapping\b[^<>]*>(.*?)(?:</packageSourceMapping>|\Z)", text, re.S | re.I):
+            for src in re.finditer(r"""<packageSource\s[^<>]*?\bkey\s*=\s*["']([^"']*)["'][^<>]*>(.*?)(?:</packageSource>|\Z)""",
                                    block[1], re.S | re.I):
                 mapped.setdefault(src[1].lower(), set()).update(
-                    re.findall(r"""<package\s[^>]*?\bpattern\s*=\s*["']([^"']*)""", src[2], re.I))
+                    re.findall(r"""<package\s[^<>]*?\bpattern\s*=\s*["']([^"']*)""", src[2], re.I))
         # Mapping mitigates only when every source is assigned prefixes and at most
         # one catch-all `*` source remains; otherwise sources still race.
         catch_all = [k for _, k in adds if not mapped.get(k, set()) - {"*"}]
@@ -1170,7 +1184,7 @@ def yaml_children(lines, start=0, end=None):
             end = i
             break
         if indent == level:
-            m = re.match(r"""\s*["']?([^\s"'#:][^"':]*?)["']?\s*:(?:\s+(.*))?$""", ln)
+            m = re.match(r"""\s*["']?([^\s"'#:](?:[^"':]*[^\s"':])?)["']?[ \t]*:(?:\s+(.*))?$""", ln)
             out.append([m[1] if m else None, i, (m[2] or "").strip() if m else "", end])
     for a, b in zip(out, out[1:]):
         a[3] = b[1]
@@ -1206,9 +1220,26 @@ def step_value(step, key):
 
 
 EXECUTES_CHECKOUT = re.compile(
-    r"(?:^|[;&|(])\s*(?:(?:npm|pnpm|yarn|bun)\s+(?:install|ci|i|test|t|run|exec|build|start)\b|yarn\s*(?:$|[;&|])"
+    r"(?:^|[;&|(])[ \t]*(?:(?:npm|pnpm|yarn|bun)\s+(?:install|ci|i|test|t|run|exec|build|start)\b|yarn[ \t]*(?:$|[;&|])"
     r"|make\b|pip3?\s+install\s+(?:-e\s+)?\.|python3?\s+(?:-m\s+pip\s+install\s+\.|setup\.py)|\./[\w.-]"
     r"|(?:bash|sh)\s+[\w./-]+\.sh\b|mvn\b|\./mvnw\b|gradle\b|\./gradlew\b)", re.M)
+
+
+GIT_MOVES = {"checkout", "switch", "reset", "worktree", "pull", "merge", "rebase", "cherry-pick"}
+
+
+def git_commands(line):
+    """(subcommand, args) of each git command in a shell line; linear, no regex backtracking."""
+    out = []
+    for seg in re.split(r"[;&|()`]", line):
+        words = seg.split()
+        i = next((k for k, w in enumerate(words) if w == "git" or w.endswith("/git")), None)
+        rest = words[i + 1:] if i is not None else []
+        while rest and rest[0].startswith("-"):
+            rest = rest[2:] if rest[0] in ("-C", "-c") else rest[1:]
+        if rest:
+            out.append((rest[0], rest[1:]))
+    return out
 
 
 def check_workflow(c, p, privileged=None):
@@ -1227,7 +1258,7 @@ def check_workflow(c, p, privileged=None):
     head_checkout = False
     if privileged:
         untrusted_env = {"GITHUB_HEAD_REF"} | {
-            m[1] for m in re.finditer(r"""^\s*([A-Za-z_]\w*)\s*:\s*["']?(.*)$""", text, re.M) if UNTRUSTED_HEAD.search(m[2])}
+            m[1] for m in re.finditer(r"""^[ \t]*([A-Za-z_]\w*)[ \t]*:[ \t]*["']?(.*)$""", text, re.M) if UNTRUSTED_HEAD.search(m[2])}
         names = "|".join(sorted(untrusted_env))
         env_ref = re.compile(r"\$\{?(?:" + names + r")\b|\$\{\{\s*env\.(?:" + names + r")\b")
         for n, st in enumerate(steps):
@@ -1242,9 +1273,15 @@ def check_workflow(c, p, privileged=None):
                 title = f"{privileged} workflow checks out the pull request's code"
             elif "run" in st["keys"]:
                 run = [(st["start"] + k + 1, x) for k, x in enumerate(body) if k >= st["keys"]["run"][0] - st["start"]]
-                hits = [k for k, x in run if re.search(r"\bgh\s+pr\s+checkout\b", x) or re.search(
-                    r"\bgit\s+(?:\S+\s+)*?(?:checkout|switch|fetch|pull|reset|worktree)\b", x) and (
-                    UNTRUSTED_HEAD.search(x) or env_ref.search(x) or re.search(r"\bpull/\S*/(?:head|merge)\b", x))][:1]
+                untrusted = lambda x: (UNTRUSTED_HEAD.search(x) or env_ref.search(x)
+                                       or re.search(r"\bpull/[^\s/]*/(?:head|merge)\b", x))
+                # Fetching the PR head is data until this step checks it out, resets or
+                # merges onto it: FETCH_HEAD, the fetched ref or a local refspec target.
+                fetches = [a for _, x in run for sub, a in git_commands(x) if sub == "fetch" and untrusted(" ".join(a))]
+                fetched = {"FETCH_HEAD"} | {a.split(":", 1)[1].lstrip("+") for f in fetches for a in f if ":" in a}
+                hits = [k for k, x in run if re.search(r"\bgh\s+pr\s+checkout\b", x) or any(
+                    sub in GIT_MOVES and (untrusted(" ".join(args)) or fetches and fetched & set(args))
+                    for sub, args in git_commands(x))][:1]
                 title = f"{privileged} workflow checks out the pull request's code in a run step"
             for line in hits:
                 head_checkout = True
@@ -1334,7 +1371,7 @@ def check_workflow(c, p, privileged=None):
             # breaks, so expression offsets still map to source lines.
             script = script.replace("''", "'")
         if scalar_start.startswith('"') and (hiding_escape(script)
-                                             or re.search(r"\$\{\{(?:(?!\}\}).)*\\", script, re.S)):
+                                             or re.search(r"\$\{\{(?:(?!\}\}|\$\{\{).)*\\", script, re.S)):
             # YAML double-quoted scalars decode escapes before GitHub evaluates
             # expressions; raw text could hide both an opener and a source name.
             # Escapes elsewhere (\\n, \\t, \\") cannot form expression text.
@@ -1394,7 +1431,9 @@ def check_compose(c, p):
     top = yaml_children(lines)
     services = child(top, "services")
     # Legacy (v1) files have no services: key; their services are top-level keys.
-    for service in yaml_children(lines, services[1] + 1, services[3]) if services else top:
+    # x-* extension fields are usually anchors merged into services (<<: *base).
+    entries = yaml_children(lines, services[1] + 1, services[3]) if services else []
+    for service in entries + [e for e in top if e not in entries and (not services or str(e[0]).startswith("x-"))]:
         props = yaml_children(lines, service[1] + 1, service[3])
         image = child(props, "image")
         if not image or child(props, "build"):
@@ -2139,11 +2178,11 @@ def pinned_count(p):
     if p.name == "Gemfile.lock":
         return len(re.findall(r"^    \S+ \(", text, re.M))
     if p.name == "gradle.lockfile":
-        return len(re.findall(r"^[^#\s=]+:[^#\s=]+:[^#\s=]+=", text, re.M))
+        return len(re.findall(r"^[^#\s=:]+:[^#\s=:]+:[^#\s=]+=", text, re.M))
     if p.name == "go.sum":
         return len({tuple(x.split()[:2]) for x in text.splitlines() if len(x.split()) == 3 and "/go.mod" not in x.split()[1]})
     if p.name == "yarn.lock":
-        return len(re.findall(r'^(?!__metadata)[^\s#][^\n]*:\s*$', text, re.M))
+        return len(re.findall(r'^(?!__metadata)[^\s#][^\n]*:[ \t]*$', text, re.M))
     if p.name == "pnpm-lock.yaml":
         packages = child(yaml_children(text.splitlines()), "packages")
         return len(yaml_children(text.splitlines(), packages[1] + 1, packages[3])) if packages else 0

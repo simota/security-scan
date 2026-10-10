@@ -187,7 +187,8 @@ class DepsScanRound4Tests(unittest.TestCase):
                    "  alias:\n    image: *pg\n  folded:\n    image: >-\n      nginx\n  app:\n    build: .\n"
                    "    image: myapp\n  env:\n    image: redis:7\n    environment:\n      image: notanimage\n"
                    "    labels:\n      image: nolabel\n")
-        self.assertEqual(self.titles("compose image"), ["compose image postgres is not pinned"])
+        self.assertEqual(sorted(self.titles("compose image")),
+                         ["compose image postgres is not pinned", "compose image shared:latest is not pinned"])
 
     def test_dockerfile_arg_scope_after_first_from(self):
         self.write("Dockerfile", "ARG BASE=node\nFROM alpine:3.19\nARG BASE=ubuntu:22.04\nFROM ${BASE}\n")
@@ -225,7 +226,7 @@ class DepsScanRound4Tests(unittest.TestCase):
 
     def test_npm_relative_local_specs_are_first_party(self):
         self.write("package.json", {"dependencies": {
-            "a": "file:./a", "b": "link:../b", "c": "./c", "d": "file:d", "e": "file:/abs/e", "f": "owner/repo"}})
+            "a": "file:./a", "b": "link:b/../b", "c": "./c", "d": "file:d", "e": "file:/abs/e", "f": "owner/repo"}})
         flagged = sorted(t.split()[2] for t in self.titles("fetched outside the registry"))
         self.assertEqual(flagged, ["e", "f"])
 
@@ -299,7 +300,7 @@ class DepsScanRound4Tests(unittest.TestCase):
         steps = ("      - run: gh pr checkout ${{ github.event.pull_request.number }}\n",
                  "      - env:\n          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}\n"
                  "        run: |\n          git fetch origin \"${HEAD_SHA}\"\n          git checkout FETCH_HEAD\n",
-                 "      - run: git fetch origin pull/${{ github.event.pull_request.number }}/head:pr\n")
+                 "      - run: git fetch origin pull/${{ github.event.pull_request.number }}/head:pr && git checkout pr\n")
         for step in steps:
             with self.subTest(step=step):
                 self.workflow("on: [pull_request_target, workflow_run]\njobs:\n  j:\n    steps:\n" + step)

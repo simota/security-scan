@@ -1363,22 +1363,47 @@ def redact(line):
 
 
 MAX_SOURCE_BYTES = 16 * 1024 * 1024
-# A literal secret value: a quoted string of four or more characters that is
-# not a template placeholder, or in a config file any unquoted value.
-_LITERAL_TAIL = re.compile(r"""(['"]?\s*(?:=>|:=|[:=])\s*)(['"])(?![$<{%])(?:\\.|(?!\2)[^\\\n]){4,}\2""")
-CONFIG_SUFFIXES = {".yml", ".yaml", ".ini", ".cfg", ".conf", ".properties", ".toml"}
+# secret_in_source: a key whose last name segment (snake, kebab, dotted, camel or
+# SCREAMING case) is a secret name, assigned a value that is not a placeholder,
+# version, path, URL or plain words. Values are bounded so an unterminated quote
+# costs at most 1 KiB per key.
+_SECRET_NAME = re.compile(r"(?i)(?:^|[_.-])(?:token|secret|password|passwd|api[_-]?key|access[_-]?key"
+                          r"|private[_-]?key|secret[_-]?key|client[_-]?secret|auth|credentials?)$")
+_LITERAL_TAIL = re.compile(r"""['"]?[ \t]*(?::[ \t]*[A-Za-z_][\w.\[\], |]{0,40}?[ \t]*(?==))?(?:=>|:=|[:=])[ \t]*"""
+                           r"""(?:(['"])((?:\\.|(?!\1)[^\\\n]){0,1024})\1|([^'"\s,;)#]{1,1024}))""")
+_NOT_SECRET = re.compile(r"[$<{%]|process\.env|os\.environ|[A-Za-z_][\w.]*\(")
+_PLAIN_VALUE = re.compile(r"[\^~<>=].*|v?\d+(?:\.\d+)+[\w.+-]*|(?:~|\.{1,2})?(?:/[a-z0-9_.{}:-]*)+"
+                          r"|[a-z][a-z0-9+.-]*://[^?#@\s]*|[A-Za-z][A-Za-z ]*[.!?:]?")
+TOKEN_RE = re.compile(r"\b(?:gh[opsu]_[A-Za-z0-9]{36,}|github_pat_\w{22,}|AKIA[0-9A-Z]{16}"
+                      r"|xox[abprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|glpat-[\w-]{20,})")
+# A private key block: the header followed by a base64 body line (raw or \n-escaped).
+PEM_BODY_RE = re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[ \t]*(?:\r?\n|\\r?\\n)"
+                         r"(?:[\w-]+:[^\n\\]*(?:\r?\n|\\r?\\n))*[ \t]*[A-Za-z0-9+/]{16,}")
+CONFIG_SUFFIXES = {".yml", ".yaml", ".ini", ".cfg", ".conf", ".properties", ".toml", ".sh", ".bash", ".zsh"}
+
+
+def config_source(rel):
+    """Files whose unquoted `key=value` / `KEY: value` (also `export K=v`, `ENV K=v`) is a literal."""
+    name = Path(rel).name.lower()
+    return (Path(rel).suffix.lower() in CONFIG_SUFFIXES or name in {".envrc", "dockerfile", "containerfile"}
+            or name.startswith(("env.", "dockerfile.")) or name.endswith((".env", ".dockerfile")))
+
+
+def secret_value(value):
+    return len(value) >= 8 and not _NOT_SECRET.match(value) and not _PLAIN_VALUE.fullmatch(value)
 
 
 def secret_in_source(rel, text):
     """True when a file would put a secret-looking value into shareable output."""
-    if sensitive_path(rel) or PRIVATE_KEY_RE.search(text):
+    if sensitive_path(rel) or PEM_BODY_RE.search(text) or TOKEN_RE.search(text):
         return True
-    config = Path(rel).suffix.lower() in CONFIG_SUFFIXES
+    config = config_source(rel)
     for line in text.split("\n"):
-        if _sub_keyed(line, _LITERAL_TAIL, lambda key, m: "") != line:
-            return True
-        if config and _sub_keyed(line, _SECRET_TAIL, lambda key, m: "") != line:
-            return True
+        for run in _KEY_RUN.finditer(line):
+            name = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", run.group())
+            m = _SECRET_NAME.search(name) and _LITERAL_TAIL.match(line, run.end())
+            if m and secret_value(m.group(2) if m.group(1) else m.group(3) if config else ""):
+                return True
         for m in URL_RE.finditer(line):
             try:
                 if urlsplit(m.group("url").replace("\\/", "/")).password:

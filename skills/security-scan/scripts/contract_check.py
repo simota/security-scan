@@ -123,6 +123,9 @@ def check(data, out_dir, pdf=True, allow=()):
     limits = [str(x).lower() for x in data.get("limitations", [])] if isinstance(data.get("limitations"), list) else []
     if not pdf and not any(NO_PDF in x for x in limits):
         add('limitations: --no-pdf requires "assessment.pdf not produced: no PDF engine"')
+    elif pdf and (out_dir / "assessment.pdf").is_file() and any(NO_PDF in x for x in limits):
+        add('limitations: says "assessment.pdf not produced", but assessment.pdf exists; '
+            'merge {"remove": {"limitations": [<that entry>]}} and re-render')
     ledger_line = any(NO_LEDGER in x for x in limits)
     if "invariant_ledger" not in data and not ledger_line:
         add('limitations: without invariant_ledger, state "invariant ledger and close-check not machine-checked '

@@ -59,6 +59,8 @@ EXPERT_FIELDS = {"version", "mode", "host", "consent", "preflight", "spawns", "r
 RESERVED_FINDING = {"verification_workflow", "verdict", "source_link", "snippet"}
 # D-* findings belong to deps_scan.py; a fragment may only record their review.
 DEP_REVIEW = {"id", "validation", "verification"}
+# Merged finding ids match contract_check.py CODE_ID / DEP_ID (ASCII digits, no padding or case variants).
+FINDING_ID = re.compile(r"[FD]-[0-9]{3}")
 PROSE = ("title", "actor", "request", "impact", "fix")
 # Literal attack strings, not descriptions of them. Prose names the weakness
 # and the parameter; the payload itself never belongs in the report.
@@ -132,6 +134,9 @@ def fragment_problems(fragment, name):
             seen.add(identifier)
             if key == "findings" and RESERVED_FINDING.intersection(record):
                 problems.append(f"{name}: {identifier}: workflow journals and derived fields cannot be merged")
+            if key == "findings" and not FINDING_ID.fullmatch(identifier):
+                problems.append(f"{name}: finding id {identifier!r} must be F-NNN (code) or D-NNN (deps_scan.py)")
+                continue
             if key == "findings" and identifier.startswith("D-") and record.keys() - DEP_REVIEW:
                 problems.append(f"{name}: {identifier}: D-* scanner fields {sorted(record.keys() - DEP_REVIEW)} "
                                 "come only from deps_scan.py; merge only validation/verification")

@@ -32,18 +32,18 @@ Dockerfiles and Compose files:
 |---|---|
 | Manifest without a lockfile | Every install can resolve different, possibly compromised, versions |
 | Floating versions (`*`, `latest`, `dev-*`, unbounded `>`) | A newly published bad release is taken automatically |
-| Dependencies from git, URLs or local paths | Outside registry integrity and advisory coverage |
+| Dependencies from git, URLs or local paths outside the checkout (`file:`/`link:`/`./` paths that resolve inside it are first-party) | Outside registry integrity and advisory coverage |
 | Non-default registries, `--extra-index-url`, lockfile hosts | Dependency confusion: a public name can shadow an internal one |
 | Literal tokens in `.npmrc`, `.yarnrc.yml`, `.pypirc` | Publishing credentials in the repository |
 | Lockfile entries without integrity hashes, Composer `minimum-stability: dev`, pip `--find-links` | Downloads are not checked against a recorded hash, or unstable or unindexed packages are accepted |
 | NuGet configs with several package sources and no `packageSourceMapping` | Any source can serve any package name |
-| Package or submodule sources over `http://`/`git://`, TLS checks off (`strict-ssl=false`, `--trusted-host`, `allowInsecureProtocol`) | A network attacker can substitute code that runs in builds |
+| Package or submodule sources over `http://`/`git://` (Gradle: inside `repositories` blocks and `apply from:`), TLS checks off (`strict-ssl=false`, `--trusted-host`, `allowInsecureProtocol`) | A network attacker can substitute code that runs in builds |
 | Install-time scripts, `allow-plugins: true` | Dependency code runs on every install, including CI |
 | Actions not pinned to a commit SHA, or with no version at all | A moved or hijacked tag runs with the pipeline's secrets |
 | `pull_request_target`, `workflow_run`, event text inside `run:` or `github-script` | Outsider-controlled input reaches a privileged pipeline |
-| A privileged workflow (or a local workflow/action it calls) checking out the PR head (with `actions/checkout` or `git`/`gh pr checkout` in `run:`), downloading the triggering run's artifacts (`run-id:`), or running on a self-hosted runner; Confirmed when a later step builds or runs the checkout | The "pwn request": fork code runs with secrets and a write token |
+| A privileged workflow (or a local workflow/action it calls) checking out the PR head (with `actions/checkout`, `gh pr checkout`, or `git checkout`/`switch`/`reset`/`pull`/`merge`/`rebase`/`worktree` of the head, `FETCH_HEAD` or a fetched ref in the same `run:` step; a `git fetch` alone is data), downloading the triggering run's artifacts (`run-id:`), or running on a self-hosted runner; Confirmed when a later step builds or runs the checkout | The "pwn request": fork code runs with secrets and a write token |
 | `permissions: write-all`, `secrets: inherit` to another repository's workflow | One compromised step or repository gets every scope or secret |
-| Unpinned base images (including `ARG` defaults), Compose images and workflow `container:`/`services:`/`docker://` images, `ADD <url>` without `--checksum`, `curl … \| sh` in builds | The build executes whatever is served that day |
+| Unpinned base images (including `ARG` defaults), Compose images (also in `x-*` extension fields) and workflow `container:`/`services:`/`docker://` images, `ADD <url>` without `--checksum`, `curl … \| sh` in builds | The build executes whatever is served that day |
 | Known vulnerabilities (`--audit`) | Advisories matched against the exact locked versions |
 | Malicious packages (`--audit` with osv-scanner) | OSV includes OpenSSF malicious-package reports (`MAL-` IDs), reported as High |
 | Abandoned packages (Composer) | No fixes will come |
