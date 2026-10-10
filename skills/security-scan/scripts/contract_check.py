@@ -33,6 +33,21 @@ RENDERED = ("dashboard.html", "assessment.html")
 SOURCE_STAMP = re.compile(rb'<meta name="security-scan-source" content="sha256:([0-9a-f]{64})">')
 
 
+MAX_JSON_DEPTH = 200  # Newer Pythons parse very deep JSON without RecursionError.
+
+
+def json_depth(value):
+    depth, pending = 0, [(value, 1)]
+    while pending:
+        item, level = pending.pop()
+        if isinstance(item, (dict, list)):
+            depth = max(depth, level)
+            if level > MAX_JSON_DEPTH:
+                return level
+            pending.extend((child, level + 1) for child in (item.values() if isinstance(item, dict) else item))
+    return depth
+
+
 def perspective_names():
     """Canonical names, read from the table in reference/perspectives.md."""
     names, in_table = [], False
@@ -170,6 +185,8 @@ def main(argv=None):
     a = p.parse_args(argv)
     try:
         data = json.loads((a.out_dir / "findings.json").read_text(encoding="utf-8"))
+        if json_depth(data) > MAX_JSON_DEPTH:
+            raise RecursionError
         if not isinstance(data, dict):
             raise ValueError("findings.json must hold a JSON object")
     except RecursionError:

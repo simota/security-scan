@@ -851,16 +851,21 @@ def privileged_workflows(files, root):
             t = workflow_triggers(read(p)) & set(PRIVILEGED_TRIGGERS)
             if t:
                 priv[p.resolve()] = sorted(t)[0]
-    for p in list(priv):
-        repo = next((a for a in p.parents if a.name == ".github"), None)
+    # Follow local calls to a fixed point: a callee's own callees run in the
+    # same privileged context (a -> b.yml -> c.yml).
+    pending = list(priv)
+    while pending:
+        p = pending.pop()
+        repo = root if (root / ".github") in p.parents else next((a.parent for a in p.parents if a.name == ".github"), None)
         if repo is None:
             continue
         for m in re.finditer(r"""uses\s*:\s*["']?\./([^\s"'#@]+)""", read(p)):
-            target = (repo.parent / m.group(1)).resolve()
+            target = (repo / m.group(1)).resolve()
             for cand in (target, target / "action.yml", target / "action.yaml"):
                 # Only files of this checkout; scan() visits nothing else anyway.
-                if (cand == root or root in cand.parents) and cand.is_file():
-                    priv.setdefault(cand, priv[p])
+                if (cand == root or root in cand.parents) and cand.is_file() and cand not in priv:
+                    priv[cand] = priv[p]
+                    pending.append(cand)
     return priv
 
 
@@ -913,7 +918,9 @@ def check_extra_sources(c, p):
                       fix="Use a single index that proxies PyPI, or pin hashes")
     elif p.name.lower() == "nuget.config":
         adds = [i for i, ln in enumerate(text.splitlines(), 1) if re.search(r"<add\s+key=", ln)]
-        if len(adds) > 1 and "<clear" not in text and "<packageSourceMapping" not in text:
+        # <clear/> only drops inherited sources; two declared sources still race
+        # for every package id unless packageSourceMapping assigns them.
+        if len(adds) > 1 and "<packageSourceMapping" not in text:
             c.add("Medium", "nuget.config mixes several package sources without packageSourceMapping", p, adds[1],
                   category=CAT_BUILD, impact="Dependency confusion: any source may satisfy any package id",
                   fix="Add <packageSourceMapping> so each package prefix comes from one source")
@@ -934,8 +941,17 @@ def check_workflow(c, p, privileged=None):
               impact="Runs with repository secrets after fork PR workflows; dangerous if it uses their artifacts or code",
               fix="Treat artifacts and head refs of the triggering run as untrusted data; never execute them")
     if privileged:
+        step_uses = ""
         for i, ln in enumerate(lines, 1):
-            if re.match(r"\s*(?:ref|repository)\s*:", ln) and UNTRUSTED_REF.search(ln):
+            # The PR head is only executed when a checkout step fetches it; the same
+            # value passed to another action's ref/repository input is data.
+            if re.match(r"\s*-\s", ln):
+                step_uses = ""
+            used = re.match(r"""\s*(?:-\s+)?["']?uses["']?\s*:\s*["']?([^\s"'#]+)""", ln)
+            if used:
+                step_uses = used.group(1)
+            if (re.match(r"\s*(?:ref|repository)\s*:", ln) and UNTRUSTED_REF.search(ln)
+                    and re.match(r"actions/checkout@", step_uses)):
                 c.add("High", f"{privileged} workflow checks out the pull request's code", p, i,
                       category=CAT_BUILD, confidence="Suspected",
                       impact="Fork authors' code runs with repository secrets and a write token (pwn request)",

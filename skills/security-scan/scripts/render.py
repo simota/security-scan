@@ -783,12 +783,16 @@ def validate_json_values(data):
                 pending.append((f"{where}.{shown}" if where else shown, entry))
 
 
-def load(path):
+def load(path, raw=None):
+    """Parse and validate findings; raw is the exact bytes when the caller already read them."""
     def invalid_constant(value):
         raise SchemaError(f"{path}: invalid JSON constant {value}")
 
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"), parse_constant=invalid_constant)
+        raw = Path(path).read_bytes() if raw is None else raw
+        data = json.loads(raw.decode("utf-8"), parse_constant=invalid_constant)
+        if json_depth(data) > MAX_JSON_DEPTH:
+            raise SchemaError(f"{path}: JSON nesting is too deep")
     except json.JSONDecodeError as e:
         raise SchemaError(f"{path}: invalid JSON: {e}")
     except UnicodeError:
@@ -798,6 +802,23 @@ def load(path):
     except RecursionError:
         raise SchemaError(f"{path}: JSON nesting is too deep") from None
     return validate_data(data)
+
+
+# Records are shallow. Newer Pythons parse very deep JSON without
+# RecursionError, so the depth is checked explicitly.
+MAX_JSON_DEPTH = 200
+
+
+def json_depth(value):
+    depth, pending = 0, [(value, 1)]
+    while pending:
+        item, level = pending.pop()
+        if isinstance(item, (dict, list)):
+            depth = max(depth, level)
+            if level > MAX_JSON_DEPTH:
+                return level
+            pending.extend((child, level + 1) for child in (item.values() if isinstance(item, dict) else item))
+    return depth
 
 
 def validate_data(data):
@@ -2273,7 +2294,9 @@ def main(argv=None):
     if a.evidence_repository and not a.evidence_root:
         p.error("--evidence-repository requires --evidence-root")
     try:
-        data = load(a.findings)
+        # One read: the stamp must describe exactly the bytes that were rendered.
+        source = Path(a.findings).read_bytes()
+        data = load(a.findings, source)
         integrity = None
         if a.evidence_root is not None:
             try:
@@ -2289,7 +2312,7 @@ def main(argv=None):
         assessment = render_assessment_html(data, L, a.lang, integrity=integrity)
         # Bind each page to the exact findings.json bytes it shows, so
         # contract_check.py can tell a stale report without trusting mtimes.
-        digest = hashlib.sha256(Path(a.findings).read_bytes()).hexdigest()
+        digest = hashlib.sha256(source).hexdigest()
         stamp = f'<meta name="security-scan-source" content="sha256:{digest}">'
         dashboard, assessment = (page.replace("<head>", "<head>" + stamp, 1) for page in (dashboard, assessment))
     except RecursionError:

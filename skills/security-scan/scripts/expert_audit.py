@@ -85,6 +85,8 @@ def main(argv=None):
         p.error("--evidence-repository requires --evidence-root")
     try:
         data = json.loads((a.out_dir / "findings.json").read_text(encoding="utf-8"))
+        if contract_check.json_depth(data) > contract_check.MAX_JSON_DEPTH:
+            raise RecursionError
         if not isinstance(data, dict):
             raise ValueError("findings.json must hold a JSON object")
         result = audit(data, a.out_dir, pdf=not a.no_pdf, evidence_root=a.evidence_root,

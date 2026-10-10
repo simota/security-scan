@@ -62,25 +62,13 @@ PAYLOAD = re.compile(
 )
 
 
-MAX_DEPTH = 200  # Records are shallow; deeper input would overflow copy/validation recursion.
-
-
-def nesting_depth(value):
-    depth, pending = 0, [(value, 1)]
-    while pending:
-        item, level = pending.pop()
-        if isinstance(item, (dict, list)):
-            depth = max(depth, level)
-            pending.extend((child, level + 1) for child in (item.values() if isinstance(item, dict) else item))
-    return depth
-
-
 def read_json(path, raw=None):
     try:
         raw = Path(path).read_bytes() if raw is None else raw
         value = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object)
-        if nesting_depth(value) > MAX_DEPTH:
-            raise ValueError(f"JSON nesting deeper than {MAX_DEPTH} levels")
+        # Deeper input would overflow copy/validation recursion later.
+        if render.json_depth(value) > render.MAX_JSON_DEPTH:
+            raise ValueError(f"JSON nesting deeper than {render.MAX_JSON_DEPTH} levels")
         return value
     except (OSError, UnicodeError, ValueError, RecursionError) as e:
         raise render.SchemaError(f"{path}: {e}") from None

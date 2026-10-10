@@ -128,6 +128,24 @@ class SupplyChainReviewTests(unittest.TestCase):
         self.assertEqual(c.findings[0]["fix"], "Upgrade to 1.2.6")
         self.assertIn("https://github.com/o/r/commit/abc", [r["url"] for r in c.findings[0]["references"]])
 
+    def test_privilege_follows_local_calls_transitively_and_only_checkouts_run_code(self):
+        sha = "0" * 40
+        head = "${{ github.event.pull_request.head.sha }}"
+        self.write(".github/workflows/a.yml", "on: pull_request_target\njobs:\n  b:\n    uses: ./.github/workflows/b.yml\n")
+        self.write(".github/workflows/b.yml", "on: workflow_call\njobs:\n  c:\n    uses: ./.github/workflows/c.yml\n")
+        self.write(".github/workflows/c.yml",
+                   "on: workflow_call\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n"
+                   "      - uses: some/reporter@" + sha + "\n        with:\n          ref: " + head + "\n"
+                   "      - uses: actions/checkout@" + sha + "\n        with:\n          ref: " + head + "\n")
+        pwn = [loc for sev, loc, t in self.findings() if "checks out the pull request's code" in t]
+        self.assertEqual(pwn, [".github/workflows/c.yml:11"])
+
+    def test_nuget_clear_does_not_hide_mixed_sources(self):
+        self.write("nuget.config", "<configuration><packageSources><clear />\n<add key=\"a\" value=\"https://a.example/v3\" />\n"
+                                   "<add key=\"b\" value=\"https://api.nuget.org/v3/index.json\" />\n</packageSources></configuration>\n")
+        self.assertIn("nuget.config mixes several package sources without packageSourceMapping",
+                      [t for _, _, t in self.findings()])
+
     def test_this_repository_stays_clean(self):
         root = Path(__file__).resolve().parents[1]
         self.assertEqual(self.deps.scan(root, False)["findings"], [])

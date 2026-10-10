@@ -34,6 +34,21 @@ class FuzzRegressionTests(unittest.TestCase):
         (self.out / "findings.json").write_text('{"x":' + "[" * 9998 + "]" * 9998 + "}")
         self.assertEqual(self.run_cli("expert_audit.py", self.out, "--no-pdf"), 2)
 
+    def test_depth_limit_does_not_depend_on_the_json_parser(self):
+        # 300 levels parse on every Python; the explicit limit must still refuse them.
+        (self.out / "findings.json").write_text('{"x":' + "[" * 300 + "]" * 300 + "}")
+        self.assertEqual(self.run_cli("expert_audit.py", self.out, "--no-pdf"), 2)
+        self.assertEqual(self.run_cli("contract_check.py", self.out), 2)
+        self.assertEqual(self.run_cli("render.py", self.out / "findings.json", "--out", self.tmp / "r", "--no-pdf"), 2)
+
+    def test_render_stamps_the_bytes_it_rendered(self):
+        sys.path.insert(0, str(SCRIPTS))
+        import render
+        path = self.tmp / "f.json"
+        rendered = {"meta": {"project": "Rendered", "date": "2026-10-10"}, "findings": []}
+        path.write_text(json.dumps(dict(rendered, meta={"project": "Other", "date": "2026-10-10"})))
+        self.assertEqual(render.load(path, json.dumps(rendered).encode())["meta"]["project"], "Rendered")
+
     def test_findings_merge_with_deep_fragment_or_base(self):
         fragment = self.tmp / "frag.json"
         fragment.write_text('{"limitations":[' + "[" * 498 + "]" * 498 + "]}")
