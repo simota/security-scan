@@ -312,6 +312,19 @@ class SecondLanguageTests(Pipeline):
         problems = contract_check.check(data, self.out, pdf=False, allow=["ja"])
         self.assertTrue(any("ja/dashboard.html was not rendered from the current findings.json" in p
                             for p in problems), problems)
+        # A language copy missing one page is incomplete, not quietly accepted.
+        self.assertEqual(render.main([str(self.findings), "--out", str(self.out / "ja"), "--lang", "ja", "--no-pdf"]), 0)
+        (self.out / "ja" / "assessment.html").unlink()
+        problems = contract_check.check(data, self.out, pdf=False, allow=["ja"])
+        self.assertTrue(any(p.startswith("ja/assessment.html: missing") for p in problems), problems)
+
+
+class CodexRound8RecordTests(unittest.TestCase):
+    def test_word_like_literal_jwt_keys_are_refused(self):
+        for line in ('jwt.sign(payload, "supersecret")', "jwt.encode(payload, 'secret', algorithm='HS256')"):
+            with self.subTest(line=line):
+                self.assertTrue(render.secret_in_source("src/auth.js", line + "\n"))
+        self.assertFalse(render.secret_in_source("src/auth.js", "jwt.sign(payload, process.env.JWT_SECRET)\n"))
 
 
 if __name__ == "__main__":

@@ -1420,10 +1420,9 @@ EXECUTES_CHECKOUT = re.compile(
 GIT_MOVES = {"checkout", "switch", "reset", "worktree", "pull", "merge", "rebase", "cherry-pick", "clone"}
 
 
-def git_commands(line):
-    """(subcommand, args) of every git command in a shell line; linear, no regex backtracking."""
-    out = []
-    # Shell separators inside ${{ }} belong to the expression, e.g. format('pull/{0}/head', …).
+def shell_text(line):
+    """line with shell separators inside ${{ }} blanked: they belong to the expression,
+    e.g. format('pull/{0}/head', …) or `head_ref || 'main'`. Linear."""
     parts, at = [], 0
     while True:
         start = line.find("${{", at)
@@ -1432,7 +1431,12 @@ def git_commands(line):
             break
         parts += [line[at:start], re.sub(r"[;&|()`,]", " ", line[start:end + 2])]
         at = end + 2
-    line = "".join(parts) + line[at:]
+    return "".join(parts) + line[at:]
+
+
+def git_commands(line):
+    """(subcommand, args) of every git command in a shell line; linear, no regex backtracking."""
+    out, line = [], shell_text(line)
     for seg in re.split(r"[;&|()`]", line):
         words = [w.strip("'\"") for w in seg.split()]  # "a:b" and a:b name the same refspec
         starts = [k for k, w in enumerate(words) if w == "git" or w.endswith("/git")]
@@ -1721,7 +1725,11 @@ def check_workflow(c, p, privileged=None, calls=None):
                 # reassigned; fetching the PR head is data until a later row checks out,
                 # resets or merges onto FETCH_HEAD, the fetched ref or a refspec target.
                 fetched, hits = job_fetched.setdefault(job, set()), []
-                for k, x in run:
+                # One row may hold several commands (`SHA=…; git checkout "$SHA"`, or an
+                # inline `run: …`): each runs after the ones before it on the row.
+                segments = [(k, seg) for k, row in run
+                            for seg in re.split(r";|&&|\|\|", shell_text(re.sub(r"""^\s*(?:-\s+)?["']?run["']?\s*:\s*""", "", row)))]
+                for k, x in segments:
                     if not hits and (re.search(r"\bgh\s+pr\s+checkout\b", x)
                                      or re.search(r"\bgh\s+repo\s+clone\b", x) and untrusted(x)):
                         hits = [k]

@@ -136,6 +136,13 @@ class CodexRound8Tests(Base):
         self.assertFalse(self.high(run + "          SHA=main\n          git checkout \"$SHA\"\n"))
         self.assertTrue(self.high(run + "          git checkout \"$SHA\"\n          SHA=main\n"))
 
+    def test_assignment_and_checkout_on_one_row(self):
+        for step in ('      - run: SHA=${{ github.event.pull_request.head.sha }}; git checkout "$SHA"\n',
+                     '      - run: |\n          SHA=${{ github.event.pull_request.head.sha }} && git checkout "$SHA"\n'):
+            with self.subTest(step=step):
+                self.assertTrue(self.high(PRT + "    steps:\n" + step))
+        self.assertTrue(self.high(PRT + "    steps:\n      - run: git checkout ${{ github.head_ref || 'main' }}\n"))
+
 
 class UrlUserinfoTests(unittest.TestCase):
     def test_service_url_passwords_with_delimiters_are_redacted(self):

@@ -1497,7 +1497,8 @@ def secret_in_source(rel, text):
         return True
     config = config_source(rel)
     for line in text.split("\n"):
-        if any(secret_value(m.group(3)) for m in JWT_KEY_LITERAL.finditer(line)):
+        # A literal signing key is a secret even when it reads like a word ("supersecret").
+        if any(m.group(3) and not _NOT_SECRET.match(m.group(3)) for m in JWT_KEY_LITERAL.finditer(line)):
             return True
         for run in _KEY_RUN.finditer(line):
             name = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", run.group())
