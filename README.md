@@ -30,8 +30,12 @@ RECON ─► CHECKLIST ─► REVIEW ─► VERIFY ─► REPORT
   manifest and lockfile and flags missing lockfiles, floating versions, git/URL
   sources, extra registries (dependency confusion), install-time scripts, CI
   actions not pinned to a SHA, risky workflow triggers and unpinned base images.
+  It also flags plaintext package sources and disabled TLS checks, literal
+  registry credentials, the "pwn request" (a privileged workflow running PR
+  code), `permissions: write-all`, `secrets: inherit` and Compose images.
   With `--audit` it runs osv-scanner (including malicious-package reports),
-  `composer audit` and `npm audit`, and lists every audit it could not run
+  plus `composer audit`, and `npm audit`/`pip-audit` as fallbacks for locks
+  OSV did not cover, and lists every audit it could not run
 - **Validation** — every finding gets a verdict (`Valid`, `Likely`,
   `Unverified`, `Unlikely`, `FalsePositive`, `NotApplicable`) with evidence.
   New structured records link four claims (reachability, preconditions, defenses
@@ -92,8 +96,13 @@ python3 skills/security-scan/scripts/findings.py merge out/findings.json frag-00
 python3 skills/security-scan/scripts/evidence_capture.py /path/to/repo --findings out/findings.json src/a.py src/b.py
 python3 skills/security-scan/scripts/deps_scan.py /path/to/repo --audit --out out/deps.json --into out/findings.json
 python3 skills/security-scan/scripts/render.py out/findings.json --out out --repo /path/to/repo
-python3 skills/security-scan/scripts/contract_check.py out      # exit 1 lists each violation
+python3 skills/security-scan/scripts/contract_check.py out      # 0 ok, 1 lists each violation, 2 unreadable input
 ```
+
+`render.py` stamps both HTML files with
+`<meta name="security-scan-source" content="sha256:…">`, the digest of the
+`findings.json` bytes it rendered; `contract_check.py` reports a page whose
+stamp does not match the current file as not rendered from it.
 
 The check covers shape and provenance markers, not whether a finding is true;
 hosts can still find different issues, but no longer report them differently.
@@ -117,7 +126,7 @@ assurance* section, and the run is labelled expert-grade only when the gate
 passes:
 
 ```sh
-python3 skills/security-scan/scripts/expert_audit.py out   # 0 complete, 3 held/degraded
+python3 skills/security-scan/scripts/expert_audit.py out   # 0 complete; 3 held, degraded or no expert record
 # If fresh evidence integrity is required, check it in the audit process too:
 python3 skills/security-scan/scripts/expert_audit.py out \
   --evidence-root out --evidence-repository /path/to/repo
@@ -178,7 +187,8 @@ as historical and never changes the current verdict or counts.
 The PDF is printed with headless Chrome/Chromium (`CHROME=/path/to/binary` to
 choose one), falling back to WeasyPrint. With neither available the HTML files
 are still written and the script exits `3`. Exit `2` means `findings.json` does
-not match the schema; the message names the field. Validation evidence must be
+not match the schema (the message names the field) or an output could not be
+written. Validation evidence must be
 a string; `Valid`, `FalsePositive` and `NotApplicable` require a nonblank string.
 Null, booleans, numbers, arrays and objects cannot justify an exclusion.
 Required report text (including finding IDs, titles and locations) must be
@@ -397,8 +407,10 @@ npm explicitly includes prod, dev, optional and peer dependencies, even when
 `.npmrc` or the environment omits them, and disables lifecycle scripts.
 The npm fallback now requires a single-project lock. Shared workspace or linked
 package locks require OSV coverage; otherwise they are explicitly incomplete.
-Single-project auditing neutralizes inherited workspace mode without changing
-registry or authentication configuration.
+Single-project auditing neutralizes inherited workspace mode. The audit runs
+on an isolated copy of the lock against the public npm registry, with empty
+user and global npmrc files and no inherited `npm_config_*` variables, so a
+project `.npmrc` cannot redirect the advisory request.
 Composer runs with `--no-plugins --no-scripts` against a temporary copy of the
 lockfile, an auditor-owned manifest and an empty Composer home. Project/global
 exclusions and `COMPOSER*` environment overrides are not inherited; abandoned
@@ -500,7 +512,7 @@ examples/reproduction.plan.sample.json      deterministic SQLite owner-scope dem
 make test    # offline unit/regression tests; all audit subprocesses are mocked
 make check   # tests plus citations and relative links resolve in every document
              # (scripts/ci/check_doc_refs.py), references headed, frontmatter
-             # valid, scripts compile, sample renders
+             # valid, scripts compile, sample renders, deps_scan.py runs on this repo
 ```
 
 Requirements: Python 3.9+ (Python 3.11+ for Cargo workspace ownership parsing);

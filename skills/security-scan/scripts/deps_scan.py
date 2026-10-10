@@ -1,25 +1,38 @@
 #!/usr/bin/env python3
 """Inventory dependencies and flag supply-chain and known-vulnerability risks.
 
-    python3 deps_scan.py REPO [--audit] [--out deps.json] [--into findings.json]
+    python3 deps_scan.py REPO [--audit [--strict]] [--out deps.json] [--into findings.json]
 
-Static checks (always, no network):
-  - manifests without a lockfile, unpinned or floating versions
-  - dependencies fetched from git / URLs / local paths, non-default registries
-  - extra package indexes (dependency-confusion exposure), install-time scripts
-  - CI workflows: third-party actions not pinned to a commit SHA,
-    pull_request_target triggers, untrusted event data inside run steps
-  - container base images without a pinned tag or digest
+Static checks (always, no network; nothing in the repository is executed):
+  - manifests that declare dependencies without a lockfile (npm/Yarn, block-style
+    pnpm and Cargo workspace membership resolved), unpinned or floating versions
+  - dependencies fetched from git / URLs / paths outside the checkout, lockfiles
+    resolving from git, local paths or non-default hosts
+  - package sources over plaintext http:// or git://, disabled TLS checks,
+    extra indexes and unmapped NuGet sources (dependency confusion), literal
+    registry/upload credentials, install-time scripts
+  - CI workflows and actions: actions not pinned to a commit SHA, unpinned
+    container images, pull_request_target / workflow_run risks (PR head checkout,
+    including from run steps and followed through local reusable workflows and
+    composite actions, artifact downloads, self-hosted runners), write-all
+    permissions, inherited secrets, untrusted event text inside run steps
+  - Dockerfile and compose base images without a pinned tag or digest
+Inputs that cannot be analysed safely (escaped YAML, unsupported workspace
+syntax, links, files over 64 MiB, pruned build/vendor directories holding
+manifests) are listed under "not_run", never treated as clean.
+
 --audit additionally runs whichever audit tools are installed
-(osv-scanner, composer audit, npm audit, pip-audit) and converts their
-results into findings. Cargo is OSV-only; other unsupported audits are recorded
-as incomplete. These need network
-access to vulnerability databases; a tool that is missing or fails is listed
-under "not_run", never silently skipped.
+(osv-scanner, composer audit, npm audit, pip-audit) in isolated configurations
+and converts their results into findings. Cargo is OSV-only; other unsupported
+audits are recorded as incomplete. These need network access to vulnerability
+databases; a tool that is missing or fails is listed under "not_run", never
+silently skipped. Without --audit, "not_run" names how many pinned packages were
+not matched against advisories. --strict exits 3 when anything was not run.
 
 Output: {"inventory": [...], "findings": [...], "not_run": [...]} with findings
-in the findings.json shape. --into appends them to an existing findings.json.
-Standard library only.
+in the findings.json shape. --into replaces the D-* findings of an existing
+findings.json (keeping prior manual reviews as history) and records not_run
+entries as limitations. Standard library only.
 """
 import argparse
 import json
@@ -39,6 +52,10 @@ from findings import MergeConflict, write_report  # The shared findings.json wri
 
 SKIP_DIRS = {".git", "node_modules", "vendor", ".venv", "venv", "dist", "build",
              "target", "__pycache__", ".next", ".nuxt", "bower_components", ".tox"}
+# Pruned silently: these never hold first-party manifests.
+QUIET_SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "bower_components", ".tox"}
+MAX_READ = 64 << 20
+_OVERSIZED = set()
 
 LOCKS = {
     "package.json": ["package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb", "npm-shrinkwrap.json"],
@@ -67,6 +84,11 @@ def is_requirements(p, suffixes=("txt", "in")):
 
 CAT_DEP = "Dependencies and platform"
 CAT_BUILD = "Build and delivery"
+
+
+def printable(text):
+    """Escape control/format characters so a location or title stays one line."""
+    return "".join(ch if ch.isprintable() else ascii(ch)[1:-1] for ch in str(text))
 
 
 def safe_output(value):
@@ -109,7 +131,7 @@ def audit_input(c, root, path, companions=()):
     """Recheck file operands and optional project config before a subprocess."""
     paths = [Path(path)] + [Path(path).parent / name for name in companions
                             if os.path.lexists(Path(path).parent / name)]
-    if all(safe_file(p, root) for p in paths):
+    if all(safe_file(p, root) and p.stat().st_size <= MAX_READ for p in paths):
         return True
     c.not_run.append({"tool": "audit input", "reason": f"{c.rel(path)}: unsafe or missing input/config file"})
     return False
@@ -126,9 +148,9 @@ class Collector:
         return os.path.relpath(p, self.root)
 
     def add(self, severity, title, path, line=None, impact="", fix="", confidence="Confirmed", category=CAT_DEP):
-        loc = self.rel(path) + (f":{line}" if line else "")
+        loc = printable(self.rel(path)) + (f":{line}" if line else "")
         self.findings.append({
-            "id": f"D-{len(self.findings) + 1:03d}", "title": redact_urls(title), "severity": severity,
+            "id": f"D-{len(self.findings) + 1:03d}", "title": redact_urls(printable(title)), "severity": severity,
             "confidence": confidence, "category": category, "location": loc, "actor": "",
             "request": "", "impact": redact_urls(impact), "fix": redact_urls(fix), "status": "Open"})
 
@@ -137,6 +159,13 @@ def walk(root, not_run=None):
     root = Path(root).resolve()
 
     def skipped(path):
+        name = Path(path).name
+        try:  # An in-checkout link to a non-input is scanned on its own path.
+            inside = Path(path).is_symlink() and Path(path).resolve(strict=True).is_relative_to(root)
+        except (OSError, RuntimeError):
+            inside = False
+        if inside and not scan_input(name):
+            return
         if not_run is not None:
             not_run.append({"tool": "file scan", "reason": f"{os.path.relpath(path, root)}: "
                             "skipped symlink, non-regular or unreadable path"})
@@ -147,6 +176,14 @@ def walk(root, not_run=None):
         kept = []
         for name in dirs:
             if name in SKIP_DIRS or name.startswith(".cache"):
+                if not_run is not None and name not in QUIET_SKIP_DIRS:
+                    try:
+                        known = sorted(x for x in os.listdir(Path(d) / name) if dependency_file(x))
+                    except OSError:
+                        known = []
+                    if known:
+                        not_run.append({"tool": "file scan", "reason": f"{os.path.relpath(Path(d) / name, root)}: "
+                                        f"skipped directory contains {known[0]}; scan it separately if first-party"})
                 continue
             path = Path(d) / name
             if path.is_symlink():
@@ -204,6 +241,9 @@ def read(p):
     if not safe_file(p):
         return ""
     try:
+        if os.stat(p).st_size > MAX_READ:
+            _OVERSIZED.add(Path(p))
+            return ""
         return p.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
@@ -237,10 +277,29 @@ def workspace_pattern(relative, pattern):
     return match(path, parts)
 
 
+def pnpm_packages(path):
+    """Globs of a block-style `packages:` list; None for any other syntax."""
+    out, inside = [], False
+    for ln in read(path).lstrip("\ufeff").splitlines():
+        if re.match(r"packages\s*:\s*(#.*)?$", ln):
+            inside = True
+        elif inside and ln.strip() and not ln.lstrip().startswith("#"):
+            m = re.match(r"""\s*-\s+(['"]?)([^'"#\s]+)\1\s*(#.*)?$""", ln)
+            if m:
+                out.append(m[2])
+            elif ln[:1].isspace() or ln.startswith("-"):
+                return None
+            else:
+                inside = False
+        elif not inside and re.match(r"packages\s*:", ln):
+            return None
+    return out
+
+
 def matching_lockfiles(c, manifest):
     """Return safe lockfiles, [] for absent locks, None for unknown ownership.
 
-    Resolve explicit Cargo and npm/Yarn memberships without executing tools.
+    Resolve explicit Cargo, npm/Yarn and block-style pnpm memberships without executing tools.
     Unsupported workspace syntax is incomplete, never guessed as covered.
     """
     manifest, root = Path(manifest), Path(c.root).resolve()
@@ -255,7 +314,7 @@ def matching_lockfiles(c, manifest):
         return local
 
     def parse(path):
-        if not safe_file(path, root):
+        if not safe_file(path, root) or path.stat().st_size > MAX_READ:
             raise ValueError("unsafe workspace manifest")
         if path.name == "package.json":
             value = json.loads(path.read_text(encoding="utf-8"))
@@ -285,6 +344,17 @@ def matching_lockfiles(c, manifest):
         directory = manifest.parent.parent
         while directory == root or root in directory.parents:
             parent = directory / manifest.name
+            pnpm = directory / "pnpm-workspace.yaml"
+            declared = False
+            if manifest.name == "package.json" and os.path.lexists(pnpm):
+                patterns = pnpm_packages(pnpm) if safe_file(pnpm, root) else None
+                if patterns is None:
+                    return unknown("pnpm YAML workspace membership requires manual ownership validation")
+                relative = manifest.parent.relative_to(directory).as_posix()
+                if (any(workspace_pattern(relative, x) for x in patterns if not x.startswith("!"))
+                        and not any(workspace_pattern(relative, x[1:]) for x in patterns if x.startswith("!"))):
+                    return locks(directory)
+                declared = True
             if os.path.lexists(parent):
                 data = parse(parent)
                 cargo = manifest.name == "Cargo.toml"
@@ -309,10 +379,8 @@ def matching_lockfiles(c, manifest):
                     if cargo:
                         return unknown("implicit Cargo path-dependency membership was not resolved")
                     return []
-            # Do not claim a pnpm member has no lock merely because package.json
-            # does not define npm workspaces. Full YAML membership is not parsed.
-            if manifest.name == "package.json" and os.path.lexists(directory / "pnpm-workspace.yaml"):
-                return unknown("pnpm YAML workspace membership requires manual ownership validation")
+            if declared:
+                return []  # Not a member of the pnpm workspace rooted here.
             if directory == root:
                 break
             directory = directory.parent
@@ -330,6 +398,8 @@ def workflow_run_blocks(c, path, text):
     """
     mapping = re.compile(r'''^( *)(- +)?(?:([A-Za-z0-9_.-]+)|"([A-Za-z0-9_.-]+)"|'([A-Za-z0-9_.-]+)')\s*:\s*(.*)$''')
     stack, block, run_lines, step_uses = [], None, [], {}
+    # A step's `uses:` may follow its `with:`; resolve it per step before the walk.
+    item_uses = {x["start"] + 1: step_value(x, "uses") for x in yaml_items(text.splitlines())}
     if text.lstrip().startswith(("{", "[")):
         incomplete(c, "workflow run scan", path, "flow-style workflow requires manual review")
     for number, line in enumerate(text.splitlines(), 1):
@@ -373,14 +443,12 @@ def workflow_run_blocks(c, path, text):
             stack.pop()
         # The `uses:` of the step at this level; a new sequence item starts a new step.
         if match[2]:
-            step_uses[level] = None
-        if key == "uses":
-            step_uses[level] = value.split("#", 1)[0].strip().strip("'\"")
+            step_uses[level] = item_uses.get(number)
         # run: is a shell script; with.script of actions/github-script is JavaScript.
         # Both evaluate ${{ }} before the code runs. Other actions' script inputs are data.
         is_run = bool(stack) and (key == "run" and stack[-1][1] == "steps"
                                   or key == "script" and stack[-1][1] == "with"
-                                  and str(step_uses.get(stack[-1][0]) or "").startswith("actions/github-script@"))
+                                  and str(step_uses.get(stack[-1][0]) or "").lower().startswith("actions/github-script@"))
         if (value.startswith(("*", "&", "!"))
                 or key == "steps" and value and not value.startswith("#")
                 or value.startswith(("{", "[")) and (key == "jobs" or stack and stack[-1][1] == "jobs")):
@@ -441,6 +509,11 @@ def untrusted_workflow_expression(c, path, expression):
         ("event", "issue", "id"), ("event", "issue", "number"),
         ("event", "pull_request", "id"), ("event", "pull_request", "number"),
         ("event", "comment", "id"), ("event", "review", "id"),
+        # Scalar SHAs, ids and booleans: never attacker-chosen text.
+        ("event", "after"), ("event", "before"), ("event", "pull_request", "head", "sha"),
+        ("event", "pull_request", "base", "sha"), ("event", "pull_request", "head", "repo", "fork"),
+        ("event", "workflow_run", "id"), ("event", "workflow_run", "head_sha"),
+        ("event", "workflow_run", "run_attempt"), ("event", "workflow_run", "run_number"),
     }
     untrusted = False
     close, stack = {}, []
@@ -542,6 +615,13 @@ def declares_dependencies(p):
         return declares_python_dependencies(read(p))
     if p.name in ("setup.py", "setup.cfg"):
         return re.search(r"\binstall_requires\b", read(p)) is not None
+    if p.name == "package.json":
+        try:
+            data = json.loads(read(p).lstrip("\ufeff"))
+        except (ValueError, RecursionError):
+            return True
+        return not isinstance(data, dict) or any(
+            mapping(data.get(s)) for s in ("dependencies", "devDependencies", "optionalDependencies"))
     return True
 
 
@@ -589,6 +669,16 @@ def npm_floating(spec):
     return False
 
 
+def npm_local_path(c, manifest, spec):
+    """A relative file:/link: or ./ path that stays inside this checkout is first-party code."""
+    m = re.match(r"(file:|link:)?(.*)$", spec, re.S)
+    if not (m[2] and not re.match(r"[/\\~]|[A-Za-z][\w+.-]*:", m[2]) if m[1] else re.match(r"\.{1,2}/", m[2])):
+        return False
+    # realpath follows in-checkout symlinks to their targets, as npm does.
+    target, root = os.path.realpath(os.path.join(Path(manifest).parent, m[2])), os.path.realpath(c.root)
+    return os.path.commonpath([target, root]) == root
+
+
 def check_npm(c, p):
     text, data = load_json_object(c, p, "package.json scan")
     if data is None:
@@ -597,11 +687,13 @@ def check_npm(c, p):
         for name, spec in mapping(data.get(section)).items():
             spec = str(spec).strip()
             ln = line_of(text, f'"{name}"')
+            if npm_local_path(c, p, spec):
+                continue
             if NPM_EXTERNAL_SOURCE.match(spec):
                 c.add("Medium", f"npm dependency {name} is fetched outside the registry ({spec})", p, ln,
                       impact="Bypasses registry integrity and advisory coverage; the source can change",
                       fix="Depend on a published, version-pinned release")
-            elif npm_floating(spec):
+            elif npm_floating(spec) and section != "peerDependencies":
                 c.add("Medium", f"npm dependency {name} floats to any version ({spec or 'empty'})", p, ln,
                       impact="A newly published malicious or broken release is installed automatically",
                       fix="Use a bounded range and the lockfile")
@@ -759,14 +851,19 @@ def check_requirements(c, p):
             s = editable.group(3).strip()
             if not re.match(r"^(git\+|https?://|hg\+|svn\+|bzr\+)", s):
                 continue  # A local editable path is first-party code, not a fetched dependency.
-        if s.startswith("--extra-index-url"):
+        extra = s.startswith("--extra-index-url")
+        if extra:
             c.add("Medium", "pip --extra-index-url mixes a second index with PyPI", p, i,
                   impact="A public package can shadow an internal one with the same name",
                   fix="Use a single index (a mirror that proxies PyPI) or pin hashes", category=CAT_BUILD)
-        elif re.match(r"^--trusted-host\b", s) or re.match(r"^(--index-url|--extra-index-url|-i|-f|--find-links)[\s=]+http://", s):
+        plain = (re.match(r"^--trusted-host[\s=]+(\S*)", s)
+                 or re.match(r"^(?:--index-url|--extra-index-url|-i|-f|--find-links)[\s=]+http://(?:[^@/\s]*@)?(\[[^\]]*\]|[^:/\s]*)", s))
+        if plain and plain[1].strip("[]").lower() not in LOCAL_HOSTS:
             c.add("Medium", "pip installs from a source without TLS verification (see source location)", p, i,
                   impact="A network attacker can serve modified packages", category=CAT_BUILD,
                   fix="Use an https:// index with a trusted CA")
+        elif extra or re.match(r"^--trusted-host\b", s):
+            continue
         elif s.startswith("--index-url") or s.startswith("-i "):
             c.add("Info", "pip index overridden (see source location)", p, i, impact="Confirm the index is trusted",
                   category=CAT_BUILD)
@@ -785,11 +882,27 @@ def check_requirements(c, p):
                   fix="Pin with == (and --hash for reproducible installs) or use a lockfile")
 
 
+def ruby_code(ln):
+    """The line without a trailing # comment outside quotes."""
+    quote = None
+    for i, ch in enumerate(ln):
+        if quote:
+            quote = None if ch == quote else quote
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "#":
+            return ln[:i]
+    return ln
+
+
 def check_gemfile(c, p):
     text = read(p)
+    outside = r"""['"](?:/|\.\./)"""  # Only an absolute or parent path leaves this checkout.
     for i, ln in enumerate(text.splitlines(), 1):
-        if (re.search(r"^\s*gem\s.*(\b(git|github|path)\s*:|:(git|github|path)\s*=>)", ln)
-                or re.match(r"""^\s*(git|github|path)\s*\(?\s*['"]""", ln)):
+        ln = ruby_code(ln)
+        if (re.search(r"^\s*gem\s.*(\b(git|github)\s*:|:(git|github)\s*=>|\bpath\s*:\s*" + outside
+                      + r"|:path\s*=>\s*" + outside + ")", ln)
+                or re.match(r"""^\s*(git|github)\s*\(?\s*['"]|^\s*path\s*\(?\s*""" + outside, ln)):
             c.add("Medium", "gem fetched outside rubygems (see source location)", p, i,
                   impact="Bypasses rubygems integrity and advisory coverage", fix="Use a released gem version")
         if re.search(r"^\s*source\s+['\"](?!https://rubygems\.org)", ln):
@@ -817,28 +930,71 @@ def check_gomod(c, p):
 
 
 PRIVILEGED_TRIGGERS = ("pull_request_target", "workflow_run")
-UNTRUSTED_REF = re.compile(r"\$\{\{\s*github\.(?:head_ref|event\.pull_request\.head\.(?:sha|ref|repo\.full_name)"
-                           r"|event\.workflow_run\.head_(?:sha|branch|repository\.full_name))\b")
+UNTRUSTED_REF = re.compile(r"\$\{\{\s*github\.(?:head_ref|event\.pull_request\.(?:head\.(?:sha|ref|repo\.full_name)|merge_commit_sha)"
+                           r"|event\.workflow_run\.head_(?:sha|branch|repository\.full_name))\b"
+                           r"|refs/pull/\$\{\{\s*github\.event\.(?:pull_request\.)?number\s*\}\}/(?:merge|head)\b")
+# Any expression naming the PR head (or its number, for refs/pull/N fetches).
+UNTRUSTED_HEAD = re.compile(r"\$\{\{\s*github\.(?:head_ref|event\.(?:number|pull_request\.(?:head\.[\w.]+|merge_commit_sha|number)"
+                            r"|workflow_run\.head_[\w.]+))")
+
+
+def flow_depth(code):
+    return len(re.findall(r"[\[{]", code)) - len(re.findall(r"[\]}]", code))
+
+
+def on_section(text):
+    """(1-based line, line, in-flow) of the top-level `on:` key, its block and multi-line flow value."""
+    out, depth = [], None
+    for number, ln in enumerate(text.splitlines(), 1):
+        if depth is None:
+            m = re.match(r"""["']?on["']?\s*:(.*)$""", ln)
+            if m:
+                depth = flow_depth(m[1].split("#")[0])
+                out.append((number, ln, True))
+            continue
+        if depth > 0:
+            depth += flow_depth(ln.split("#")[0])
+            out.append((number, ln, True))
+        elif ln.strip() and not ln[:1].isspace() and not ln.lstrip().startswith("#"):
+            break
+        else:
+            out.append((number, ln, False))
+    return out
 
 
 def workflow_triggers(text):
-    """Trigger names, from `on: x`, `on: [x, y]` and block `on:` keys (conservative)."""
-    found, in_on = set(), None
-    for ln in text.splitlines():
-        m = re.match(r"""^(\s*)["']?on["']?\s*:\s*(.*)$""", ln)
-        if m and not m.group(1):
-            found |= set(re.findall(r"[a-z_]+", m.group(2).split("#")[0]))
-            in_on = 0
+    """Trigger names, from `on: x`, flow `on: [x, y]` (also multi-line) and block `on:` keys (conservative)."""
+    found, in_on = set(), 0
+    for n, (_, ln, flow) in enumerate(on_section(text)):
+        if flow:
+            found |= set(re.findall(r"[a-z_]+", (ln.split(":", 1)[1] if n == 0 else ln).split("#")[0]))
             continue
-        if in_on is not None:
-            if ln.strip() and not ln[:1].isspace() and not ln.lstrip().startswith("#"):
-                in_on = None
-                continue
-            k = re.match(r"""^(\s+)(?:-\s+)?["']?([a-z_]+)["']?\s*(:|$)""", ln)
-            if k and (not in_on or len(k.group(1)) <= in_on):
-                in_on = len(k.group(1))
-                found.add(k.group(2))
+        k = re.match(r"""^(\s+)(?:-\s+)?["']?([a-z_]+)["']?\s*(:|$)""", ln)
+        if k and (not in_on or len(k.group(1)) <= in_on):
+            in_on = len(k.group(1))
+            found.add(k.group(2))
     return found
+
+
+def hiding_escape(text):
+    """A YAML double-quoted escape that can spell text (\\x, \\u, \\U, \\N, \\L, \\P, \\_ or a line break)."""
+    return any(m[1] in "xuUNLP_\n" for m in re.finditer(r"\\(.|\n|$)", text))
+
+
+def escaped_triggers(text):
+    """Escapes inside a double-quoted `on:` value or key can spell a trigger name the raw text hides."""
+    return any('"' in part and hiding_escape(part[part.index('"'):])
+               for n, (_, ln, _) in enumerate(on_section(text))
+               for part in [ln.split(":", 1)[1] if n == 0 else ln])
+
+
+def trigger_line(text, name):
+    """Line of a trigger name inside `on:` (comments excluded), else the `on:` line."""
+    section = on_section(text)
+    for number, ln, _ in section:
+        if re.search(r"\b" + name + r"\b", ln.split("#")[0]):
+            return number
+    return section[0][0] if section else None
 
 
 def privileged_workflows(files, root):
@@ -848,19 +1004,17 @@ def privileged_workflows(files, root):
     priv = {}
     for p in files:
         if ".github/workflows" in str(p).replace(os.sep, "/") and p.suffix in (".yml", ".yaml"):
-            t = workflow_triggers(read(p)) & set(PRIVILEGED_TRIGGERS)
-            if t:
-                priv[p.resolve()] = sorted(t)[0]
+            text = read(p)
+            t = workflow_triggers(text) & set(PRIVILEGED_TRIGGERS)
+            if t or escaped_triggers(text):
+                priv[p.resolve()] = sorted(t)[0] if t else "pull_request_target"
     # Follow local calls to a fixed point: a callee's own callees run in the
-    # same privileged context (a -> b.yml -> c.yml).
+    # same privileged context (a -> b.yml -> c.yml). `./` is the checkout root.
     pending = list(priv)
     while pending:
         p = pending.pop()
-        repo = root if (root / ".github") in p.parents else next((a.parent for a in p.parents if a.name == ".github"), None)
-        if repo is None:
-            continue
-        for m in re.finditer(r"""uses\s*:\s*["']?\./([^\s"'#@]+)""", read(p)):
-            target = (repo / m.group(1)).resolve()
+        for m in re.finditer(r"""uses[ \t]*:[ \t]*["']?(?:\.|\$)/([^\s"'#@]+)""", read(p)):
+            target = (root / m.group(1)).resolve()
             for cand in (target, target / "action.yml", target / "action.yaml"):
                 # Only files of this checkout; scan() visits nothing else anyway.
                 if (cand == root or root in cand.parents) and cand.is_file() and cand not in priv:
@@ -873,18 +1027,62 @@ SOURCE_CONFIGS = {"pom.xml", "settings.xml", "build.gradle", "build.gradle.kts",
                   "settings.gradle.kts", "nuget.config", "NuGet.Config", "pip.conf", "pip.ini", ".pypirc",
                   "bunfig.toml", ".npmrc", ".yarnrc", ".yarnrc.yml", ".gitmodules", "Gemfile"}
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
-TLS_OFF = re.compile(r"""^\s*(?:strict-ssl\s*=\s*false|["']?enableStrictSsl["']?\s*:\s*false|trusted-host\s*=|--trusted-host\b"""
+TLS_OFF = re.compile(r"""^\s*(?:strict-ssl(?:\s*=\s*|\s+)["']?false|["']?enableStrictSsl["']?\s*:\s*false|trusted-host\s*=|--trusted-host\b"""
                      r"""|allowInsecureProtocol\s*(?:=|\()\s*true|isAllowInsecureProtocol\s*=\s*true)""", re.I)
+
+
+def xml_code(text):
+    """Drop <!-- --> comments, keeping their line breaks so line numbers stay right."""
+    return re.sub(r"<!--.*?(?:-->|\Z)", lambda m: "\n" * m[0].count("\n"), text, flags=re.S)
 
 
 def check_source_transport(c, p):
     """Package/submodule sources over plaintext http:// or git://, and disabled TLS checks."""
     text = read(p)
-    in_repo = 0
+    if p.suffix in (".xml", ".config"):
+        text = xml_code(text)
+    in_repo, depth, repo_depth, pending, spans = 0, 0, None, False, None
     for i, ln in enumerate(text.splitlines(), 1):
         if ln.lstrip().startswith(("#", "//", ";", "<!--")):
             continue
-        if p.suffix == ".xml":
+        if p.name == "Gemfile":
+            ln = ruby_code(ln)
+        if TLS_OFF.search(ln):
+            c.add("Medium", f"{p.name} disables TLS verification for a package source", p, i, category=CAT_BUILD,
+                  impact="A network attacker can serve modified packages", fix="Remove it and trust the CA instead")
+        if p.name in (".npmrc", ".yarnrc", ".yarnrc.yml") and re.match(
+                r"""\s*["']?(?:https?[-_]?proxy|proxy|no[-_]?proxy)["']?\s*[=:\s]""", ln, re.I):
+            continue  # A network proxy is not a package source.
+        if p.suffix in (".gradle", ".kts"):
+            # Gradle: only repository declarations and applied scripts fetch code;
+            # pom/license `url` values are publication metadata.
+            # String contents are blanked (same length) so their braces do not count;
+            # spans are the parts of the line inside a repositories block.
+            code = re.sub(r"(?<!:)//.*", "", ln)
+            bare = re.sub(r""""(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'""",
+                          lambda m: m[0][0] + " " * (len(m[0]) - 2) + m[0][-1], code)
+            if pending and bare.strip() and not bare.lstrip().startswith("{"):
+                pending = False
+            spans, start = [], 0 if repo_depth is not None else None
+            for m in re.finditer(r"\brepositories(?:[ \t]*\.[ \t]*\w+)?(?=[ \t]*(?:\{|$))|[{}]", bare):
+                if m[0] == "{":
+                    if pending and repo_depth is None:
+                        repo_depth, start = depth, m.start()
+                    pending, depth = False, depth + 1
+                elif m[0] == "}":
+                    pending, depth = False, depth - 1
+                    if repo_depth is not None and depth <= repo_depth:
+                        repo_depth = None
+                        spans.append((start, m.end()))
+                else:
+                    pending = True  # Its block opens at the next brace, here or on the next line.
+            if repo_depth is not None:
+                spans.append((start, len(ln)))
+            if re.search(r"\bapply\s*\(?\s*from\s*[:=]", bare):
+                spans.append((0, len(ln)))
+            if not spans:
+                continue
+        elif p.suffix == ".xml":
             # Maven: only <repository>/<pluginRepository>/<mirror> URLs fetch code;
             # project <url>, <scm> and xmlns values are metadata.
             in_repo += len(re.findall(r"<(?:repository|pluginRepository|snapshotRepository|mirror)>", ln))
@@ -892,20 +1090,15 @@ def check_source_transport(c, p):
             in_repo -= len(re.findall(r"</(?:repository|pluginRepository|snapshotRepository|mirror)>", ln))
             if not hit:
                 continue
-        elif p.suffix in (".gradle", ".kts") and not re.search(r"\b(url|uri|maven)\b", ln):
-            continue  # Gradle: only repository declarations fetch code.
         elif p.name == "Gemfile" and not re.match(r"\s*(source|gem|git)\b", ln):
             continue
         for m in re.finditer(r"""\b(http|git)://([^\s"'<>/:]+)""", ln):
-            if m.group(2).lower() in LOCAL_HOSTS:
+            if m.group(2).lower() in LOCAL_HOSTS or spans and not any(a <= m.start() < b for a, b in spans):
                 continue
             c.add("Medium", f"{p.name} fetches code over plaintext {m.group(1)}://", p, i, category=CAT_BUILD,
                   impact="Anyone on the network path can substitute packages that then run in builds",
                   fix="Use https:// (or ssh for git) for every package source")
             break
-        if TLS_OFF.search(ln):
-            c.add("Medium", f"{p.name} disables TLS verification for a package source", p, i, category=CAT_BUILD,
-                  impact="A network attacker can serve modified packages", fix="Remove it and trust the CA instead")
 
 
 def check_extra_sources(c, p):
@@ -917,11 +1110,26 @@ def check_extra_sources(c, p):
                       impact="Dependency confusion: a public package with an internal name may be installed",
                       fix="Use a single index that proxies PyPI, or pin hashes")
     elif p.name.lower() == "nuget.config":
-        adds = [i for i, ln in enumerate(text.splitlines(), 1) if re.search(r"<add\s+key=", ln)]
+        text = xml_code(text)
+        adds = []  # (line, key) of <add> inside <packageSources>
+        for block in re.finditer(r"<packageSources\b[^<>]*>(.*?)(?:</packageSources>|\Z)", text, re.S | re.I):
+            for m in re.finditer(r"""<add\s[^<>]*?\bkey\s*=\s*["']([^"']*)""", block[1], re.I):
+                adds.append((text.count("\n", 0, block.start(1) + m.start()) + 1, m[1].lower()))
+        mapped = {}
+        for block in re.finditer(r"<packageSourceMapping\b[^<>]*>(.*?)(?:</packageSourceMapping>|\Z)", text, re.S | re.I):
+            for src in re.finditer(r"""<packageSource\s[^<>]*?\bkey\s*=\s*["']([^"']*)["'][^<>]*>(.*?)(?:</packageSource>|\Z)""",
+                                   block[1], re.S | re.I):
+                mapped.setdefault(src[1].lower(), set()).update(
+                    re.findall(r"""<package\s[^<>]*?\bpattern\s*=\s*["']([^"']*)""", src[2], re.I))
+        # Mapping mitigates only when every source is assigned prefixes and at most
+        # one catch-all `*` source remains; otherwise sources still race.
+        catch_all = [k for _, k in adds if not mapped.get(k, set()) - {"*"}]
+        mitigated = mapped and all(mapped.get(k) for _, k in adds) and len(catch_all) <= 1 and sum(
+            "*" in v for v in mapped.values()) <= 1
         # <clear/> only drops inherited sources; two declared sources still race
         # for every package id unless packageSourceMapping assigns them.
-        if len(adds) > 1 and "<packageSourceMapping" not in text:
-            c.add("Medium", "nuget.config mixes several package sources without packageSourceMapping", p, adds[1],
+        if len(adds) > 1 and not mitigated:
+            c.add("Medium", "nuget.config mixes several package sources without packageSourceMapping", p, adds[1][0],
                   category=CAT_BUILD, impact="Dependency confusion: any source may satisfy any package id",
                   fix="Add <packageSourceMapping> so each package prefix comes from one source")
     elif p.name == ".pypirc":
@@ -932,41 +1140,214 @@ def check_extra_sources(c, p):
                       fix="Remove it, rotate the token, use trusted publishing or an environment variable")
 
 
+def yaml_items(lines):
+    """Block-sequence items (conservative): {start, end, parent, keys}; keys maps the
+    item's own keys to (index, value). Block scalar contents are skipped."""
+    items, stack, scalar, last = [], [], None, {}
+    for i, ln in enumerate(lines):
+        s = ln.strip()
+        if not s or s.startswith("#"):
+            continue
+        indent = len(ln) - len(ln.lstrip(" "))
+        if scalar is not None:
+            if indent > scalar:
+                continue
+            scalar = None
+        while stack and indent <= stack[-1][0]:
+            stack.pop()[1]["end"] = i
+        dash = re.match(r" *- +", ln)
+        if dash:
+            parent = max((j for d, (j, item) in last.items() if d < indent or d == indent and not item), default=-1)
+            stack.append((indent, {"start": i, "end": len(lines), "level": len(dash[0]), "parent": parent, "keys": {}}))
+            items.append(stack[-1][1])
+        if not (dash and indent in last and not last[indent][1]):
+            last[indent] = (i, bool(dash))
+        m = re.match(r"""( *)(- +)?["']?([\w.-]+)["']?\s*:(?:\s+(.*))?$""", ln)
+        if m:
+            level, value = len(m[1]) + len(m[2] or ""), (m[4] or "").strip()
+            if stack and stack[-1][1]["level"] == level:
+                stack[-1][1]["keys"].setdefault(m[3], (i, value))
+            if re.match(r"[|>][0-9+-]*(\s|$)", value):
+                scalar = level
+    return items
+
+
+def yaml_children(lines, start=0, end=None):
+    """[key, index, value, end] of the block-mapping entries in lines[start:end] (one indentation level)."""
+    end, out, level = len(lines) if end is None else end, [], None
+    for i in range(start, end):
+        ln = lines[i]
+        if not ln.strip() or ln.lstrip().startswith("#"):
+            continue
+        indent = len(ln) - len(ln.lstrip(" "))
+        level = indent if level is None else level
+        if indent < level:
+            end = i
+            break
+        if indent == level:
+            m = re.match(r"""\s*["']?([^\s"'#:](?:[^"':]*[^\s"':])?)["']?[ \t]*:(?:\s+(.*))?$""", ln)
+            out.append([m[1] if m else None, i, (m[2] or "").strip() if m else "", end])
+    for a, b in zip(out, out[1:]):
+        a[3] = b[1]
+    if out:
+        out[-1][3] = end
+    return out
+
+
+def child(entries, key):
+    return next((e for e in entries if e[0] == key), None)
+
+
+def image_ref(value):
+    """The image of a YAML scalar, or None for aliases, block scalars, expressions and empty values."""
+    value = re.sub(r"\s+#.*", "", value).strip()
+    if value.startswith("&"):
+        value = value.split(None, 1)[1] if " " in value else ""
+    value = value.strip("'\"")
+    if not value or value[0] in "*>|!{[" or "$" in value:
+        return None
+    return value
+
+
+def unpinned_image(img, digest=False):
+    if img is None or "@sha256:" in img:
+        return False
+    name = img.split("/")[-1]
+    return digest or ":" not in name or name.endswith(":latest")
+
+
+def step_value(step, key):
+    return re.sub(r"\s+#.*", "", step["keys"].get(key, (0, ""))[1]).strip().strip("'\"")
+
+
+EXECUTES_CHECKOUT = re.compile(
+    r"(?:^|[;&|(])[ \t]*(?:(?:npm|pnpm|yarn|bun)\s+(?:install|ci|i|test|t|run|exec|build|start)\b|yarn[ \t]*(?:$|[;&|])"
+    r"|make\b|pip3?\s+install\s+(?:-e\s+)?\.|python3?\s+(?:-m\s+pip\s+install\s+\.|setup\.py)|\./[\w.-]"
+    r"|(?:bash|sh)\s+[\w./-]+\.sh\b|mvn\b|\./mvnw\b|gradle\b|\./gradlew\b)", re.M)
+
+
+GIT_MOVES = {"checkout", "switch", "reset", "worktree", "pull", "merge", "rebase", "cherry-pick"}
+
+
+def git_commands(line):
+    """(subcommand, args) of each git command in a shell line; linear, no regex backtracking."""
+    out = []
+    for seg in re.split(r"[;&|()`]", line):
+        words = [w.strip("'\"") for w in seg.split()]  # "a:b" and a:b name the same refspec
+        i = next((k for k, w in enumerate(words) if w == "git" or w.endswith("/git")), None)
+        rest = words[i + 1:] if i is not None else []
+        while rest and rest[0].startswith("-"):
+            rest = rest[2:] if rest[0] in ("-C", "-c") else rest[1:]
+        if rest:
+            out.append((rest[0], rest[1:]))
+    return out
+
+
+def branch(ref):
+    """`pr`, `heads/pr` and `refs/heads/pr` name one local branch for checkout."""
+    ref = ref.lstrip("+")
+    return ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref[6:] if ref.startswith("heads/") else ref
+
+
 def check_workflow(c, p, privileged=None):
     text = read(p)
     lines = text.splitlines()
-    if "workflow_run" in workflow_triggers(text):
-        c.add("Medium", "workflow triggers on workflow_run", p, line_of(text, "workflow_run"), category=CAT_BUILD,
-              confidence="Suspected",
+    triggers = workflow_triggers(text)
+    if escaped_triggers(text):
+        incomplete(c, "workflow scan", p, "escaped trigger names require manual review")
+    if "workflow_run" in triggers:
+        c.add("Medium", "workflow triggers on workflow_run", p, trigger_line(text, "workflow_run"),
+              category=CAT_BUILD, confidence="Suspected",
               impact="Runs with repository secrets after fork PR workflows; dangerous if it uses their artifacts or code",
               fix="Treat artifacts and head refs of the triggering run as untrusted data; never execute them")
+    items = yaml_items(lines)
+    steps = [x for x in items if "uses" in x["keys"] or "run" in x["keys"]]
+    head_checkout = False
     if privileged:
-        step_uses = ""
-        for i, ln in enumerate(lines, 1):
+        jobs_entry = child(yaml_children(lines), "jobs")
+        job_spans = [(e[1], e[3]) for e in yaml_children(lines, jobs_entry[1] + 1, jobs_entry[3])] if jobs_entry else []
+        top = range(0, jobs_entry[1] if jobs_entry else len(lines))
+        in_step = {i for st in steps for i in range(st["start"], st["end"])}
+
+        def assigned(rows):
+            out = {}
+            for i in rows:
+                m = re.match(r"""[ \t]*(?:-[ \t]+)?([A-Za-z_]\w*)[ \t]*:[ \t]*["']?(.*)$""", lines[i])
+                if m:
+                    out[m[1]] = out.get(m[1], False) or bool(UNTRUSTED_HEAD.search(m[2]))
+            return out
+
+        workflow_env, job_env, patterns = assigned(top), {}, {}
+
+        def step_env(st, job):
+            # GitHub resolves env names step first, then job, then workflow.
+            if job not in job_env:
+                job_env[job] = {k for k, v in dict(workflow_env, **(
+                    assigned(i for i in range(*job) if i not in in_step) if job else {})).items() if v}
+            step = assigned(range(st["start"], st["end"]))
+            names = frozenset({"GITHUB_HEAD_REF"} | job_env[job] - set(step) | {k for k, v in step.items() if v})
+            if names not in patterns:
+                alt = "|".join(sorted(names))
+                patterns[names] = re.compile(r"\$\{?(?:" + alt + r")\b|\$\{\{\s*env\.(?:" + alt + r")\b")
+            return patterns[names]
+
+        job_fetched = {}  # refs an earlier step of the job fetched from the PR head
+        for n, st in enumerate(steps):
+            job = next((s for s in job_spans if s[0] <= st["start"] < s[1]), None)
+            env_ref = step_env(st, job)
+            uses = step_value(st, "uses")
+            body = lines[st["start"]:st["end"]]
+            hits = []
             # The PR head is only executed when a checkout step fetches it; the same
             # value passed to another action's ref/repository input is data.
-            if re.match(r"\s*-\s", ln):
-                step_uses = ""
-            used = re.match(r"""\s*(?:-\s+)?["']?uses["']?\s*:\s*["']?([^\s"'#]+)""", ln)
-            if used:
-                step_uses = used.group(1)
-            if (re.match(r"\s*(?:ref|repository)\s*:", ln) and UNTRUSTED_REF.search(ln)
-                    and re.match(r"actions/checkout@", step_uses)):
-                c.add("High", f"{privileged} workflow checks out the pull request's code", p, i,
-                      category=CAT_BUILD, confidence="Suspected",
-                      impact="Fork authors' code runs with repository secrets and a write token (pwn request)",
+            if re.match(r"actions/checkout@", uses, re.I):
+                hits = [st["start"] + k + 1 for k, x in enumerate(body)
+                        if re.match(r"\s*(?:-\s+)?(?:ref|repository)\s*:", x)
+                        and (UNTRUSTED_REF.search(x) or env_ref.search(x))]
+                title = f"{privileged} workflow checks out the pull request's code"
+            elif "run" in st["keys"]:
+                run = [(st["start"] + k + 1, x) for k, x in enumerate(body) if k >= st["keys"]["run"][0] - st["start"]]
+                untrusted = lambda x: (UNTRUSTED_HEAD.search(x) or env_ref.search(x)
+                                       or re.search(r"\bpull/[^\s/]*/(?:head|merge)\b", x))
+                # Fetching the PR head is data until this step checks it out, resets or
+                # merges onto it: FETCH_HEAD, the fetched ref or a local refspec target.
+                fetches = [a for _, x in run for sub, a in git_commands(x) if sub == "fetch" and untrusted(" ".join(a))]
+                fetched = job_fetched.setdefault(job, set())
+                if fetches:
+                    fetched |= {"FETCH_HEAD"} | {branch(a.split(":", 1)[1]) for f in fetches for a in f if ":" in a}
+                hits = [k for k, x in run if re.search(r"\bgh\s+pr\s+checkout\b", x) or any(
+                    sub in GIT_MOVES and (untrusted(" ".join(args)) or fetched & {branch(a) for a in args})
+                    for sub, args in git_commands(x))][:1]
+                title = f"{privileged} workflow checks out the pull request's code in a run step"
+            for line in hits:
+                head_checkout = True
+                path = next((re.sub(r"\s+#.*", "", x.split(":", 1)[1]).strip().strip("'\"")
+                             for x in body if re.match(r"\s*path\s*:", x)), "")
+                later = [x for x in steps[n + 1:] if x["parent"] == st["parent"] and "run" in x["keys"]]
+                runs = any(EXECUTES_CHECKOUT.search("\n".join(lines[x["keys"]["run"][0]:x["end"]]).split(":", 1)[1])
+                           and (not path or path in "\n".join(lines[x["start"]:x["end"]])) for x in later)
+                c.add("High", title, p, line, category=CAT_BUILD, confidence="Confirmed" if runs else "Suspected",
+                      impact="Fork authors' code runs with repository secrets and a write token (pwn request)"
+                             + ("; a later step executes the checkout" if runs else ""),
                       fix="Use pull_request for building PR code, or never run anything from the checkout")
-            if re.match(r"""\s*(?:-\s+)?uses\s*:\s*["']?[\w.-]+/[\w.-]*download-artifact@""", ln, re.I) \
-                    and privileged == "workflow_run":
-                c.add("Medium", "workflow_run workflow downloads artifacts from the triggering run", p, i,
-                      category=CAT_BUILD, confidence="Suspected",
+            if (re.match(r"[\w.-]+/[\w.-]*download-artifact@", uses, re.I) and privileged == "workflow_run"
+                    and not (re.match(r"actions/download-artifact@", uses, re.I)
+                             and not any(re.match(r"\s*run-id\s*:", x) for x in body))):
+                c.add("Medium", "workflow_run workflow downloads artifacts from the triggering run", p,
+                      st["keys"]["uses"][0] + 1, category=CAT_BUILD, confidence="Suspected",
                       impact="A fork PR controls the artifact; executing or interpolating it runs with secrets",
                       fix="Extract to a temp dir, validate as data, never execute it or write it to GITHUB_ENV")
+        for i, ln in enumerate(lines, 1):
             if re.match(r"""\s*runs-on\s*:.*\bself-hosted\b""", ln):
                 c.add("Medium", f"{privileged} job runs on a self-hosted runner", p, i, category=CAT_BUILD,
                       confidence="Suspected",
                       impact="Outsider-triggered jobs can persist on the runner host and its network",
                       fix="Use GitHub-hosted or ephemeral, isolated runners for outsider-triggered events")
+    if "pull_request_target" in triggers and not head_checkout:
+        c.add("Medium", "workflow triggers on pull_request_target", p, trigger_line(text, "pull_request_target"),
+              category=CAT_BUILD, confidence="Suspected",
+              impact="Runs with repository secrets on events from forks; dangerous if it checks out PR code",
+              fix="Do not check out or execute PR code in this workflow")
     for i, ln in enumerate(lines, 1):
         if re.match(r"""\s*permissions\s*:\s*["']?write-all\b""", ln):
             c.add("Medium" if privileged else "Low", "workflow grants permissions: write-all", p, i,
@@ -977,12 +1358,16 @@ def check_workflow(c, p, privileged=None):
             c.add("Medium", f"every secret is passed to external reusable workflow {m.group(1)}", p, i,
                   category=CAT_BUILD, impact="A change in that repository can read all of this repository's secrets",
                   fix="Pass only the named secrets it needs and pin it to a commit SHA")
-    for i, ln in enumerate(text.splitlines(), 1):
+    images = []  # (line, image) of docker:// actions, job containers and service containers
+    for i, ln in enumerate(lines, 1):
         # Only a YAML `uses:` key; comments and shell text mentioning it are not steps.
         m = re.match(r"""^\s*(?:-\s+)?(?:\{\s*)?["']?uses["']?\s*:\s*([^\s#,}]+)""", ln)
         if m:
             ref = m.group(1).strip("'\"")
-            if ref.startswith("./") or ref.startswith("docker://"):
+            if ref.startswith("docker://"):
+                images.append((i, image_ref(ref[len("docker://"):])))
+                continue
+            if ref.startswith(("./", "$/")):
                 continue
             owner = ref.split("/", 1)[0]
             if "@" not in ref:
@@ -993,12 +1378,26 @@ def check_workflow(c, p, privileged=None):
                 c.add(sev, f"action {ref} is pinned to a mutable tag, not a commit SHA", p, i, category=CAT_BUILD,
                       impact="A moved or compromised tag changes the code that runs with your secrets",
                       fix="Pin to the full commit SHA and note the version in a comment")
-        if (re.search(r"""^\s*(?:-\s+)?["']?pull_request_target["']?\s*(:|$)""", ln)
-                or re.search(r"""^\s*["']?on["']?\s*:.*\bpull_request_target\b""", ln)):
-            c.add("Medium", "workflow triggers on pull_request_target", p, i, category=CAT_BUILD,
-                  confidence="Suspected",
-                  impact="Runs with repository secrets on events from forks; dangerous if it checks out PR code",
-                  fix="Do not check out or execute PR code in this workflow")
+    jobs = child(yaml_children(lines), "jobs")
+    for job in yaml_children(lines, jobs[1] + 1, jobs[3]) if jobs else []:
+        props = yaml_children(lines, job[1] + 1, job[3])
+        container = child(props, "container")
+        if container and container[2]:
+            images.append((container[1] + 1, image_ref(container[2])))
+        elif container:
+            image = child(yaml_children(lines, container[1] + 1, container[3]), "image")
+            if image:
+                images.append((image[1] + 1, image_ref(image[2])))
+        services = child(props, "services")
+        for service in yaml_children(lines, services[1] + 1, services[3]) if services else []:
+            image = child(yaml_children(lines, service[1] + 1, service[3]), "image")
+            if image:
+                images.append((image[1] + 1, image_ref(image[2])))
+    for i, img in images:
+        if unpinned_image(img, digest=True):
+            c.add("Low", f"workflow container image {img} is not pinned to a digest", p, i, category=CAT_BUILD,
+                  impact="A moved or replaced tag changes the container that runs with your secrets",
+                  fix="Pin the image to its @sha256: digest")
     for block in workflow_run_blocks(c, p, text):
         script = "\n".join(line for _, line in block)
         scalar_start = next((line.lstrip() for _, line in block
@@ -1007,9 +1406,11 @@ def check_workflow(c, p, privileged=None):
             # YAML single-quoted scalar: '' is one quote. Decoding keeps line
             # breaks, so expression offsets still map to source lines.
             script = script.replace("''", "'")
-        if scalar_start.startswith('"') and "\\" in script:
+        if scalar_start.startswith('"') and (hiding_escape(script)
+                                             or re.search(r"\$\{\{(?:(?!\}\}|\$\{\{).)*\\", script, re.S)):
             # YAML double-quoted scalars decode escapes before GitHub evaluates
             # expressions; raw text could hide both an opener and a source name.
+            # Escapes elsewhere (\\n, \\t, \\") cannot form expression text.
             incomplete(c, "workflow run scan", p, "double-quoted run escapes require manual review")
             continue
         reported = set()
@@ -1028,10 +1429,10 @@ def check_workflow(c, p, privileged=None):
 
 def check_dockerfile(c, p):
     text = read(p)
-    stages, args = set(), {}
+    stages, args, seen_from = set(), {}, False
     for i, ln in enumerate(text.splitlines(), 1):
         a = re.match(r"\s*ARG\s+(\w+)=(\S+)", ln, re.I)
-        if a and not stages:
+        if a and not seen_from:  # Only ARGs before the first FROM apply to FROM lines.
             args[a.group(1)] = a.group(2).strip("'\"")
         add = re.match(r"\s*ADD\s+(?:--\S+\s+)*(https?://\S+)", ln, re.I)
         if add and "--checksum=" not in ln:
@@ -1040,6 +1441,7 @@ def check_dockerfile(c, p):
                   fix="Add --checksum=sha256:... or download a pinned release and verify it")
         m = re.match(r"\s*FROM\s+(?:--platform=\S+\s+)?(\S+)(?:\s+AS\s+(\S+))?", ln, re.I)
         if m:
+            seen_from = True
             img = re.sub(r"\$\{?(\w+)\}?", lambda v: args.get(v.group(1), v.group(0)), m.group(1))
             earlier_stage = img.lower() in stages
             if m.group(2):
@@ -1061,14 +1463,20 @@ COMPOSE_FILE = re.compile(r"(?:docker-)?compose(?:[.-][\w.-]+)?\.ya?ml$")
 
 
 def check_compose(c, p):
-    for i, ln in enumerate(read(p).splitlines(), 1):
-        m = re.match(r"""\s*image\s*:\s*["']?([^\s"'#]+)""", ln)
-        if not m or "$" in m.group(1) or "@sha256:" in m.group(1):
-            continue
-        img = m.group(1)
-        name = img.split("/")[-1]
-        if ":" not in name or name.endswith(":latest"):
-            c.add("Low", f"compose image {img} is not pinned", p, i, category=CAT_BUILD,
+    lines = read(p).splitlines()
+    top = yaml_children(lines)
+    services = child(top, "services")
+    # Legacy (v1) files have no services: key; their services are top-level keys.
+    # x-* extension fields are usually anchors merged into services (<<: *base).
+    entries = yaml_children(lines, services[1] + 1, services[3]) if services else []
+    for service in entries + [e for e in top if e not in entries and (not services or str(e[0]).startswith("x-"))]:
+        props = yaml_children(lines, service[1] + 1, service[3])
+        image = child(props, "image")
+        if not image or child(props, "build"):
+            continue  # With build:, image: names the locally built image.
+        img = image_ref(image[2])
+        if unpinned_image(img):
+            c.add("Low", f"compose image {img} is not pinned", p, image[1] + 1, category=CAT_BUILD,
                   impact="Each pull can run a different image", fix="Pin a version tag, ideally a digest")
 
 
@@ -1776,9 +2184,53 @@ def triage(c, root):
 
 # ---------- main ----------
 
+def dependency_file(name):
+    """A manifest or lockfile name this scanner knows."""
+    return name in LOCKS or name in ECOSYSTEM or name in KNOWN_LOCKFILES or is_requirements(name)
+
+
+def scan_input(name):
+    return (dependency_file(name) or name in SOURCE_CONFIGS or name.startswith("Dockerfile")
+            or name.endswith((".Dockerfile", ".yml", ".yaml")))
+
+
+def pinned_count(p):
+    """Packages a lockfile (or == pins of a requirements file) records; None when not counted."""
+    text = read(p)
+    if p.name in ("composer.lock", "Pipfile.lock", "package-lock.json", "npm-shrinkwrap.json"):
+        try:
+            data = json.loads(text.lstrip("\ufeff"))
+        except (ValueError, RecursionError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        if p.name == "composer.lock":
+            return len(packages_list(data.get("packages")) + packages_list(data.get("packages-dev")))
+        if p.name == "Pipfile.lock":
+            return len(mapping(data.get("default"))) + len(mapping(data.get("develop")))
+        return len([k for k in mapping(data.get("packages")) if k]) or len(mapping(data.get("dependencies")))
+    if p.name in ("Cargo.lock", "poetry.lock", "uv.lock", "pdm.lock"):
+        return len(re.findall(r"^\[\[package\]\]", text, re.M))
+    if p.name == "Gemfile.lock":
+        return len(re.findall(r"^    \S+ \(", text, re.M))
+    if p.name == "gradle.lockfile":
+        return len(re.findall(r"^[^#\s=:]+:[^#\s=:]+:[^#\s=]+=", text, re.M))
+    if p.name == "go.sum":
+        return len({tuple(x.split()[:2]) for x in text.splitlines() if len(x.split()) == 3 and "/go.mod" not in x.split()[1]})
+    if p.name == "yarn.lock":
+        return len(re.findall(r'^(?!__metadata)[^\s#][^\n]*:[ \t]*$', text, re.M))
+    if p.name == "pnpm-lock.yaml":
+        packages = child(yaml_children(text.splitlines()), "packages")
+        return len(yaml_children(text.splitlines(), packages[1] + 1, packages[3])) if packages else 0
+    if is_requirements(p, ("txt",)):
+        return sum(1 for x in text.splitlines() if PINNED_REQUIREMENT.match(x.split("#", 1)[0].strip()))
+    return None
+
+
 def scan(root, audit):
     root = Path(root).resolve()
     c = Collector(root)
+    _OVERSIZED.clear()
     files = sorted(walk(root, c.not_run))
     privileged = privileged_workflows(files, root)
     for p in files:
@@ -1801,11 +2253,11 @@ def scan(root, audit):
             check_gomod(c, p)
         elif n.startswith("Dockerfile") or n.endswith(".Dockerfile"):
             check_dockerfile(c, p)
-        elif COMPOSE_FILE.fullmatch(n):
-            check_compose(c, p)
         elif p.suffix in (".yml", ".yaml") and (".github/workflows" in str(p).replace(os.sep, "/")
                                                 or n in ("action.yml", "action.yaml")):
             check_workflow(c, p, privileged.get(p.resolve()))
+        elif COMPOSE_FILE.fullmatch(n):
+            check_compose(c, p)
         if n in SOURCE_CONFIGS or p.parent.name == ".cargo" and n in ("config", "config.toml"):
             check_source_transport(c, p)
             check_extra_sources(c, p)
@@ -1819,7 +2271,14 @@ def scan(root, audit):
         audits(c, root, files)
         triage(c, root)
     else:
-        c.not_run.append({"tool": "vulnerability audit", "reason": "not requested (--audit)"})
+        counts = [pinned_count(p) for p in files if p.name in KNOWN_LOCKFILES - {"go.mod", "pom.xml"}
+                  or is_requirements(p, ("txt",))]
+        c.not_run.append({"tool": "vulnerability audit", "reason": "not requested (--audit); advisories not matched "
+                          f"for {sum(x for x in counts if x)} pinned packages"
+                          + (f" (+{counts.count(None)} lockfiles not counted)" if None in counts else "")})
+    for path in sorted(_OVERSIZED):
+        if path == root or root in path.parents:
+            incomplete(c, "file scan", path, f"larger than {MAX_READ >> 20} MiB; not read")
     rank = {"High": 0, "Medium": 1, "Low": 2, "Info": 3}
     def location_key(f):
         path, _, line = f["location"].rpartition(":")

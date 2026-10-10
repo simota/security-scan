@@ -249,7 +249,7 @@ class ReviewHardeningTests(unittest.TestCase):
 
     def test_broken_internal_and_cyclic_links_are_reported(self):
         normal = self.write("real.txt", "safe")
-        (self.root / "alias.txt").symlink_to(normal)
+        (self.root / "requirements.txt").symlink_to(normal)  # an in-checkout link named as a scan input
         (self.root / "broken.txt").symlink_to(self.root / "missing")
         (self.root / "loop.txt").symlink_to(self.root / "loop.txt")
         skipped = []
@@ -306,7 +306,7 @@ class ReviewHardeningTests(unittest.TestCase):
             self.assertTrue(c.not_run)
 
     def test_symlink_lock_does_not_satisfy_lockfile_check(self):
-        self.write("package.json")
+        self.write("package.json", '{"dependencies": {"left": "1.0.0"}}')
         outside = self.base / "outside.lock"
         outside.write_text("{}", encoding="utf-8")
         (self.root / "package-lock.json").symlink_to(outside)

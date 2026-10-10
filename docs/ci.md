@@ -78,6 +78,7 @@ fc-cache -f
 # CI accepts only the listed runner-provided Google Chrome distributions.
 export CHROME="/usr/bin/google-chrome"
 export SECURITY_SCAN_REPORT_ARTIFACTS="/tmp/security-scan-report-artifacts"
+python scripts/ci/check_chromium_pdf.py
 python scripts/ci/run_required_tests.py
 ```
 

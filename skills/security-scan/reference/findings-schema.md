@@ -49,7 +49,7 @@ python3 scripts/findings.py merge <out>/findings.json <scratch>/frag-002.json
 
 A fragment holds `meta`, `findings`, `evidence`, `test_runs`, `expert`,
 `three_pass`, `evidence_integrity`, `invariant_ledger`, `perspectives`, `checked_ok`, `decisions`,
-`limitations` and `next_steps`. First capture source to create the version-2
+`limitations`, `next_steps` and `remove`. First capture source to create the version-2
 assessment pin; only then merge extension profiles or test runs. For example,
 write a new scratch fragment containing `{"evidence_integrity":{"required":true}}`
 or the `three_pass`/`expert` declarations documented in their references, and
@@ -69,7 +69,10 @@ Merge semantics are explicit:
 - A `perspectives` entry replaces the recorded entry with the same `name`, so a
   later fragment can correct a `Not checked` result; new names append.
 - The ordinary `checked_ok`, `decisions`, `limitations` and `next_steps` lists
-  append without duplicates.
+  append without duplicates. To delete an entry, send
+  `{"remove": {"limitations": ["exact text"]}}` (any of those four lists): the
+  exact entries are removed before the fragment's additions, and an entry that
+  is not recorded is refused (exit 1), so a typo cannot leave the old text.
 - The merge takes the same `findings.json.workflow.lock` writer lock as
   `verification_workflow.py`, refuses when the file changed after it was read,
   and replaces it atomically, keeping its permissions.
@@ -157,7 +160,8 @@ objects, `references` must be a list, and their documented text fields must be
 strings. An invalid value exits `2` with its field path (including list index)
 before creating report files. Text must be valid Unicode; locations cannot
 contain control characters, and source line numbers must be parseable by the
-Python runtime. Non-finite JSON numbers are rejected. Unknown extension fields
+Python runtime. Non-finite JSON numbers are rejected, and JSON nested deeper
+than 200 levels is refused (exit `2`) by every tool that reads the record. Unknown extension fields
 are retained if their values can be represented safely in UTF-8/JSON output;
 this does not make them verification evidence. Derived verification labels are
 computed by the renderer and cannot be set by an input flag.
@@ -337,7 +341,7 @@ falsification checks and the existing nonblank `validation.evidence` summary.
 | `failure_kind` | `none`, `assertion` or `infrastructure` |
 | `exit_code` | Integer or `null`; use `null` when there was no process result |
 | `expected`, `observed`, `command` | Nonblank sanitized descriptions; commands are never executed by the renderer |
-| `recorded_at` | ISO-8601 timestamp with timezone |
+| `recorded_at` | `YYYY-MM-DDTHH:MM[:SS[.ffffff]]` (`T` or a space) followed by `Z` or `±HH:MM`; no other ISO-8601 forms |
 | `evidence_ids` | Runtime evidence IDs matching the run's commit/worktree pin |
 
 `pass` requires exit code `0` and failure kind `none`; `fail` requires a nonzero
@@ -384,7 +388,9 @@ The fixed pin must differ from the assessment pin. Before/after must have the
 same `case_id`, identical `expected` secure assertion, and matching environment,
 configuration, fixture, test version and boundary. Controls/regressions must be
 at the intended fixed pin, match the after-run context and have case IDs different
-from the security case. Every counted run must exercise a `real` boundary with
+from the security case. The after, control and regression runs must not be
+recorded before the before-run (`recorded_at`; otherwise `retest_order_invalid`).
+Every counted run must exercise a `real` boundary with
 the correct role. The original finding must remain `Valid` and
 `runtime_supported`; static support alone is insufficient for a verified retest.
 Thus a skipped/errored listed original run blocks verified retest even if the
@@ -490,7 +496,9 @@ excerpts are source code, so the outputs carry the repository's confidentiality.
 IDs starting with `D-` belong to `scripts/deps_scan.py`: `--into findings.json`
 replaces them on each run and stamps the top-level `dependency_scan` record
 (`tool`, `audit`, `findings`, `not_run`), so do not hand-write findings with
-that prefix. Code findings use `F-001`… without gaps; `scripts/contract_check.py`
+that prefix. `findings.py merge` refuses a fragment that creates a `D-*` ID or
+sends any key other than `id`, `validation` and `verification` for one, and any finding id
+that is not exactly `F-` or `D-` plus three ASCII digits (`d-001`, ` D-001`, `Ｄ-001` are refused). Code findings use `F-001`… without gaps; `scripts/contract_check.py`
 checks both, together with the rest of the run contract.
 
 Same rules as the report: no working payloads, no secret values.

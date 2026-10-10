@@ -252,7 +252,8 @@ The repository runner writes a new results directory containing:
 - `records.json`: separate evidence/test-run records for manual review/import,
   exported only for a `completed`, repeatable run. A stale, errored, timed-out
   or `incomplete` run exports no records. The child runtime keeps a quarter of
-  `--timeout` (at least 2 seconds) as margin and reports `timeout` itself.
+  `--timeout` (at least 2 seconds) as margin, but always keeps 1 second to run
+  (so `--timeout 2` leaves a 1-second margin), and reports `timeout` itself.
 - `evidence/`: one sanitized JSON observation per completed case, referenced by
   hash from the exported records. Unsupported cases have no invented observations.
 

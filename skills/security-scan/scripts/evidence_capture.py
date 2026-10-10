@@ -13,8 +13,11 @@ existing artifacts and changes nothing; a missing or changed artifact is an erro
 Only `rev-parse`, `ls-tree` and `cat-file` are run, with hooks, fsmonitor, replace
 objects and lazy fetches disabled; no application code or filter runs. A path
 whose checked-out bytes differ from the commit is refused: assess a clean tree.
-Symlinks, hardlinks and non-regular children are refused; reads, Git output and
-elapsed time are bounded. Repeated captures recheck their existing artifacts.
+Symlinks, hardlinks and non-regular children are refused, and so is a file
+holding a secret-looking value (a credential file, a private-key block, a known
+token format, a literal assigned to a secret-named key, or URL credentials),
+since evidence/ is shareable output; reads, Git output and elapsed time are
+bounded. Repeated captures recheck their existing artifacts (without the secret check).
 
 Exit codes: 0 done, 2 bad input or a path differs from / is missing at the commit.
 """
@@ -34,7 +37,7 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from evidence_integrity import EvidenceError, _Root, _parts, _deadline, _json_object
-from render import SchemaError, derive_expert, validate_data
+from render import SchemaError, derive_expert, secret_in_source, validate_data
 
 GIT_BINARY = "/usr/bin/git"  # Never resolve a program through target PATH/config.
 GIT_ENV = {"PATH": "/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
@@ -280,6 +283,11 @@ def _capture(repo, out_root, source_root, findings_name, paths, commit, until):
                 raise CaptureError(f"{location}: captured evidence differs from source")
             mapping[rel] = record["id"]
             continue
+        # evidence/ is shareable output: a copied secret would break "never print the value".
+        # Checked for new paths only, so rechecking an earlier capture keeps working.
+        if secret_in_source(rel, blob.decode("utf-8", "replace")):
+            raise CaptureError(f"{rel}: contains a secret-looking value; cite it by location "
+                               "instead (location and kind only, never the value)")
         if out_root.exists(location) and out_root.read(location, MAX_FILE_BYTES, budget=budget) != blob:
             raise CaptureError(f"{location}: exists with different content")
         new.append((rel, location, blob))

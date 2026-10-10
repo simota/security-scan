@@ -26,7 +26,10 @@ Multiple matching opinions do not establish a finding.
 The workflow is opt-in for `schema_version: 2` findings. Old reports and findings
 without a workflow retain their existing interpretation. For an opted-in
 finding, fix readiness also requires completion of the current workflow; a
-pre-existing `Valid` label cannot bypass an unfinished handoff.
+pre-existing `Valid` label cannot bypass an unfinished handoff, and a completed
+conditions stage resets the verdict to `Unverified` until the decision is
+accepted. Do not opt in when no second reviewer can submit the falsification
+stage: the finding would stay unverified.
 
 ## Run a review
 
@@ -52,7 +55,8 @@ python3 skills/security-scan/scripts/verification_workflow.py submit /tmp/findin
 python3 skills/security-scan/scripts/verification_workflow.py next /tmp/findings-workflow.json --finding F-001 --out /tmp/falsification-handoff.json
 ```
 
-Use a different declared actor for falsification. After its accepted submission,
+Use a different declared actor for a `complete` falsification; the conditions
+actor may still record a `held`, `error` or `unknown` result. After its accepted submission,
 request the decision handoff, review its evidence and submit the decision. Every
 submission carries the digest from its own handoff; do not reuse the conditions
 digest for later stages.
@@ -71,8 +75,9 @@ parallel reviewers should submit through this CLI rather than saving whole-file
 copies over one another.
 
 Exit `0` means the command completed, not that the application is safe. Use
-`status --require-complete` as a shell gate: it exits `3` if any selected finding
-has no completed workflow. Invalid input, stage ordering and file-write conflicts
+`status --require-complete` as a shell gate: with `--finding` it exits `3` unless
+that finding's workflow is complete; without it, only opted-in findings count, and
+it exits `3` if any of them is incomplete or none has opted in. Invalid input, stage ordering and file-write conflicts
 exit `2`. Read the JSON state and hold reason as well as the exit code.
 
 ## Submission contract

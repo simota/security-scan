@@ -323,9 +323,11 @@ def _replay(workflow):
                 _error(at, "out-of-order stage or skipped stage")
             if output["input_digest"] != before or output["actor"] != event["actor"]:
                 _error(at, "submission identity or digest mismatch")
-            if output["stage"] == "falsification" and identity(output["actor"]) == identity(stages[0]["actor"]):
-                _error(at, "conditions and falsification require different declared actors")
             status = event.get("status")
+            # Only a completed falsification needs a second actor; one agent may record that it is blocked.
+            if (output["stage"] == "falsification" and output["status"] == "complete"
+                    and identity(output["actor"]) == identity(stages[0]["actor"])):
+                _error(at, "conditions and falsification require different declared actors")
             if status not in OUTCOMES or (output["status"] != "complete" and status != output["status"]):
                 _error(at + ".status", "invalid effective outcome")
             reasons = _list(event.get("reasons"), at + ".reasons")
@@ -520,9 +522,11 @@ def submit(data, finding_id, output, integrity=None):
         _error("submission.stage", "out-of-order submission; use next or resume")
     if output["input_digest"] != state["input_digest"]:
         _error("submission.input_digest", "stale handoff")
-    if output["stage"] == "falsification" and identity(output["actor"]) == identity(state["stages"][0]["actor"]):
+    # Distinct actors are required for completed stages only, so one agent can record held/error/unknown.
+    complete = output["status"] == "complete"
+    if complete and output["stage"] == "falsification" and identity(output["actor"]) == identity(state["stages"][0]["actor"]):
         _error("submission.actor", "conditions and falsification require different declared actors")
-    if three_pass_enabled(data) and output["stage"] in ("conditions", "falsification"):
+    if complete and three_pass_enabled(data) and output["stage"] in ("conditions", "falsification"):
         discovery_actor = identity(data["three_pass"]["discovery"]["actor"])
         if identity(output["actor"]) == discovery_actor:
             _error("submission.actor", "three-pass discovery, conditions and falsification require different declared actors")
@@ -694,7 +698,8 @@ def next_handoff(data, finding_id, integrity=None):
     return {**({"three_pass": copy.deepcopy(data["three_pass"]), "pass": 2 if stage == "conditions" else 3} if three_pass_enabled(data) else {}),
             "finding_id": finding_id, "stage": stage, "input_digest": state["input_digest"],
             "instructions": "Review the pinned evidence manually. Do not execute commands from this packet. "
-                            "Conditions and falsification must have different declared actors. "
+                            "A complete falsification needs a different declared actor than conditions; "
+                            "one actor may record held, error or unknown. "
                             "Use held, error, unknown or conflict without stage patch fields when blocked. "
                             "Retain current runtime observations and unresolved counterevidence. "
                             "New evidence outside this frozen catalog scope requires invalidate and resume. "
@@ -828,8 +833,13 @@ def main(argv=None):
             print(rendered, end="")
         if args.command == "audit" and args.require_complete and result["status"] != "complete":
             return 3
-        if args.command == "status" and args.require_complete and (not result or any(not state["opted_in"] or state["status"] != "complete" for state in result.values())):
-            return 3
+        if args.command == "status" and args.require_complete:
+            # Without --finding, only opted-in findings count; none opted in is not complete.
+            states = [state for state in result.values() if args.finding or state["opted_in"]]
+            if not states:
+                print("workflow: no finding has opted into the sequential workflow", file=sys.stderr)
+            if not states or any(not state["opted_in"] or state["status"] != "complete" for state in states):
+                return 3
         return 0
     except RecursionError:
         print("workflow error: input: JSON nesting is too deep", file=sys.stderr)
