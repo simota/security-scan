@@ -40,9 +40,9 @@ Dockerfiles and Compose files:
 | Package or submodule sources over `http://`/`git://` (Gradle: inside `repositories` blocks and `apply from:`), TLS checks off (`strict-ssl=false`, `--trusted-host`, `allowInsecureProtocol`) | A network attacker can substitute code that runs in builds |
 | Install-time scripts, `allow-plugins: true` | Dependency code runs on every install, including CI |
 | Actions not pinned to a commit SHA, or with no version at all | A moved or hijacked tag runs with the pipeline's secrets |
-| `pull_request_target`, `workflow_run`, event text inside `run:` or `github-script` | Outsider-controlled input reaches a privileged pipeline |
-| A privileged workflow (or a local workflow/action it calls) checking out the PR head (with `actions/checkout`, `gh pr checkout`, or `git checkout`/`switch`/`reset`/`pull`/`merge`/`rebase`/`worktree` of the head, `FETCH_HEAD` or a fetched ref in the same `run:` step; a `git fetch` alone is data), downloading the triggering run's artifacts (`run-id:`), or running on a self-hosted runner; Confirmed when a later step builds or runs the checkout | The "pwn request": fork code runs with secrets and a write token |
-| `permissions: write-all`, `secrets: inherit` to another repository's workflow | One compromised step or repository gets every scope or secret |
+| `pull_request_target`, `workflow_run`, event text inside `run:` or `github-script` (also through an `env:` value read as `${{ env.X }}`, or a local action/reusable workflow input a caller fills with event text; `boolean`/`number` inputs are coerced and skipped) | Outsider-controlled input reaches a privileged pipeline |
+| A privileged workflow (`pull_request_target`, `workflow_run`, `issue_comment`, or a local workflow/action it calls) checking out the PR head (with `actions/checkout` whose `ref`/`repository` names the head anywhere in its value, in block, quoted, flow or block-scalar form; `gh pr checkout`, `gh repo clone`, or `git checkout`/`switch`/`reset`/`pull`/`merge`/`rebase`/`worktree`/`clone` of the head, `FETCH_HEAD` or a fetched ref in the same `run:` step, double-quoted escapes decoded; a `git fetch` alone is data), including through `$GITHUB_ENV`/`$GITHUB_OUTPUT` writes of the head and caller inputs; a ref taken from another step or job output, matrix value, unresolved env variable or caller input is listed in `not_run` for manual review. Also downloading the triggering run's artifacts (`run-id:`, `gh run download`, github-script `downloadArtifact`) or running on a self-hosted runner (inline, block list or `labels:`); Confirmed when a later step builds or runs the checkout | The "pwn request": fork code runs with secrets and a write token |
+| `permissions: write-all`, `secrets: inherit` in the same job as another repository's reusable workflow | One compromised step or repository gets every scope or secret |
 | Unpinned base images (including `ARG` defaults), Compose images (also in `x-*` extension fields) and workflow `container:`/`services:`/`docker://` images, `ADD <url>` without `--checksum`, `curl … \| sh` in builds | The build executes whatever is served that day |
 | Known vulnerabilities (`--audit`) | Advisories matched against the exact locked versions |
 | Malicious packages (`--audit` with osv-scanner) | OSV includes OpenSSF malicious-package reports (`MAL-` IDs), reported as High |
@@ -58,7 +58,10 @@ Generated-output directories (`build`, `dist`, `target`, `vendor`, `.next`,
 lockfile, `not_run` names it so a first-party package there can be scanned
 separately. Files over 64 MiB are not read and are listed the same way.
 Missing tools are listed under `not_run`; say so in the report rather than
-implying the audit was complete. Audits query public advisory databases with
+implying the audit was complete. Only files directly in a `.github/workflows/`
+directory are workflows (GitHub runs nothing in its subdirectories or in look-alike
+directories such as `.github/workflows-archive/`); `uses:` text inside block
+scalars is data, not a step. A UTF-8 byte-order mark is ignored in every input. Audits query public advisory databases with
 the package list, so they need network access; ask before running them if the
 dependency list itself is confidential. osv-scanner is given each lockfile with
 `-L` rather than a directory. A sandboxed shell whose proxy re-signs TLS makes
