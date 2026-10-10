@@ -92,9 +92,12 @@ Ordinary profile, evidence, run or finding edits leave the journal untouched,
 so relevant input changes become stale instead of silently resealing old work.
 
 The merge is
-refused (exit 1) when a finding's `title`, `actor`, `request`, `impact` or `fix`
-holds a literal attack string — describe the weakness and use a placeholder for
-the value — and nothing is written unless the merged file passes the schema
+refused (exit 1) when report prose holds a literal attack string — a finding's
+`title`, `actor`, `request`, `impact`, `fix`, `validation.evidence`, any
+`verification` `reason` or falsification `check`, or reference `title`; a
+`perspectives` `name`, `result` or `note`; a `checked_ok`, `decisions`,
+`limitations` or `next_steps` entry; or a `meta` string. Describe the weakness
+and use a placeholder for the value — and nothing is written unless the merged file passes the schema
 check (exit 2).
 
 ## Common report shape and legacy compatibility
@@ -292,6 +295,14 @@ or revision and does not substitute for these flags.
   - `preconditions`: required feature, version, configuration and state hold
   - `defenses`: compensating controls do not neutralize the claimed issue
   - `impact`: the claimed data exposure, action or state change follows
+  - A finding with `category` `Secrets` must cite, among its claims, at least
+    one `source` record for a path its `location` names (`source_path`, or the
+    record's `location` without `:line`; a comma- or semicolon-separated
+    `location` may name several). Source captured from another file does not
+    support it: without such a record its claims are incomplete and `Valid` is
+    refused. `evidence_capture.py` never copies a file holding a secret, so a
+    committed secret stays `Likely` with a limitation that the value was not
+    captured
 - `falsification`: list of checks with nonblank `check` and `reason`, `result`
   (`clear`, `contradiction` or `unresolved`) and `evidence_ids`. A non-unresolved
   result requires evidence. Definitive verdicts require at least one check

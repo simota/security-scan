@@ -200,20 +200,59 @@ def source_evidence_problems(record, identifier, name, base):
     return []
 
 
+def _strings(value, path):
+    """(path, string) for every string inside VALUE (dicts and lists walked)."""
+    if isinstance(value, str):
+        yield path, value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield from _strings(item, f"{path}.{key}")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from _strings(item, f"{path}[{index}]")
+
+
+# Free-text fields of a finding's structured verification that reach the reports.
+VERIFICATION_TEXT = ("reason", "check")
+
+
 def payload_problems(fragment, name):
+    """Literal attack strings in any report prose a fragment writes: finding
+    prose, validation evidence, verification/falsification/review reasons,
+    reference titles, perspective name/result/note, checked_ok, decisions,
+    limitations, next_steps and meta strings."""
     problems = []
     hint = "contains a literal attack string; describe the weakness and name the parameter with a placeholder instead"
+
+    def check(where, value):
+        if isinstance(value, str) and PAYLOAD.search(value):
+            problems.append(f"{name}: {where} {hint}")
+
     for f in fragment.get("findings", []):
         if not isinstance(f, dict):
             continue
+        ident = f.get("id", "?")
         validation = f.get("validation") if isinstance(f.get("validation"), dict) else {}
         fields = [(key, f.get(key)) for key in PROSE] + [("validation.evidence", validation.get("evidence"))]
         for key, value in fields:
-            if isinstance(value, str) and PAYLOAD.search(value):
-                problems.append(f"{name}: {f.get('id', '?')}.{key} {hint}")
-    for i, value in enumerate(fragment.get("checked_ok", [])):
-        if isinstance(value, str) and PAYLOAD.search(value):
-            problems.append(f"{name}: checked_ok[{i}] {hint}")
+            check(f"{ident}.{key}", value)
+        for where, value in _strings(f.get("verification"), f"{ident}.verification"):
+            if where.rsplit(".", 1)[-1] in VERIFICATION_TEXT:
+                check(where, value)
+        references = f.get("references") if isinstance(f.get("references"), list) else []
+        for index, ref in enumerate(references):
+            if isinstance(ref, dict):
+                check(f"{ident}.references[{index}].title", ref.get("title"))
+    for key in ("checked_ok", "decisions", "limitations", "next_steps"):
+        for where, value in _strings(fragment.get(key), key):
+            check(where, value)
+    for index, entry in enumerate(fragment.get("perspectives") or []):
+        if isinstance(entry, dict):
+            for field in ("name", "result", "note"):
+                check(f"perspectives[{index}].{field}", entry.get(field))
+    meta = fragment.get("meta") if isinstance(fragment.get("meta"), dict) else {}
+    for key, value in meta.items():
+        check(f"meta.{key}", value)
     return problems
 
 

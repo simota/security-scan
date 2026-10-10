@@ -177,9 +177,14 @@ Sensitive paths (`.env*`, credential files such as `.pgpass`, `.htpasswd` and
 `.docker/config.json`, Terraform `*.tfstate`/`*.tfvars`, and private keys) and
 files containing private-key blocks do not embed source excerpts; a `Secrets`
 finding keeps its excerpt unless a cited line still holds a secret-like value.
-URL credentials, known token formats (GitHub, Slack, AWS, JWTs), secret
-assignments and literal fallback defaults are masked in other excerpts, but
-redaction is heuristic, not a guarantee. Inspect reports before
+URL credentials, known token formats (GitHub, GitLab, Slack, AWS, Stripe,
+Google API, OpenAI, Anthropic, npm, Hugging Face, SendGrid, JWTs), Slack,
+Discord and Telegram webhook/bot URLs, `Bearer`/`Basic` Authorization values,
+secret assignments (also subscripts such as `cfg["SECRET_KEY"] = "…"`), literal
+`jwt.sign`/`encode` keys and literal fallback defaults are masked in other
+excerpts, but redaction is heuristic, not a guarantee. With a clean
+`assessment.commit` pin, excerpts come from the `evidence/source/` copy or the
+blob at that commit, never from later working-tree edits. Inspect reports before
 sharing them; without `--repo`, source is not embedded. `source_link` and
 `snippet` are derived fields and cannot be injected through input JSON. All
 report links must be absolute HTTP(S) URLs without credentials or controls;

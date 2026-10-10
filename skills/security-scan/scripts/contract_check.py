@@ -246,8 +246,17 @@ def check(data, out_dir, pdf=True, allow=()):
             recorded = hashlib.sha256(read_regular(out_dir / "findings.json")).hexdigest()
         except OSError as exc:
             add(f"outputs: cannot read findings.json to compare the rendered pages ({exc})")
-    for name in RENDERED:
-        if name not in present or recorded is None:
+    # A second-language report the requester asked for (--allow LANG) lives in
+    # OUT/LANG/ and is rendered from the same findings.json: its pages carry
+    # the same stamp and go stale the same way.
+    pages = [name for name in RENDERED if name in present]
+    for sub in sorted(set(allow)):
+        folder = out_dir / sub
+        if "/" in sub or sub in (".", "..") or sub not in present or folder.is_symlink() or not folder.is_dir():
+            continue
+        pages += [f"{sub}/{name}" for name in RENDERED if os.path.lexists(folder / name)]
+    for name in pages:
+        if recorded is None:
             continue
         try:
             head = read_regular(out_dir / name, 4096)
