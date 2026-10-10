@@ -160,7 +160,8 @@ objects, `references` must be a list, and their documented text fields must be
 strings. An invalid value exits `2` with its field path (including list index)
 before creating report files. Text must be valid Unicode; locations cannot
 contain control characters, and source line numbers must be parseable by the
-Python runtime. Non-finite JSON numbers are rejected. Unknown extension fields
+Python runtime. Non-finite JSON numbers are rejected, and JSON nested deeper
+than 200 levels is refused (exit `2`) by every tool that reads the record. Unknown extension fields
 are retained if their values can be represented safely in UTF-8/JSON output;
 this does not make them verification evidence. Derived verification labels are
 computed by the renderer and cannot be set by an input flag.
@@ -340,7 +341,7 @@ falsification checks and the existing nonblank `validation.evidence` summary.
 | `failure_kind` | `none`, `assertion` or `infrastructure` |
 | `exit_code` | Integer or `null`; use `null` when there was no process result |
 | `expected`, `observed`, `command` | Nonblank sanitized descriptions; commands are never executed by the renderer |
-| `recorded_at` | ISO-8601 timestamp with timezone |
+| `recorded_at` | `YYYY-MM-DDTHH:MM[:SS[.ffffff]]` (`T` or a space) followed by `Z` or `±HH:MM`; no other ISO-8601 forms |
 | `evidence_ids` | Runtime evidence IDs matching the run's commit/worktree pin |
 
 `pass` requires exit code `0` and failure kind `none`; `fail` requires a nonzero
@@ -387,7 +388,9 @@ The fixed pin must differ from the assessment pin. Before/after must have the
 same `case_id`, identical `expected` secure assertion, and matching environment,
 configuration, fixture, test version and boundary. Controls/regressions must be
 at the intended fixed pin, match the after-run context and have case IDs different
-from the security case. Every counted run must exercise a `real` boundary with
+from the security case. The after, control and regression runs must not be
+recorded before the before-run (`recorded_at`; otherwise `retest_order_invalid`).
+Every counted run must exercise a `real` boundary with
 the correct role. The original finding must remain `Valid` and
 `runtime_supported`; static support alone is insufficient for a verified retest.
 Thus a skipped/errored listed original run blocks verified retest even if the

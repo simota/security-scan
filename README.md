@@ -96,8 +96,13 @@ python3 skills/security-scan/scripts/findings.py merge out/findings.json frag-00
 python3 skills/security-scan/scripts/evidence_capture.py /path/to/repo --findings out/findings.json src/a.py src/b.py
 python3 skills/security-scan/scripts/deps_scan.py /path/to/repo --audit --out out/deps.json --into out/findings.json
 python3 skills/security-scan/scripts/render.py out/findings.json --out out --repo /path/to/repo
-python3 skills/security-scan/scripts/contract_check.py out      # exit 1 lists each violation
+python3 skills/security-scan/scripts/contract_check.py out      # 0 ok, 1 lists each violation, 2 unreadable input
 ```
+
+`render.py` stamps both HTML files with
+`<meta name="security-scan-source" content="sha256:…">`, the digest of the
+`findings.json` bytes it rendered; `contract_check.py` reports a page whose
+stamp does not match the current file as not rendered from it.
 
 The check covers shape and provenance markers, not whether a finding is true;
 hosts can still find different issues, but no longer report them differently.
