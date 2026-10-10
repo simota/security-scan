@@ -59,6 +59,9 @@ GAPS = (
 DEFINITIVE = ("Valid", "FalsePositive", "NotApplicable")
 
 
+_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
 class _Validator:
     def __init__(self, data, error_type, integrity=None):
         self.data, self.error_type = data, error_type
@@ -82,7 +85,7 @@ class _Validator:
         value = obj.get(key)
         if not isinstance(value, str) or not value.strip():
             self.error(where + "." + key, "required nonblank string")
-        if any(ord(char) < 32 and char not in "\n\r\t" for char in value):
+        if _CONTROL.search(value):
             self.error(where + "." + key, "must not contain control characters")
         return value
 

@@ -1274,10 +1274,36 @@ def sensitive_path(path):
             or any(part.lower() in {".ssh", ".aws", ".kube", "secrets"} for part in path.parts))
 
 
+_KEY_RUN = re.compile(r"[\w.-]+")
+_KEY = re.compile(r"(?i)password|passwd|secret|token|api[_-]?key|private[_-]?key|access[_-]?key|credential")
+_SECRET_TAIL = re.compile(r"""(?i)(['"]?\s*(?:=>|:=|[:=])\s*['"]?)"""
+                          r"""(?!\$|[A-Za-z_][\w.]*\(|process\.env|os\.environ|null\b|None\b|true\b|false\b)([^'"\s,;)]{4,})""")
+_QUOTED_TAIL = re.compile(r"""(?i)(['"]?\s*(?:=>|:=|[:=])\s*)(['"])(?:\\.|(?!\2)[^\\\n])*\2""")
+
+
+def _sub_keyed(line, tail, repl):
+    """SECRET_RE / QUOTED_SECRET_RE .sub() with one attempt per key-character run.
+
+    Every keyword position inside one run reaches the same tail at the run's
+    end, so only the run's leftmost keyword can start a match.
+    """
+    out, pos = [], 0
+    for run in _KEY_RUN.finditer(line):
+        if run.start() < pos:
+            continue
+        key = _KEY.search(line, run.start(), run.end())
+        m = key and tail.match(line, run.end())
+        if m:
+            out.append(line[pos:key.start()])
+            out.append(repl(line[key.start():run.end()], m))
+            pos = m.end()
+    return "".join(out) + line[pos:] if out else line
+
+
 def redact(line):
     line = redact_urls(line)
-    line = QUOTED_SECRET_RE.sub(lambda m: m.group(1) + m.group(2) + "********" + m.group(2), line)
-    return SECRET_RE.sub(lambda m: m.group(1) + "********", line)
+    line = _sub_keyed(line, _QUOTED_TAIL, lambda key, m: key + m.group(1) + m.group(2) + "********" + m.group(2))
+    return _sub_keyed(line, _SECRET_TAIL, lambda key, m: key + m.group(1) + "********")
 
 
 def attach_sources(data, repo, context=3):

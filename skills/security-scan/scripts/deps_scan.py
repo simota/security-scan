@@ -26,6 +26,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -155,17 +156,48 @@ def walk(root, not_run=None):
         dirs[:] = kept
         for name in files:
             path = Path(d) / name
-            if safe_file(path, root):
+            try:  # Ancestors were already lstat-checked by this walk.
+                regular = stat.S_ISREG(os.lstat(path).st_mode)
+            except OSError:
+                regular = False
+            if regular:
                 yield path
             else:
                 skipped(path)
 
 
+_LINE_INDEX = {}
+_BREAKS = "\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"  # str.splitlines() separators
+_QUOTED = re.compile('(?="([^"' + _BREAKS + ']*)")')
+
+
+def _line_index(text):
+    """Per text: line end offsets and the first offset of every quote-free "X" substring."""
+    hit = _LINE_INDEX.get(id(text))
+    if hit is None or hit[0] is not text:
+        import itertools
+        ends = list(itertools.accumulate(len(l) for l in text.splitlines(True)))
+        first = {}
+        for m in _QUOTED.finditer(text):  # zero-width: every quote, overlaps included
+            first.setdefault(m[1], m.start())
+        _LINE_INDEX.clear()
+        hit = _LINE_INDEX[id(text)] = (text, ends, first)
+    return hit
+
+
 def line_of(text, needle):
-    for i, ln in enumerate(text.splitlines(), 1):
-        if needle in ln:
-            return i
-    return None
+    import bisect
+    _, ends, first = _line_index(text)
+    if not ends:
+        return None
+    inner = needle[1:-1]
+    if len(needle) >= 2 and needle[0] == needle[-1] == '"' and not any(ch in inner for ch in '"' + _BREAKS):
+        pos = first.get(inner, -1)
+    elif any(ch in needle for ch in _BREAKS):
+        return None
+    else:
+        pos = text.find(needle)
+    return None if pos < 0 else bisect.bisect_right(ends, pos) + 1
 
 
 def read(p):
@@ -411,6 +443,12 @@ def untrusted_workflow_expression(c, path, expression):
         ("event", "comment", "id"), ("event", "review", "id"),
     }
     untrusted = False
+    close, stack = {}, []
+    for i, tok in enumerate(tokens):
+        if tok == "[":
+            stack.append(i)
+        elif tok == "]" and stack:
+            close[stack.pop()] = i + 1
     for index, token in enumerate(tokens):
         if token.lower() != "github" or index and tokens[index - 1] == ".":
             continue
@@ -423,11 +461,8 @@ def untrusted_workflow_expression(c, path, expression):
                 parts.append(part.lower())
                 cursor += 2
             elif tokens[cursor] == "[":
-                end, depth = cursor + 1, 1
-                while end < len(tokens) and depth:
-                    depth += (tokens[end] == "[") - (tokens[end] == "]")
-                    end += 1
-                if depth:
+                end = close.get(cursor)
+                if end is None:
                     incomplete(c, "workflow run scan", path, "unclosed property selector requires manual review")
                     break
                 selector = tokens[cursor + 1:end - 1]
@@ -495,8 +530,8 @@ def isolated_composer_audit(c, root, lock, exe):
 
 def declares_python_dependencies(text):
     """A pyproject.toml that only configures tools has nothing to lock."""
-    return re.search(r"^\s*(dev-)?(dependencies|optional-dependencies)\s*=|"
-                     r"^\s*\[(project\.optional-dependencies|tool\.poetry(\.group\.[^\]]+)?\.dependencies|"
+    return re.search(r"^[^\S\n]*(dev-)?(dependencies|optional-dependencies)\s*=|"
+                     r"^[^\S\n]*\[(project\.optional-dependencies|tool\.poetry(\.group\.[^\]]+)?\.dependencies|"
                      r"tool\.poetry\.dev-dependencies|tool\.pdm\.dev-dependencies|dependency-groups)\]",
                      text, re.M) is not None
 
@@ -583,8 +618,12 @@ def check_npm_lock(c, p):
     # empty-path URL can turn its query/fragment into bare "host" text that the
     # final URL sanitizer no longer recognizes.
     hosts = {}
+    cursor = [0, 1]
+    def line_at(pos):  # finditer offsets only increase
+        cursor[1] += text.count("\n", cursor[0], pos); cursor[0] = pos
+        return cursor[1]
     resolved = re.compile(r'"resolved"\s*:\s*("(?:[^"\\]|\\.)*")'
-                          r'|^\s+resolved\s+("(?:[^"\\]|\\.)*")'
+                          r'|^[^\S\n]+resolved\s+("(?:[^"\\]|\\.)*")'
                           r'|\btarball:\s*("(?:[^"\\]|\\.)*"|[^\s,}]+)', re.M)
     for match in resolved.finditer(text):
         try:
@@ -596,7 +635,7 @@ def check_npm_lock(c, p):
                 parsed.hostname == "codeload.github.com" or "/-/archive/" in parsed.path or "/get/" in parsed.path)
             if archive or re.match(r"(git(\+[a-z]+)?|github|gitlab|bitbucket|file|link)$", parsed.scheme.lower()):
                 if "outside" not in hosts:
-                    hosts["outside"] = text.count("\n", 0, match.start()) + 1
+                    hosts["outside"] = line_at(match.start())
                 continue
             if parsed.scheme.lower() not in ("http", "https"):
                 continue
@@ -610,9 +649,22 @@ def check_npm_lock(c, p):
             incomplete(c, "lockfile URL scan", p, "invalid resolved URL; host requires manual review")
             continue
         if host not in hosts:
-            hosts[host] = text.count("\n", 0, match.start()) + 1
+            hosts[host] = line_at(match.start())
     # pnpm records git dependencies as resolution: {commit, repo, type: git}.
-    git_resolution = re.search(r"\bresolution:\s*\{[^}\n]*\btype:\s*git\b", text)
+    git_resolution, region_end, typed = None, -1, None
+    for opener in re.finditer(r"\bresolution:\s*\{", text):
+        if opener.end() <= region_end:
+            continue  # Same {...} region as a failed opener: its suffix cannot match either.
+        stops = [i for i in (text.find("}", opener.end()), text.find("\n", opener.end())) if i >= 0]
+        region_end = min(stops) if stops else len(text)
+        if typed is not None and typed.start() < opener.end():
+            typed = None
+        typed = typed or re.compile(r"\btype:\s*git\b").search(text, opener.end())
+        if typed is None:
+            break
+        if typed.start() < region_end:
+            git_resolution = opener
+            break
     if git_resolution and "outside" not in hosts:
         hosts["outside"] = text.count("\n", 0, git_resolution.start()) + 1
     if "outside" in hosts:
@@ -911,7 +963,7 @@ def check_workflow(c, p, privileged=None):
                   fix="Pass only the named secrets it needs and pin it to a commit SHA")
     for i, ln in enumerate(text.splitlines(), 1):
         # Only a YAML `uses:` key; comments and shell text mentioning it are not steps.
-        m = re.match(r"""^\s*(?:-\s+)?\{?\s*["']?uses["']?\s*:\s*([^\s#,}]+)""", ln)
+        m = re.match(r"""^\s*(?:-\s+)?(?:\{\s*)?["']?uses["']?\s*:\s*([^\s#,}]+)""", ln)
         if m:
             ref = m.group(1).strip("'\"")
             if ref.startswith("./") or ref.startswith("docker://"):
@@ -945,9 +997,11 @@ def check_workflow(c, p, privileged=None):
             incomplete(c, "workflow run scan", p, "double-quoted run escapes require manual review")
             continue
         reported = set()
+        seen_pos, seen_nl = 0, 0
         for start, expression in workflow_expressions(c, p, script):
             if untrusted_workflow_expression(c, p, expression):
-                line = block[script.count("\n", 0, start)][0]
+                seen_nl += script.count("\n", seen_pos, start); seen_pos = start
+                line = block[seen_nl][0]
                 if line in reported:
                     continue
                 reported.add(line)
@@ -980,7 +1034,9 @@ def check_dockerfile(c, p):
             if ":" not in name or name.endswith(":latest"):
                 c.add("Low", f"base image {img} is not pinned", p, i, category=CAT_BUILD,
                       impact="Rebuilds pull a different image", fix="Pin a version tag, ideally a digest")
-        if re.search(r"(curl|wget)[^|\n]*\|\s*(sh|bash)", ln):
+        segments = ln.split("|")
+        if any(re.match(r"\s*(sh|bash)", seg) and re.search(r"curl|wget", prev)
+               for prev, seg in zip(segments, segments[1:])):
             c.add("Low", "remote script piped into a shell during build", p, i, category=CAT_BUILD,
                   impact="Build executes whatever the URL serves at that moment",
                   fix="Download a pinned version and verify its checksum")
@@ -1613,8 +1669,37 @@ def npm_import(name):
                       + r"|\b(?:from|import)" + target)
 
 
-def npm_referenced(name, texts):
+_IMPORT_SITE = re.compile(r"""(?=(?:\brequire(?:\.resolve)?|\bimport|\bjest\.(?:mock|requireActual))\s*\(\s*['"`]([^'"`]{0,257})"""
+                          r"""|\b(?:from|import)\s*['"`]([^'"`]{0,257}))""")
+_QUOTE_SITE = re.compile(r"""(?=(['"`])([^'"`]{0,257}))""")
+
+
+def npm_index(texts):
+    """One pass: every name npm_import() could match, and every quoted name form."""
+    imports, quoted = set(), set()
+    for t in texts:
+        for m in _IMPORT_SITE.finditer(t):
+            run = m[1] if m[1] is not None else m[2]
+            end = m.end(1) if m[1] is not None else m.end(2)
+            if len(run) <= 256 and t[end:end + 1] in ("'", '"', "`"):
+                imports.add(run)
+            imports.update(run[:j] for j, ch in enumerate(run) if ch == "/" and j <= 256)
+        for m in _QUOTE_SITE.finditer(t):
+            q, run, end = m[1], m[2], m.end(2)
+            if len(run) <= 256 and t[end:end + 1] == q:
+                quoted.add(q + run + q)
+            quoted.update(q + run[:j] + "/" for j, ch in enumerate(run) if ch == "/" and j <= 256)
+    return imports, quoted
+
+
+def npm_referenced(name, texts, index=None):
     """yes for an import form; unknown when the quoted name appears another way; else no."""
+    if index is not None and name and len(name) <= 256 and not any(q in name for q in "'\"`"):
+        imports, quoted = index
+        if name in imports:
+            return "yes"
+        forms = [q + name + q for q in ("'", '"', "`")] + [q + name + "/" for q in ("'", '"', "`")]
+        return "unknown" if any(n in quoted for n in forms) else "no"
     pattern = npm_import(name)
     if any(pattern.search(t) for t in texts):
         return "yes"
@@ -1627,10 +1712,13 @@ def triage(c, root):
     if not deps:
         return
     texts = source_index(root)
+    index = None
     ctxs = {}
     for f in deps:
         lock = str(Path(root) / f["lockfile"])
-        ctx = ctxs.setdefault(lock, lock_context(lock))
+        if lock not in ctxs:  # setdefault() would re-parse the lockfile per finding
+            ctxs[lock] = lock_context(lock)
+        ctx = ctxs[lock]
         name = f["package"]
         if name in ctx["dev"] and name not in ctx["runtime"]:
             exposure = "dev-only"
@@ -1645,7 +1733,9 @@ def triage(c, root):
         if needles:
             referenced = "yes" if any(n in t for t in texts for n in needles) else "no"
         elif npm_family:
-            referenced = npm_referenced(name, texts)
+            if index is None:
+                index = npm_index(texts)
+            referenced = npm_referenced(name, texts, index)
         else:
             referenced = "unknown"
         if f.get("malicious"):
