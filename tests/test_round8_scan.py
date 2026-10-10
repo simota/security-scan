@@ -400,5 +400,45 @@ class CodexRound8gScanTests(Base):
         self.assertLess(time.monotonic() - started, 1.0)
 
 
+class CodexRound8hScanTests(Base):
+    HEAD, fresh = CodexRound8eScanTests.HEAD, CodexRound8eScanTests.fresh
+
+    def test_here_document_bodies_are_data(self):
+        head = "          SHA=" + self.HEAD + "\n"
+        for op, end in (("<<EOF", "EOF"), ("<<-EOF", "\tEOF"), ("<<'EOF'", "EOF"), ('<< "EOF"', "EOF"), ("<<~EOF", "EOF")):
+            body = "          cat " + op + " > f.txt\n          SHA=main\n          " + end + "\n"
+            with self.subTest(op=op):
+                self.assertTrue(self.high(PRT + "    steps:\n      - run: |\n" + head + body + '          git checkout "$SHA"\n'))
+                self.fresh()
+                # A checkout written into the here-document is text, not a command.
+                self.assertFalse(self.high(PRT + "    steps:\n      - run: |\n" + head + body.replace(
+                    "SHA=main", 'git checkout "$SHA"')))
+                self.fresh()
+        # A here-string and a shift are not here-documents; after the delimiter rows run again.
+        for row in ('cat <<< "x"', "echo $((1 << 2))", "cat <<EOF\n          x\n          EOF"):
+            with self.subTest(row=row):
+                self.assertFalse(self.high(PRT + "    steps:\n      - run: |\n" + head + "          " + row
+                                           + '\n          SHA=main\n          git checkout "$SHA"\n'))
+                self.fresh()
+        started = time.monotonic()
+        deps_scan.HEREDOC.findall("<<" + " " * 200000 + "<<<" * 60000 + "<<-" * 60000)
+        self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_assignment_in_a_conditionally_entered_group_does_not_clear_taint(self):
+        head = "          SHA=" + self.HEAD + "\n"
+        for line in ("true || { echo skipped; SHA=main; }", "false && { SHA=main; }", "true || { { SHA=main; }; }",
+                     "true ||\n          {\n            echo x\n            SHA=main\n          }", "true || { echo x; { echo y; }; SHA=main; }"):
+            with self.subTest(line=line):
+                self.assertTrue(self.high(PRT + "    steps:\n      - run: |\n" + head + "          " + line
+                                          + '; git checkout "$SHA"\n'))
+                self.fresh()
+        # An unconditional group still clears it, and so does an assignment after the group closes.
+        for line in ("{ echo x; SHA=main; }", "true || { echo x; }; SHA=main"):
+            with self.subTest(line=line):
+                self.assertFalse(self.high(PRT + "    steps:\n      - run: |\n" + head + "          " + line
+                                           + '; git checkout "$SHA"\n'))
+                self.fresh()
+
+
 if __name__ == "__main__":
     unittest.main()
