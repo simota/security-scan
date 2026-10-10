@@ -954,9 +954,31 @@ OUTPUT_USE = re.compile(r"\bsteps\.([\w-]+)\.outputs\.([\w-]+)")
 INPUT_USE = re.compile(r"(?<![\w.])inputs\.([\w-]+)")
 
 
+def head_expr(value):
+    """UNTRUSTED_HEAD, where a bare PR or issue number counts only inside a pull/<n>/ ref."""
+    return any(not PR_NUMBER.fullmatch(m[0]) or "pull/" in value for m in UNTRUSTED_HEAD.finditer(value))
+
+
+def strip_comment(line):
+    """line without a YAML ` #...` comment outside quotes (linear scan)."""
+    quote = None
+    for k, ch in enumerate(line):
+        if quote:
+            quote = None if ch == quote else quote
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "#" and (k == 0 or line[k - 1] in " \t"):
+            return line[:k]
+    return line
+
+
 def head_value(value):
     """True when a checkout input names the PR head (or refs/pull/<number>)."""
     return bool(HEAD_REF.search(value) or "pull/" in value and PR_NUMBER.search(value))
+
+
+FLOW_PAIR = re.compile(r"""\s*["']?([\w-]+)["']?\s*:\s*("(?:[^"\\]|\\.)*(?:"|$)|'(?:[^']|'')*(?:'|$)|[^,}]*)""")
+FLOW_END = re.compile(r"\s*\}")
 
 
 def flow_pairs(value):
@@ -971,8 +993,18 @@ def flow_pairs(value):
         text += value[cursor:start] + "\0%d\0" % len(exprs)
         exprs.append(value[start:end + 2])
         cursor = end + 2
-    return {m[1]: re.sub(r"\0(\d+)\0", lambda e: exprs[int(e[1])], m[2]).strip() for m in re.finditer(
-        r"""["']?([\w-]+)["']?\s*:\s*("(?:[^"\\]|\\.)*(?:"|$)|'(?:[^']|'')*(?:'|$)|[^,}]*)""", text.strip()[1:])}
+    pairs, body, pos = {}, text.strip()[1:], 0
+    while pos < len(body):  # Anchored at the start and after each comma: linear on unterminated `{aaaa`.
+        m = FLOW_PAIR.match(body, pos)
+        if m:
+            pairs[m[1]] = re.sub(r"\0(\d+)\0", lambda e: exprs[int(e[1])], m[2]).strip()
+            pos = m.end()
+            if FLOW_END.match(body, pos):
+                break
+        pos = body.find(",", pos) + 1
+        if not pos:
+            break
+    return pairs
 
 
 def mapping_values(lines, index, value, end):
@@ -1373,6 +1405,22 @@ def scalar_rows(lines):
     return inside
 
 
+def moved_args(commands):
+    """git_commands without the new branch name of checkout/switch -b/-c/--orphan (one word, or one
+    `${{ }}` expression over several): that branch is created, not checked out."""
+    out = []
+    for sub, args in commands:
+        kept, skip, depth = [], False, 0
+        for a in args:
+            if skip or depth > 0:
+                skip, depth = False, depth + a.count("${{") - a.count("}}")
+                continue
+            kept.append(a)
+            skip = sub in ("checkout", "switch") and a in ("-b", "-B", "-c", "-C", "--orphan")
+        out.append((sub, kept))
+    return out
+
+
 def branch(ref):
     """`pr`, `heads/pr` and `refs/heads/pr` name one local branch for checkout."""
     ref = ref.lstrip("+")
@@ -1452,11 +1500,11 @@ def check_workflow(c, p, privileged=None, calls=None):
                     if re.match(r"[|>][-+0-9]*[ \t]*(?:#.*)?$", value):  # block scalar: its lines are the value
                         k, body = i + 1, []
                         while k < len(lines) and (not lines[k].strip() or
-                                                  len(lines[k]) - len(lines[k].lstrip()) > len(m[1])):
+                                                  len(lines[k]) - len(lines[k].lstrip()) > m.start(2)):
                             body.append(lines[k])
                             k += 1
                         value, until = "\n".join(body), k
-                    out[m[2]] = out.get(m[2], False) or bool(UNTRUSTED_HEAD.search(value))
+                    out[m[2]] = out.get(m[2], False) or head_expr(value)
             return out
 
         workflow_env, job_env, job_names, written, outputs = assigned(top_rows), {}, {}, {}, {}
@@ -1481,7 +1529,7 @@ def check_workflow(c, p, privileged=None, calls=None):
                 for _, x in run_rows(st):
                     for kind, name, value in github_writes(x) if "GITHUB_" in x else ():
                         env_ref = env_ref or step_env(st, job, writes=False)
-                        bad = bool(UNTRUSTED_HEAD.search(value) or head_value(value) or env_ref(value))
+                        bad = bool(head_expr(value) or head_value(value) or env_ref(value))
                         if kind == "GITHUB_ENV":
                             written.setdefault(job, {})[name] = written.get(job, {}).get(name, False) or bad
                         elif step_value(st, "id"):
@@ -1545,15 +1593,15 @@ def check_workflow(c, p, privileged=None, calls=None):
                     if not m:
                         continue
                     if m[1] is not None:  # flow mapping, possibly over several lines
-                        flow, j = m[1], k + 1
+                        flow, j = strip_comment(m[1]), k + 1
                         while flow_depth(flow) > 0 and j < len(rows):
-                            flow, j = flow + " " + lines[rows[j]].strip(), j + 1
+                            flow, j = flow + " " + strip_comment(lines[rows[j]]).strip(), j + 1
                         values = [v for key, v in flow_pairs(flow).items() if key in ("ref", "repository")]
                     else:  # plain, quoted or block scalar value, possibly continued on later lines
-                        value, level, j = m[2], len(lines[i]) - len(lines[i].lstrip()), k + 1
+                        value, level, j = strip_comment(m[2]), len(lines[i]) - len(lines[i].lstrip()), k + 1
                         while j < len(rows) and (not lines[rows[j]].strip()
                                                  or len(lines[rows[j]]) - len(lines[rows[j]].lstrip()) > level):
-                            value, j = value + "\n" + lines[rows[j]], j + 1
+                            value, j = value + "\n" + strip_comment(lines[rows[j]]), j + 1
                         values = [value]
                     for value in values:
                         source = ref_source(value, job, env_ref)
@@ -1566,7 +1614,7 @@ def check_workflow(c, p, privileged=None, calls=None):
                 title = f"{privileged} workflow checks out the pull request's code"
             elif "run" in st["keys"]:
                 run = run_rows(st)
-                untrusted = lambda x: (UNTRUSTED_HEAD.search(x) or env_ref(x)
+                untrusted = lambda x: (head_expr(x) or env_ref(x)
                                        or re.search(r"\bpull/[^\s/]*/(?:head|merge)\b", x)
                                        or any(outputs.get(job, {}).get(o) for o in OUTPUT_USE.findall(x)))
                 # Fetching the PR head is data until this step checks it out, resets or
@@ -1578,7 +1626,7 @@ def check_workflow(c, p, privileged=None, calls=None):
                 hits = [k for k, x in run if re.search(r"\bgh\s+pr\s+checkout\b", x)
                         or re.search(r"\bgh\s+repo\s+clone\b", x) and untrusted(x) or any(
                     sub in GIT_MOVES and (untrusted(" ".join(args)) or fetched & {branch(a) for a in args})
-                    for sub, args in git_commands(x))][:1]
+                    for sub, args in moved_args(git_commands(x)))][:1]
                 title = f"{privileged} workflow checks out the pull request's code in a run step"
             for line in hits:
                 head_checkout = True
@@ -1677,8 +1725,13 @@ def check_workflow(c, p, privileged=None, calls=None):
             envs[scope] = mapping_values(lines, entry[0], entry[1], end) if entry else {}
         return envs[scope]
 
+    taint_memo = {}  # One long env value can be referenced many times: parse it once.
+
     def tainted(path, value):
-        return any(untrusted_workflow_expression(c, path, e) for _, e in workflow_expressions(c, path, value))
+        key, memo = (str(path), value), taint_memo
+        if key not in memo:
+            memo[key] = any(untrusted_workflow_expression(c, path, e) for _, e in workflow_expressions(c, path, value))
+        return memo[key]
 
     on = child(top, "on")
     call = on and child(yaml_children(lines, on[1] + 1, on[3]), "workflow_call")

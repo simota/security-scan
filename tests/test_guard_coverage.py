@@ -64,7 +64,7 @@ class SeverityOrderTests(unittest.TestCase):
         if listed:
             findings = [findings[i] for i in listed]
         problems = contract_check.check({"findings": findings}, Path(tempfile.gettempdir()))
-        return "F-*: number code findings in severity order (High first), then path" in problems
+        return "F-*: number code findings in severity order (High first), then path and line" in problems
 
     def test_adjacent_severities_and_listing_order(self):
         for pair in (("Medium", "High"), ("Low", "Medium"), ("Info", "Low")):

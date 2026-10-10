@@ -140,7 +140,7 @@ class ContractOrderAndLimitationTests(unittest.TestCase):
     def order_violation(self, *locations):
         findings = [{"id": "F-%03d" % i, "severity": "High", "location": loc}
                     for i, loc in enumerate(locations, 1)]
-        return "F-*: number code findings in severity order (High first), then path" in self.check(
+        return "F-*: number code findings in severity order (High first), then path and line" in self.check(
             {"findings": findings})
 
     def test_path_then_line_order_within_a_severity(self):
@@ -152,7 +152,7 @@ class ContractOrderAndLimitationTests(unittest.TestCase):
         for name in ("findings.sample.json", "findings.sample.ja.json"):
             data = json.loads((EXAMPLES / name).read_text(encoding="utf-8"))
             with self.subTest(name=name):
-                self.assertNotIn("F-*: number code findings in severity order (High first), then path",
+                self.assertNotIn("F-*: number code findings in severity order (High first), then path and line",
                                  self.check(data))
 
     def dep_problems(self, stamp, limitations):

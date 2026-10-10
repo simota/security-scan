@@ -1517,6 +1517,8 @@ def source_base(url):
 
 _SECRET_PARAM = re.compile(r"(?i)token|secret|passw|pwd|key|auth|credential|signature|^sig$|session|^code$"
                            r"|jwt|private|^x-amz-|^x-goog-|^state$")
+# Advisory identifiers (?id=CVE-2021-44228, ?q=PYSEC-2023-117) are the point of a reference link.
+_ADVISORY_ID = re.compile(r"(?i)(?:CVE|GHSA|PYSEC|GO|RUSTSEC|OSV|MAL|GMS|DSA|USN|RHSA)-[\w.:-]+")
 
 
 def _public_params(text):
@@ -1526,7 +1528,7 @@ def _public_params(text):
         name, _, value = item.partition("=")
         name, value = unquote(name), unquote(value)
         if (_SECRET_PARAM.search(name) or TOKEN_RE.search(value) or JWT_RE.search(value)
-                or secret_candidate(value) or has_url_credentials(value)):
+                or secret_candidate(value) and not _ADVISORY_ID.fullmatch(value) or has_url_credentials(value)):
             continue
         kept.append(item)
     return "&".join(kept)

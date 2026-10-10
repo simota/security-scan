@@ -14,9 +14,12 @@ URL_RE = re.compile(r"(?<![A-Za-z0-9+.-])(?P<prefix>[0-9+.-]*)"
 # A quote or angle bracket inside the userinfo ends URL_RE's match before the
 # '@' (https://user:p"ss@host): redact through the rest of the token.
 QUOTED_USERINFO_RE = re.compile(r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*:(?://|\\/\\/)"
-                                r"[^\s/\\@\"<>]*[\"<>][^\s/\\@]*@[^\s\"'<>]*")
-# Scheme-relative URLs (//user:pw@host/path) carry userinfo without a scheme.
-SCHEMELESS_USERINFO_RE = re.compile(r"(?<![\w:/\\.-])//[^\s/?#\"'<>@]+@(?=[\w\[])")
+                                r"[^\s/\\@\"<>]*[\"<>][^\s/\\@<>]*@[^\s\"'<>]*")
+# Scheme-relative URLs (//user:pw@host/path) carry userinfo without a scheme; a
+# colon is required so XPath ('//input[@value]') and paths ('//todo@txt') are not.
+SCHEMELESS_USERINFO_RE = re.compile(r"(?<![\w:/\\.-])//[^\s/?#\"'<>@:\[\]()]+:[^\s/?#\"'<>@\[\]()]*@(?=[\w\[])")
+# A package version after '@' (unpkg.com/react@18.3.1/, pkg.go.dev/net@v0.17.0), not a host.
+VERSION_RE = re.compile(r"v?\d+(?:\.\d+){0,2}(?:[-+][\w.]+)?(?=[/?#]|$)")
 # A percent-encoded URL (https%3A%2F%2Fuser%3Apw%40host): its userinfo hides in %40.
 ENCODED_URL_RE = re.compile(r"(?i)(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*%3A%2F%2F[^\s\"'<>&]*")
 
@@ -34,11 +37,20 @@ def hidden_userinfo(token):
     at = after.find("@")
     if at < 0:
         return False
-    if ":" in netloc.rsplit("@", 1)[-1] or "@" in netloc:
-        return True
-    # user/name@host: '@' inside the first path segment, not '/@scope' (npm) paths.
     segment = after[1:at]
-    return bool(segment) and not re.search(r"[/?#]", segment)
+    if "@" in netloc:
+        return True
+    if not segment:
+        return False  # '/@scope' (npm) and '/@vite/client' paths.
+    name, colon, port = netloc.rpartition(":")
+    # NAME:digits or NAME:non-port before '/', '?' or '#' is userinfo, not a host and port
+    # (postgres://app:5432/Secret@db, https://user:/s3cr3t@host); a dotted host or localhost
+    # with a port (api.example.com:8443/users/alice@example.com) is judged like a portless one.
+    if colon and "]" not in port and (not port.isdigit() or "." not in name and "[" not in name
+                                      and name.lower() != "localhost"):
+        return True
+    # user/name@host: '@' inside the first path segment and not before a package version.
+    return not re.search(r"[/?#]", segment) and not VERSION_RE.match(after, at + 1)
 
 
 def _encoded_secret(token):
