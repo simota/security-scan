@@ -427,5 +427,38 @@ class CodexRound8bRecordTests(Pipeline):
         self.assertIsNone(self.snippet(data, "src/config.py:1", self.repo, evidence_dir=self.out))
 
 
+class CodexRound8dRecordTests(unittest.TestCase):
+    def test_keyword_jwt_keys_are_refused_and_masked(self):
+        key = "super" + "secret"
+        for text in ('jwt.encode(payload, key="' + key + '")', "jwt.encode(payload, key='" + key + "')",
+                     'jwt.encode(payload, secret="' + key + '")', 'jwt.encode(payload, signing_key="' + key + '")',
+                     'jwt.encode(payload, algorithm="HS256", key="' + key + '")',
+                     'jwt.decode(token, key="' + key + '", algorithms=["HS256"])',
+                     'jwt.decode(token, algorithms=["ES256", "HS256"], key="' + key + '")',
+                     'jwt.encode(\n    payload,\n    algorithm="HS256",\n    key="' + key + '",\n)'):
+            with self.subTest(text=text):
+                self.assertTrue(render.secret_in_source("src/auth.py", text + "\n"))
+                self.assertNotIn(key, render.mask_multiline(text))
+                if "\n" not in text:
+                    self.assertNotIn(key, render.redact(text))
+        for text in ("jwt.encode(payload, key=settings.SECRET)", 'jwt.encode(payload, key=os.environ["JWT_KEY"])',
+                     'jwt.encode(payload, key=os.environ["JWT_KEY"], algorithm="HS256")', 'jwt.encode(payload, algorithm="HS256")',
+                     'jwt.decode(\n    token, algorithms=["ES256", "HS256"], options={"verify_signature": False}\n)'):
+            with self.subTest(text=text):
+                self.assertFalse(render.secret_in_source("src/auth.py", text + "\n"))
+                self.assertEqual(render.mask_multiline(text), text)
+                self.assertEqual(render.redact(text), text)
+
+    def test_keyword_jwt_pattern_stays_linear(self):
+        for text in ("jwt.encode(a" + ", b=c" * 40000, "jwt.encode(a" + ", b=" + "x" * 200000, ("jwt.encode(a, b=(x), ") * 10000,
+                     "jwt.encode(a, key=" + " " * 200000, "jwt.encode(a" + (", b=" + "(" * 2) * 40000,
+                     "jwt.encode(a" + ", b=[" * 40000, "jwt.encode(a, b=[" + "x" * 200000):
+            started = time.monotonic()
+            render.mask_multiline(text)
+            render.secret_in_source("a.py", text)
+            render.redact(text)
+            self.assertLess(time.monotonic() - started, 1.0, text[:20])
+
+
 if __name__ == "__main__":
     unittest.main()

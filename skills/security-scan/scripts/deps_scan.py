@@ -36,6 +36,7 @@ entries as limitations. Standard library only.
 """
 import argparse
 import bisect
+import itertools
 import json
 import os
 import re
@@ -963,6 +964,8 @@ UNTRUSTED_HEAD = re.compile(r"\bgithub\.(?:head_ref|event\.(?:number|issue\.numb
 ENV_USE = re.compile(r"\$\{?([A-Za-z_]\w*)|\$\{\{\s*env\.([A-Za-z_]\w*)")
 OUTPUT_USE = re.compile(r"\bsteps\.([\w-]+)\.outputs\.([\w-]+)")
 INPUT_USE = re.compile(r"(?<![\w.])inputs\.([\w-]+)")
+# A shell function header and its opening brace: `f() {`, `function f {`, `function f() {`.
+FUNCTION_HEADER = re.compile(r"\s*(?:function\s+[^\s(){}]+\s*(?:\(\s*\))?|[^\s(){}=]+\s*\(\s*\))\s*\{(?:\s+|$)")
 
 
 BRACKET = re.compile(r"\[\s*'([\w-]+)'\s*\]")
@@ -1087,11 +1090,14 @@ def local_targets(root, rel, memo):
 
 def local_calls(files, root, privileged):
     """callee -> [(caller, {input: value}, caller is privileged)] of local `uses: ./x` jobs and steps."""
-    root, calls, memo = Path(root).resolve(), {}, {}
+    root, calls, memo, own = Path(root).resolve(), {}, {}, set()
     for p in files:
         if not (is_workflow(p) or p.name in ("action.yml", "action.yaml")):
             continue
-        lines = read(p).splitlines()
+        text = read(p)
+        lines = text.splitlines()
+        if is_workflow(p) and (escaped_triggers(text) or any(t in workflow_triggers(text) for t in PRIVILEGED_TRIGGERS)):
+            own.add(p.resolve())  # privileged by its own trigger, not only through its callers
         top = yaml_children(lines)
         env_of = lambda e, end: mapping_values(lines, e[0], e[1], end) if e else {}
         env, jobs, sites, scopes = child(top, "env"), child(top, "jobs"), [], []
@@ -1119,21 +1125,32 @@ def local_calls(files, root, privileged):
                       for k, v in values.items()}
             for cand in local_targets(root, m[1], memo):
                 calls.setdefault(cand, []).append((p, values, p.resolve() in privileged))
-    # A -> B -> C: B's `inputs.x` forwarded to C carries what A passed for x.
+    # A -> B -> C: B's `inputs.x` forwarded to C carries what A passed for x, one entry per
+    # call path: a value from an unprivileged A never counts as passed by a privileged one,
+    # even when B is privileged through another caller. Past 64 paths per callee, the
+    # remaining callers' values are merged into one entry (raise-only, as one path).
+    def grow(values, ups):
+        extra = {key: [g[x] for x in INPUT_USE.findall(value) for g in ups if x in g and g[x] not in value]
+                 for key, value in values.items()}
+        return {key: (value + " " + " ".join(extra[key]))[:4000] if extra[key] else value for key, value in values.items()}
+    base = calls
     for _ in range(8):
-        changed = False
-        for entries in calls.values():
-            for n, (caller, values, privileged_caller) in enumerate(entries):
-                ups = calls.get(caller.resolve(), [])
-                grown = {}
-                for key, value in values.items():
-                    extra = [g[x] for x in INPUT_USE.findall(value) for _, g, _ in ups if x in g and g[x] not in value]
-                    grown[key] = (value + " " + " ".join(extra))[:4000] if extra else value
-                if grown != values:
-                    entries[n] = (caller, grown, privileged_caller or any(u[2] for u in ups))
-                    changed = True
-        if not changed:
+        grown_calls = {}
+        for callee, entries in base.items():
+            out, budget = {}, 64
+            for caller, values, privileged_caller in entries:
+                ups = calls.get(caller.resolve(), []) if any("inputs" in v for v in values.values()) else ()
+                derived = list(itertools.islice(((caller, grown, caller.resolve() in own or u[2]) for u in ups
+                                                 for grown in [grow(values, [u[1]])] if grown != values), max(budget, 0) + 1))
+                if len(derived) > budget:
+                    derived = [(caller, grow(values, [u[1] for u in ups]), privileged_caller or any(u[2] for u in ups))]
+                budget -= len(derived)
+                for e in derived or [(caller, values, privileged_caller)]:
+                    out.setdefault((e[0], tuple(sorted(e[1].items())), e[2]), e)
+            grown_calls[callee] = list(out.values())
+        if grown_calls == calls:
             break
+        calls = grown_calls
     return calls
 
 
@@ -1762,9 +1779,10 @@ def check_workflow(c, p, privileged=None, calls=None):
                 fetched, hits = job_fetched.setdefault(job, set()), []
                 # One row may hold several commands (`SHA=…; git checkout "$SHA"`, or an
                 # inline `run: …`): each runs after the ones before it on the row.
-                # An assignment after `&&`/`||` or inside an if/case/loop block may not run: it
-                # can raise a variable's taint but never clear it.
-                segments, depth, sep = [], 0, ";"
+                # An assignment after `&&`/`||`, inside an if/case/loop block or in a function
+                # body (which may never be called) may not run: it can raise a variable's taint
+                # but never clear it. Braces are counted from a function header to its `}`.
+                segments, depth, braces, sep = [], 0, 0, ";"
                 for k, row in run:
                     parts = re.split(r"(;|&&|\|\|)", shell_text(re.sub(r"""^\s*(?:-\s+)?["']?run["']?\s*:\s*""", "", row)))
                     for j in range(0, len(parts), 2):
@@ -1772,7 +1790,10 @@ def check_workflow(c, p, privileged=None, calls=None):
                         word = parts[j].split(None, 1)[:1]
                         depth = max(0, depth + (word in (["if"], ["case"], ["for"], ["while"], ["until"], ["select"]))
                                     - (word in (["fi"], ["esac"], ["done"])))
-                        segments.append((k, parts[j], depth > 0 or sep in ("&&", "||")))
+                        header = FUNCTION_HEADER.match(parts[j])
+                        braces = max(0, braces + (bool(header) or braces > 0 and word == ["{"]) - (braces > 0 and word == ["}"]))
+                        segments.append((k, parts[j][header.end():] if header else parts[j],
+                                         depth > 0 or braces > 0 or sep in ("&&", "||")))
                     sep = parts[-2] if len(parts) > 1 and not parts[-1].strip() else ";"
                 for k, x, conditional in segments:
                     if not hits and (re.search(r"\bgh\s+pr\s+checkout\b", x)

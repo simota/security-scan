@@ -258,5 +258,35 @@ class CodexRound8cScanTests(Base):
             for i in range(2500)))
 
 
+class CodexRound8dScanTests(Base):
+    def test_assignment_in_an_uncalled_function_does_not_clear_taint(self):
+        head = "          SHA=${{ github.event.pull_request.head.sha }}\n"
+        for body in ("f() { SHA=main; }\n", "function f {\n            SHA=main\n          }\n",
+                     "function f() {\n            if true; then echo; fi\n            SHA=main\n          }\n",
+                     "f () {\n            { echo; }\n            SHA=main\n          }\n"):
+            with self.subTest(body=body):
+                self.assertTrue(self.high(PRT + "    steps:\n      - run: |\n" + head + "          " + body
+                                          + '          git checkout "$SHA"\n'))
+        # After the function's closing brace an assignment runs again.
+        self.assertFalse(self.high(PRT + "    steps:\n      - run: |\n" + head + "          f() { echo; }\n"
+                                   '          SHA=main\n          git checkout "$SHA"\n'))
+        started = time.monotonic()
+        deps_scan.FUNCTION_HEADER.match("function " + "a" * 200000)
+        deps_scan.FUNCTION_HEADER.match("a" * 200000 + " (" + " " * 200000)
+        self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_forwarded_inputs_keep_each_callers_privilege(self):
+        middle = CALLEE + "    steps:\n      - uses: ./.github/actions/co\n        with:\n          sha: ${{ inputs.ref }}\n"
+        action = COMPOSITE + "    - run: git checkout ${{ inputs.sha }}\n      shell: bash\n"
+        unprivileged = CALLER.replace("on: pull_request_target", "on: pull_request")
+        safe = CALLER.replace("${{ github.event.pull_request.head.sha }}", "main")
+        files = {W + "a.yml": safe, W + "c.yml": unprivileged, W + "b.yml": middle, ".github/actions/co/action.yml": action}
+        self.assertFalse(any("action.yml" in x for x in self.high(files)))
+        shutil.rmtree(self.tmp)
+        self.tmp.mkdir()
+        files[W + "a.yml"] = CALLER
+        self.assertTrue(any("action.yml" in x for x in self.high(files)))
+
+
 if __name__ == "__main__":
     unittest.main()

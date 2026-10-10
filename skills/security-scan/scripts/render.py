@@ -1486,14 +1486,18 @@ TOKEN_RE = re.compile(r"\b(?:gh[opsu]_[A-Za-z0-9]{36,}|github_pat_\w{22,}|A(?:KI
                       r"|[Bb]asic[ \t]+(?=[A-Za-z+/]*\d)[A-Za-z0-9+/]{16,}={0,2}(?![\w.~+/-])"
                       r"|" + _AUTH_CTX + _AUTH_TOKEN + ")")
 _AUTH_VALUE = re.compile("(" + _AUTH_CTX + ")" + _AUTH_TOKEN)
-# A literal signing key passed positionally: jwt.sign(payload, "key"),
-# jwt.encode(claims, 'key', ...), jwt.decode(token, "key"). The first argument
+# A literal signing key passed positionally or by keyword: jwt.sign(payload, "key"),
+# jwt.encode(claims, 'key', ...), jwt.decode(token, "key"), jwt.encode(payload,
+# algorithm="HS256", key="key") (also secret=, signing_key=). The first argument
 # is a simple expression, call or object literal; the call may span lines.
 # A bracketed group nested at most two deep, each level bounded: makePayload(user), {id: f(x)}.
 _GROUP = r"[({](?:[^(){}\n]|[({][^(){}\n]{0,200}[)}]){0,200}[)}]"
+# Keyword arguments skipped before key= are bounded too, a [list] kept whole: algorithms=["HS256", "RS256"].
+_KWARG = r"[a-z_]\w{0,40}\s{0,40}=(?!=)(?:[^,(){}\[\]\n]|\[[^\[\](){}\n]{0,200}\]|%s){0,199},\s{0,40}" % _GROUP
 JWT_KEY_LITERAL = re.compile(r"""(?i)(\b(?:jwt|jsonwebtoken|jose|jws)\.(?:sign|encode|verify|decode)\s{0,40}\(\s{0,40}"""
-                             r"""(?:[^\s,(){}]|%s)(?:[^,(){}\n]|%s){0,199},\s{0,40}(?:[rbfu]{1,2}(?=['"]))?)"""
-                             r"""(['"])((?:\\.|(?!\2)[^\\\n]){1,1024})\2""" % (_GROUP, _GROUP))
+                             r"""(?:[^\s,(){}]|%s)(?:[^,(){}\n]|%s){0,199},\s{0,40}"""
+                             r"""(?:(?:%s){0,4}(?:key|secret|signing_key)\s{0,40}=\s{0,40})?(?:[rbfu]{1,2}(?=['"]))?)"""
+                             r"""(['"])((?:\\.|(?!\2)[^\\\n]){1,1024})\2""" % (_GROUP, _GROUP, _KWARG))
 # A private key block: the header followed by a base64 body line (raw or \n-escaped).
 PEM_BODY_RE = re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[ \t]*(?:\r?\n|\\r?\\n)"
                          r"(?:[\w-]+:[^\n\\]*(?:\r?\n|\\r?\\n))*[ \t]*[A-Za-z0-9+/]{16,}")
