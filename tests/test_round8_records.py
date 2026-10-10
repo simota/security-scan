@@ -373,6 +373,50 @@ class CodexRound8bRecordTests(Pipeline):
             render.secret_in_source("a.js", text)
             self.assertLess(time.monotonic() - started, 1.0, text[:20])
 
+    def test_jwt_key_after_a_call_or_nested_object_payload_is_refused_and_masked(self):
+        for text in ('jwt.sign(makePayload(user), "supersecret")\n', 'jwt.sign({ id: id(u), n: f(x) }, "supersecret")\n',
+                     'const t = jwt.sign(\n  build(user),\n  "supersecret"\n);\n'):
+            with self.subTest(text=text):
+                self.assertTrue(render.secret_in_source("src/auth.js", text))
+                self.assertNotIn("supersecret", render.mask_multiline(text))
+                self.assertNotIn("supersecret", render.redact(text) if text.count("\n") == 1 else render.mask_multiline(text))
+        self.assertFalse(render.secret_in_source("src/auth.js", "jwt.sign(makePayload(user), process.env.KEY)\n"))
+
+    def test_short_authorization_values_are_masked_but_placeholders_are_kept(self):
+        basic = "dXNl" + "cjpwYXNz"
+        for line in ("Authorization: Basic " + basic, '{"Authorization": "Bearer ' + basic + '"}'):
+            with self.subTest(line=line):
+                self.assertTrue(render.secret_in_source("src/client.py", line + "\n"))
+                self.assertNotIn(basic, render.redact(line))
+                self.assertNotIn(basic, render.mask_multiline(line))
+        for line in ("Authorization: Bearer <token>", "Authorization: Bearer {token}", "Authorization: Bearer $TOKEN",
+                     "Authorization: Bearer xxxx", "Authorization: Bearer YOUR_TOKEN", '"Authorization": "Bearer " + jwt',
+                     "Authorization: Bearer abc${x}", "Authorization: Basic btoa(creds)",
+                     "// mentions Authorization: Bearer header explicitly", "prefer it for Authorization: Bearer flows; not"):
+            with self.subTest(line=line):
+                self.assertFalse(render.secret_in_source("src/client.py", line + "\n"))
+                self.assertEqual(render.redact(line), line)
+                self.assertEqual(render.mask_multiline(line), line)
+
+    def test_spaced_subscript_secret_keys_are_refused_and_masked(self):
+        value = "abcd" + "efgh1234"
+        for line in ('app.config["SECRET_KEY" ] = "' + value + '"', "app.config[ 'SECRET_KEY' ] = '" + value + "'",
+                     'os.environ["API_TOKEN"\t] = "' + value + '"'):
+            with self.subTest(line=line):
+                self.assertTrue(render.secret_in_source("src/settings.py", line + "\n"))
+                self.assertNotIn(value, render.redact(line))
+
+    def test_nested_jwt_and_short_authorization_patterns_stay_linear(self):
+        for text in ("jwt.sign(" + "(x)" * 66000, "jwt.sign(" + "((x)" * 50000, ("jwt.sign((a,") * 20000,
+                     "jwt.sign(" + ("(" + "x" * 150 + "(" + "y" * 150) * 600, "Authorization: Bearer " + "aaaa+" * 40000,
+                     ("Authorization: Bearer " + "a" * 50 + "+") * 4000, "Authorization: Bearer " + "A_" * 100000,
+                     "Authorization: Bearer abcd" + " " * 200000 + "x", ("Authorization: Bearer ab" + " " * 40) * 4000):
+            started = time.monotonic()
+            render.mask_multiline(text)
+            render.secret_in_source("a.js", text)
+            render.redact(text)
+            self.assertLess(time.monotonic() - started, 1.0, text[:20])
+
     def test_valid_pin_without_checkout_or_matching_copy_omits_the_excerpt(self):
         data, _ = self.capture([self.finding("F-001", "src/orders.py:2")], ["src/orders.py"])
         shutil.rmtree(self.repo / ".git")

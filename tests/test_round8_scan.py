@@ -218,5 +218,45 @@ class CodexRound8bScanTests(Base):
                 self.assertTrue(has_url_credentials(url))
 
 
+class CodexRound8cScanTests(Base):
+    def test_every_leading_shell_assignment_is_read(self):
+        head = "${{ github.event.pull_request.head.sha }}"
+        for row in ('SAFE=main SHA=' + head + '; git checkout "$SHA"', 'export A=1 SHA=' + head + '; git checkout "$SHA"',
+                    'SAFE="a b" SHA="' + head + '" && git checkout "$SHA"', 'declare -x A=1 SHA=' + head + '\n          git checkout "$SHA"'):
+            with self.subTest(row=row):
+                self.assertTrue(self.high(PRT + "    steps:\n      - run: |\n          " + row + "\n"))
+        # A later unconditional assignment still replaces the value; a prefix `A=x cmd` only raises it.
+        self.assertFalse(self.high(PRT + "    steps:\n      - run: |\n          SHA=" + head + "\n"
+                                   "          A=1 SHA=main\n          git checkout \"$SHA\"\n"))
+        self.assertTrue(self.high(PRT + "    steps:\n      - run: |\n          SHA=" + head + "\n"
+                                  "          SHA=main env\n          git checkout \"$SHA\"\n"))
+        started = time.monotonic()
+        deps_scan.shell_assignments("A=" + "\"$(${{ x " * 20000)
+        self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_caller_env_passed_to_a_local_callee_is_tainted(self):
+        env = "env:\n  SHA: ${{ github.event.pull_request.head.sha }}\n"
+        callee_run = "    steps:\n      - run: git checkout ${{ inputs.ref }}\n"
+        step = "        with:\n          sha: ${{ env.SHA }}\n"
+        for files in ({W + "a.yml": env + CALLER.replace("${{ github.event.pull_request.head.sha }}", "${{ env.SHA }}"),
+                       W + "b.yml": CALLEE + callee_run},
+                      {W + "a.yml": PRT + "    env:\n      SHA: ${{ github.event.pull_request.head.sha }}\n    steps:\n"
+                       "      - uses: ./.github/actions/co\n" + step,
+                       ".github/actions/co/action.yml": COMPOSITE + "    - run: git checkout ${{ inputs.sha }}\n      shell: bash\n"},
+                      {W + "a.yml": PRT + "    steps:\n      - uses: ./.github/actions/co\n        env:\n"
+                       "          SHA: ${{ github.head_ref }}\n" + step,
+                       ".github/actions/co/action.yml": COMPOSITE + "    - run: git checkout ${{ inputs.sha }}\n      shell: bash\n"}):
+            with self.subTest(files=files):
+                self.assertTrue(self.high(files))
+                shutil.rmtree(self.tmp)
+                self.tmp.mkdir()
+        self.assertFalse(self.high({W + "a.yml": PRT + "    env:\n      SHA: main\n    steps:\n"
+                                    "      - uses: ./.github/actions/co\n" + step,
+                                    ".github/actions/co/action.yml": COMPOSITE + "    - run: git checkout ${{ inputs.sha }}\n"}))
+        self.timed("on: pull_request_target\njobs:\n" + "".join(
+            "  j%d:\n    env:\n      A: x\n    steps:\n      - uses: ./x\n        with:\n          a: ${{ env.A }}\n" % i
+            for i in range(2500)))
+
+
 if __name__ == "__main__":
     unittest.main()

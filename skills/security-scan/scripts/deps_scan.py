@@ -35,6 +35,7 @@ findings.json (keeping prior manual reviews as history) and records not_run
 entries as limitations. Standard library only.
 """
 import argparse
+import bisect
 import json
 import os
 import re
@@ -965,8 +966,23 @@ INPUT_USE = re.compile(r"(?<![\w.])inputs\.([\w-]+)")
 
 
 BRACKET = re.compile(r"\[\s*'([\w-]+)'\s*\]")
-# `NAME=value`, `export NAME=value` (also local/declare) of a run script line.
-SHELL_ASSIGN = re.compile(r"\s*(?:(?:export|local|declare|readonly|typeset)(?:\s+-\w+)*\s+)?([A-Za-z_]\w*)=(.*)")
+# A shell word: quoted parts, $(…) and `…` kept whole (linear: each failed quote has no closing one).
+SHELL_WORD = re.compile(r"""(?:"[^"]*"|'[^']*'|\$\([^()]*\)|`[^`]*`|[^\s'"`])+""")
+
+
+def shell_assignments(x):
+    """([(name, value)], a command follows) of the leading `A=1 B="x y"` words of a command,
+    also `export A=1 B=2` (local/declare/readonly/typeset); ${{ }} expressions are one word."""
+    words = [x[m.start():m.end()] for m in SHELL_WORD.finditer(shell_text(x, r"[\s'\"`()]", "_"))]
+    declare = words[:1] in (["export"], ["local"], ["declare"], ["readonly"], ["typeset"])
+    out = []
+    for w in words[declare:]:
+        m = re.match(r"[A-Za-z_]\w*=", w)
+        if m:
+            out.append((m[0][:-1], w[m.end():]))
+        elif not declare:
+            return out, True
+    return out, False
 
 
 def dotted(value):
@@ -1076,18 +1092,31 @@ def local_calls(files, root, privileged):
         if not (is_workflow(p) or p.name in ("action.yml", "action.yaml")):
             continue
         lines = read(p).splitlines()
-        sites = [(x["keys"]["uses"][1], x["keys"].get("with"), x["end"]) for x in yaml_items(lines) if "uses" in x["keys"]]
-        jobs = child(yaml_children(lines), "jobs")
+        top = yaml_children(lines)
+        env_of = lambda e, end: mapping_values(lines, e[0], e[1], end) if e else {}
+        env, jobs, sites, scopes = child(top, "env"), child(top, "jobs"), [], []
+        workflow_env = env_of(env and env[1:3], len(lines))
         for job in yaml_children(lines, jobs[1] + 1, jobs[3]) if jobs else []:
             props = yaml_children(lines, job[1] + 1, job[3])
-            uses, given = child(props, "uses"), child(props, "with")
+            uses, given, env = child(props, "uses"), child(props, "with"), child(props, "env")
+            scopes.append((job[1], job[3], dict(workflow_env, **env_of(env and env[1:3], job[3]))))
             if uses:
-                sites.append((uses[2], given and given[1:3], job[3]))
-        for uses, given, end in sites:
+                sites.append((uses[2], given and given[1:3], job[3], scopes[-1][2]))
+        starts = [a for a, _, _ in scopes]
+        for x in yaml_items(lines):
+            if "uses" in x["keys"]:
+                k = bisect.bisect_right(starts, x["start"]) - 1
+                outer = scopes[k][2] if k >= 0 and x["start"] < scopes[k][1] else workflow_env
+                sites.append((x["keys"]["uses"][1], x["keys"].get("with"), x["end"],
+                              dict(outer, **env_of(x["keys"].get("env"), x["end"]))))
+        for uses, given, end, env in sites:
             m = re.match(r"""["']?\./([^\s"'#@]*)""", uses)
             if not m:
                 continue
             values = mapping_values(lines, given[0], given[1], end) if given else {}
+            # `ref: ${{ env.SHA }}` passes what the caller's workflow, job or step env holds.
+            values = {k: " ".join([v, *(env[n] for n in re.findall(r"\benv\.([A-Za-z_]\w*)", v) if n in env)])
+                      for k, v in values.items()}
             for cand in local_targets(root, m[1], memo):
                 calls.setdefault(cand, []).append((p, values, p.resolve() in privileged))
     # A -> B -> C: B's `inputs.x` forwarded to C carries what A passed for x.
@@ -1425,7 +1454,7 @@ EXECUTES_CHECKOUT = re.compile(
 GIT_MOVES = {"checkout", "switch", "reset", "worktree", "pull", "merge", "rebase", "cherry-pick", "clone"}
 
 
-def shell_text(line):
+def shell_text(line, chars=r"[;&|()`,]", fill=" "):
     """line with shell separators inside ${{ }} blanked: they belong to the expression,
     e.g. format('pull/{0}/head', …) or `head_ref || 'main'`. Linear."""
     parts, at = [], 0
@@ -1434,7 +1463,7 @@ def shell_text(line):
         end = line.find("}}", start + 3) if start >= 0 else -1
         if end < 0:
             break
-        parts += [line[at:start], re.sub(r"[;&|()`,]", " ", line[start:end + 2])]
+        parts += [line[at:start], re.sub(chars, fill, line[start:end + 2])]
         at = end + 2
     return "".join(parts) + line[at:]
 
@@ -1761,10 +1790,10 @@ def check_workflow(c, p, privileged=None, calls=None):
                         if sub == "fetch" and untrusted(" ".join(args)):
                             fetched |= {"FETCH_HEAD"} | {branch(a.split(":", 1)[1]) for a in args if ":" in a}
                     x = re.sub(r"^\s*(?:then|do|else|\{)\s+", "", x)
-                    a = "=" in x and SHELL_ASSIGN.match(x)
-                    if a:
-                        level = 2 if untrusted(a[2]) else max(taint(a[2]), env_ref.level(a[2]))
-                        env_ref.shell[a[1]] = max(level, env_ref.level("$" + a[1])) if conditional else level
+                    pairs, prefix = shell_assignments(x) if "=" in x else ((), False)
+                    for name, v in pairs:  # `A=1 cmd` sets A for cmd only: it can raise, never clear
+                        level = 2 if untrusted(v) else max(taint(v), env_ref.level(v))
+                        env_ref.shell[name] = max(level, env_ref.level("$" + name)) if conditional or prefix else level
                 title = f"{privileged} workflow checks out the pull request's code in a run step"
             for line in hits:
                 head_checkout = True
