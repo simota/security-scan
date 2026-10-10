@@ -135,7 +135,8 @@ class FindingsExtensionTests(unittest.TestCase):
         finding["validation"] = {"verdict": "Unverified", "evidence": "", "method": ""}
         meta = dict(fixture["meta"])
         meta.pop("commit")
-        initial = {"meta": meta, "findings": [finding], "perspectives": fixture["perspectives"]}
+        initial = {"meta": meta, "findings": [finding], "perspectives": fixture["perspectives"],
+                   "limitations": fixture["limitations"]}
         mapping = self.pinned(initial)
         expert = self.remap(fixture["expert"], mapping)
         core = {key: expert[key] for key in ("version", "mode", "host", "consent")}

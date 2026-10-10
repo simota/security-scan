@@ -25,7 +25,7 @@ from urllib.parse import quote, urlsplit
 
 # Sibling modules must import under python3 -I / PYTHONSAFEPATH as well.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from url_redaction import redact_urls
+from url_redaction import URL_RE, redact_urls
 from verification import CLAIMS, derive_verification, validate_verification
 from verification_workflow import derive_workflow, validate_workflows
 from evidence_integrity import verify_evidence
@@ -153,7 +153,7 @@ LABELS['en'].update({'eyebrow': 'SECURITY REVIEW',
  'priority_note': 'Open findings, ordered by severity, then readiness to fix. Review applicability '
                   'before changing code.',
  'fix_now': 'Plan the fix',
- 'verify_first': 'Validate first',
+ 'verify_first': 'Verify first',
  'fix_now_note': 'Valid, Confirmed finding with sufficient structured verification. Use the recorded fix direction and verify '
                  'the secure outcome.',
  'verify_first_note': 'Confirm reachability, preconditions and impact; record evidence before deciding '
@@ -168,6 +168,10 @@ LABELS['en'].update({'eyebrow': 'SECURITY REVIEW',
  'needs_validation': 'Open, needs validation',
  'closed_count': 'Fix recorded / accepted',
  'unverified_line': '{n} included findings are Unverified, including {high} High.',
+ 'unverified_line_one': '1 included finding is Unverified, including {high} High.',
+ 'sentence_sep': ' ',
+ 'insufficient_high_line': '{m} High findings have a recorded verdict but insufficient verification.',
+ 'insufficient_high_line_one': '1 High finding has a recorded verdict but insufficient verification.',
  'none_unverified_line': 'No included finding is Unverified.',
  'counts_note': 'Report-wide totals include Open, Fixed and Accepted. Excluded findings do not '
                 'contribute to these totals.',
@@ -221,7 +225,7 @@ LABELS['ja'].update({'eyebrow': 'SECURITY REVIEW',
  'priority': 'まず取り組むこと',
  'priority_note': '未対応の指摘を重大度順、同じ重大度では修正判断の準備ができた順に表示します。適用条件を確認してから修正してください。',
  'fix_now': '修正を計画',
- 'verify_first': 'まず妥当性を確認',
+ 'verify_first': '先に検証する',
  'fix_now_note': 'Valid・Confirmed に加え、構造化された検証根拠がそろっています。記録された対応方針を基に修正し、安全な結果を確認してください。',
  'verify_first_note': '到達経路・成立条件・影響を確認し、根拠を記録してから修正要否を判断してください。',
  'missing_fix': '対応方針が未記録です。根拠を確認し、修正内容を具体化してください。',
@@ -233,6 +237,10 @@ LABELS['ja'].update({'eyebrow': 'SECURITY REVIEW',
  'needs_validation': '未対応・要検証',
  'closed_count': '修正の申告 / 受容',
  'unverified_line': '集計対象のうち {n} 件は未検証（Unverified）です。このうち High は {high} 件です。',
+ 'unverified_line_one': '集計対象のうち 1 件は未検証（Unverified）です。このうち High は {high} 件です。',
+ 'sentence_sep': '',
+ 'insufficient_high_line': '判定は記録済みでも検証根拠が不足している High の指摘が {m} 件あります。',
+ 'insufficient_high_line_one': '判定は記録済みでも検証根拠が不足している High の指摘が 1 件あります。',
  'none_unverified_line': '集計対象に未検証（Unverified）の指摘はありません。',
  'counts_note': '全体集計には Open・Fixed・Accepted を含みます。除外した指摘は含みません。',
  'count_basis': '重大度は想定される影響、確度は確かさ、妥当性はこの対象に指摘が成立するかを表します。',
@@ -620,6 +628,7 @@ for _lang, _labels in EXPERT_LABELS.items():
 
 _GAP_LABELS = {
     "legacy_details_missing": ("Detailed verification evidence was not recorded.", "詳細な検証根拠が記録されていません。"),
+    "scanner_unreviewed": ("Scanner finding — not yet reviewed.", "スキャナー検出・未レビュー。"),
     "verdict_unresolved": ("The finding verdict has not been settled.", "指摘の妥当性判定がまだ確定していません。"),
     "claims_incomplete": ("One or more required claims lack support.", "必要な成立条件の根拠が不足しています。"),
     "falsification_incomplete": ("Counterevidence checks are incomplete or unresolved.", "反証の確認が未完了、または未解決です。"),
@@ -1032,6 +1041,10 @@ def report_model(data, integrity=None):
         "excluded": len(data["findings"]) - len(fs),
         "unverified": sum(f["verdict"] == "Unverified" for f in fs),
         "unverified_high": sum(f["verdict"] == "Unverified" and f["severity"] == "High" for f in fs),
+        # Disjoint from unverified_high: a recorded verdict whose evidence is not sufficient.
+        "insufficient_high": sum(f["verdict"] != "Unverified" and f["severity"] == "High"
+                                 and verification[f["id"]]["level"] not in ("static_supported", "runtime_supported")
+                                 for f in fs),
         "verification": {key: public_verification_state(state) for key, state in verification.items()},
         "verification_counts": {
             "static": sum(verification[f["id"]]["level"] == "static_supported" for f in fs),
@@ -1056,13 +1069,30 @@ def esc(s):
     return html.escape(str(s or ""))
 
 
+def plural(L, key, n, **values):
+    """The label for count n; a `_one` variant carries the singular form."""
+    return L[key + "_one" if n == 1 and key + "_one" in L else key].format(n=n, **values)
+
+
+def unverified_headline(model, L):
+    """Unverified and insufficient-verification counts, stated separately (reference/report.md)."""
+    n, m = model["unverified"], model["insufficient_high"]
+    line = plural(L, "unverified_line", n, high=model["unverified_high"]) if n else L["none_unverified_line"]
+    return line + (L["sentence_sep"] + plural(L, "insufficient_high_line", m, m=m) if m else "")
+
+
 ASSESSMENT_LABELS = {
     "en": {
         "a_kicker": "Security review",
         "a_open": "Open findings",
         "a_fix_now": "Plan the fix",
         "a_verify_first": "Verify first",
-        "a_summary": "{unverified_high} High findings remain Unverified. {open_count} findings are open: {fix_now} ready for remediation and {verify_first} needing validation first.",
+        "a_high_unverified": "{n} High findings remain Unverified.",
+        "a_high_unverified_one": "1 High finding remains Unverified.",
+        "a_high_insufficient": "{n} High findings have a recorded verdict but insufficient verification.",
+        "a_high_insufficient_one": "1 High finding has a recorded verdict but insufficient verification.",
+        "a_open_summary": "{open_count} findings are open: {fix_now} ready for remediation and {verify_first} needing verification first.",
+        "a_open_summary_one": "1 finding is open: {fix_now} ready for remediation and {verify_first} needing verification first.",
         "a_accounting": "{total} non-excluded findings in total: {open_count} Open, {fixed} Fixed and {accepted} Accepted. {excluded} excluded findings are retained separately. {unverified} non-excluded findings remain Unverified across all statuses.",
         "a_status_note": "Status is the recorded workflow state; Fixed and Accepted do not establish that remediation was independently verified.",
         "a_uncertainty": "Coverage is limited to the recorded scope and checks. Missing coverage is unknown, and no open findings does not establish that the system is secure.",
@@ -1073,7 +1103,7 @@ ASSESSMENT_LABELS = {
         "a_cap_queue": "Open findings in order of severity and readiness to fix; the full entry for each follows in the finding details.",
         "a_cap_coverage": "Review perspectives with the recorded result and note for each.",
         "a_cap_index": "All non-excluded findings with their recorded state and evidence basis.",
-        "a_queue_note": "Open, non-excluded findings only. Ordered by severity, then ready-to-fix findings before findings needing validation, then ID. Planning a fix requires Valid, Confirmed and sufficient structured verification; legacy or incomplete evidence requires validation first.",
+        "a_queue_note": "Open, non-excluded findings only. Ordered by severity, then ready-to-fix findings before findings needing verification, then ID. Planning a fix requires Valid, Confirmed and sufficient structured verification; legacy or incomplete evidence requires verification first.",
         "a_queue_empty": "No open, non-excluded findings are recorded. Review the coverage and limitations before drawing conclusions.",
         "a_finding": "Finding",
         "a_next_action": "Next action",
@@ -1102,7 +1132,12 @@ ASSESSMENT_LABELS = {
         "a_open": "未対応の指摘",
         "a_fix_now": "修正を計画",
         "a_verify_first": "先に検証する",
-        "a_summary": "重大度 High のうち{unverified_high}件が Unverified（未検証）です。未対応は{open_count}件で、{fix_now}件は修正に進める指摘、{verify_first}件は先に検証が必要な指摘です。",
+        "a_high_unverified": "重大度 High のうち{n}件が Unverified（未検証）です。",
+        "a_high_unverified_one": "重大度 High のうち1件が Unverified（未検証）です。",
+        "a_high_insufficient": "判定は記録済みでも検証根拠が不足している High の指摘は{n}件です。",
+        "a_high_insufficient_one": "判定は記録済みでも検証根拠が不足している High の指摘は1件です。",
+        "a_open_summary": "未対応は{open_count}件で、{fix_now}件は修正に進める指摘、{verify_first}件は先に検証が必要な指摘です。",
+        "a_open_summary_one": "未対応は1件で、{fix_now}件は修正に進める指摘、{verify_first}件は先に検証が必要な指摘です。",
         "a_accounting": "除外対象を除く指摘は計{total}件（Open {open_count}件、Fixed {fixed}件、Accepted {accepted}件）。除外した{excluded}件は別記しています。全対応状況を通じ、除外対象を除く Unverified（未検証）は{unverified}件です。",
         "a_status_note": "対応状況は記録された状態です。Fixed や Accepted は、修正結果を独立して再検証済みであることを示すものではありません。",
         "a_uncertainty": "診断結果は記録された範囲と確認内容に限られます。記載のない範囲は未確認であり、未対応の指摘がないこともシステム全体の安全性の保証にはなりません。",
@@ -1327,6 +1362,32 @@ def redact(line):
     return _sub_keyed(line, _SECRET_TAIL, lambda key, m: key + m.group(1) + "********")
 
 
+MAX_SOURCE_BYTES = 16 * 1024 * 1024
+# A literal secret value: a quoted string of four or more characters that is
+# not a template placeholder, or in a config file any unquoted value.
+_LITERAL_TAIL = re.compile(r"""(['"]?\s*(?:=>|:=|[:=])\s*)(['"])(?![$<{%])(?:\\.|(?!\2)[^\\\n]){4,}\2""")
+CONFIG_SUFFIXES = {".yml", ".yaml", ".ini", ".cfg", ".conf", ".properties", ".toml"}
+
+
+def secret_in_source(rel, text):
+    """True when a file would put a secret-looking value into shareable output."""
+    if sensitive_path(rel) or PRIVATE_KEY_RE.search(text):
+        return True
+    config = Path(rel).suffix.lower() in CONFIG_SUFFIXES
+    for line in text.split("\n"):
+        if _sub_keyed(line, _LITERAL_TAIL, lambda key, m: "") != line:
+            return True
+        if config and _sub_keyed(line, _SECRET_TAIL, lambda key, m: "") != line:
+            return True
+        for m in URL_RE.finditer(line):
+            try:
+                if urlsplit(m.group("url").replace("\\/", "/")).password:
+                    return True
+            except ValueError:
+                return True
+    return False
+
+
 def attach_sources(data, repo, context=3):
     """Attach safe links and best-effort redacted excerpts; omit sensitive sources."""
     base = data["meta"].get("source_url") or ""
@@ -1352,6 +1413,9 @@ def attach_sources(data, repo, context=3):
         if root not in path.parents or not path.is_file() or sensitive_path(path.relative_to(root)):
             continue
         try:
+            # An excerpt is best-effort: a huge file is skipped, not read into memory.
+            if path.stat().st_size > MAX_SOURCE_BYTES:
+                continue
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
@@ -1432,7 +1496,10 @@ def verification_view(data, finding, state, lang):
     integrity_status = provenance.get("status", "declared")
     # Only local result codes and counters are projected. A saved receipt is
     # never consulted here, and artifact bytes/absolute roots are never copied.
-    if state["level"] != "legacy":
+    raw_verification = finding.get("verification")
+    # Legacy findings and unreviewed scanner findings have no evidence catalogue to describe.
+    structured = state["level"] != "legacy" and isinstance(raw_verification, dict)
+    if structured:
         section("i_title", [
             L.get("i_" + integrity_status, L["i_incomplete"]),
             L["i_counts"].format(bytes_checked=provenance.get("bytes_checked", 0),
@@ -1440,12 +1507,11 @@ def verification_view(data, finding, state, lang):
                                  evidence_total=provenance.get("evidence_total", len(state.get("evidence_ids", [])))),
             L["i_note"],
         ])
-    if state["level"] != "legacy" and integrity_status == "incomplete":
+    if structured and integrity_status == "incomplete":
         section("v_reason", list(dict.fromkeys(L.get("i_reason_" + code, L["i_reason_unknown"])
                                               for code in provenance.get("reasons", []))))
     integrity_records = {item["evidence_id"]: item for item in provenance.get("records", [])}
-    raw_verification = finding.get("verification")
-    verification = raw_verification if isinstance(raw_verification, dict) and state["level"] != "legacy" else {}
+    verification = raw_verification if structured else {}
     if isinstance(raw_verification, str) and raw_verification:
         section("v_legacy_note", [text(raw_verification)])
     if verification:
@@ -1805,7 +1871,8 @@ def verification_summary_parts(model, L):
 def integrity_summary_view(states, findings, L):
     # Legacy findings have no evidence catalogue to check; they are not
     # "declared references only". With none left, there is nothing to summarize.
-    findings = [f for f in findings if states[f["id"]].get("level") != "legacy"]
+    findings = [f for f in findings if states[f["id"]].get("level") != "legacy"
+                and isinstance(f.get("verification"), dict)]
     if not findings:
         return None
     counts = Counter(states[f["id"]].get("integrity", {}).get("status", "declared") for f in findings)
@@ -1836,7 +1903,9 @@ def render_assessment_html(data, L, lang, integrity=None):
     workflow_views = {f["id"]: workflow_view(data, f, workflows[f["id"]], lang)
                       for f in data["findings"] if f["id"] in workflows}
     excluded = [f for f in data["findings"] if f["verdict"] in EXCLUDED]
-    summary = L["a_summary"].format(**model)
+    summary = L["sentence_sep"].join([plural(L, "a_high_unverified", model["unverified_high"]),
+                        plural(L, "a_high_insufficient", model["insufficient_high"]),
+                        plural(L, "a_open_summary", model["open_count"], **model)])
     accounting = L["a_accounting"].format(total=len(fs), **model)
 
     def value(text):
@@ -2175,7 +2244,7 @@ byId('meta').textContent=[D.meta.date,D.meta.assessor].filter(Boolean).join(' ·
 document.querySelectorAll('[data-l]').forEach(function(e){e.textContent=L[e.getAttribute('data-l')];});
 byId('theme').onclick=function(){var root=document.documentElement,dark=root.dataset.theme?root.dataset.theme==='dark':window.matchMedia('(prefers-color-scheme: dark)').matches;root.dataset.theme=dark?'light':'dark';};
 var summary=byId('summary');
-summary.appendChild(el('strong',null,R.unverified?fmt(L.unverified_line,{n:R.unverified,high:R.unverified_high}):L.none_unverified_line));
+summary.appendChild(el('strong',null,D.headline));
 summary.appendChild(el('p',null,F.length?(D.open_hm?fmt(L.risk_summary,{n:D.open_hm}):(R.open_count?fmt(L.open_summary,{n:R.open_count}):L.no_open)):L.no_findings));
 var verificationSummary=byId('verification-summary'),verificationSentence=el('p');verificationSummary.setAttribute('aria-labelledby','verification-heading');verificationSummary.appendChild(el('h2',{id:'verification-heading'},L.v_title));D.verification_summary.forEach(function(part){verificationSentence.appendChild(part.key?el('strong',{'data-verification-count':part.key},part.count):document.createTextNode(part.text));});verificationSummary.appendChild(verificationSentence);verificationSummary.appendChild(el('p',{'class':'muted'},L.v_note));
 if(D.integrity_summary){var integritySummary=el('div',{'class':'integrity-summary'});integritySummary.appendChild(el('h3',null,L.i_title));integritySummary.appendChild(el('p',null,D.integrity_summary.text));integritySummary.appendChild(el('p',{'class':'muted'},D.integrity_summary.note));verificationSummary.appendChild(integritySummary);}
@@ -2259,6 +2328,7 @@ def render_dashboard(data, L, lang, integrity=None):
                            for f in data["findings"] if f["id"] in workflows},
         "findings": [display_finding(f, model["verification"][f["id"]]) for f in data["findings"]],
         "labels": L, "open_hm": stats(data)["open_hm"], "report": model,
+        "headline": unverified_headline(model, L),
         "verification_views": {f["id"]: verification_view(data, f, verification_states[f["id"]], lang)
                                for f in data["findings"]},
         "verification_summary": verification_summary_parts(model, L),
@@ -2341,7 +2411,9 @@ def main(argv=None):
     engine = to_pdf(html_path, out / "assessment.pdf")
     if not engine:
         print("render.py: no PDF engine found (Chrome/Chromium or weasyprint); "
-              "assessment.html is ready to print", file=sys.stderr)
+              "assessment.html is ready to print. Without an engine anywhere: merge the limitation "
+              "'assessment.pdf not produced: no PDF engine', re-run render.py with --repo, "
+              "then contract_check.py --no-pdf", file=sys.stderr)
         return 3
     print(f"wrote {out / 'assessment.pdf'} ({engine})")
     return 0

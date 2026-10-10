@@ -82,7 +82,11 @@ class VerificationTests(unittest.TestCase):
                 if note is not None:
                     clone['verification'] = note
                 self.data['findings'] = [self.finding, clone]
-                self.assertEqual(VERIFICATION.derive_verification(self.data)['D-NEW']['level'], 'legacy')
+                state = VERIFICATION.derive_verification(self.data)['D-NEW']
+                # An absent record on a version-2 scanner finding is pending review, not legacy.
+                self.assertEqual(state['level'], 'legacy' if note else 'incomplete')
+                if note is None:
+                    self.assertIn(state['gaps'][0], ('scanner_unreviewed', 'legacy_details_missing'))
 
     def test_new_records_require_version_two(self):
         for version in ('2', 2.0, True, 3):

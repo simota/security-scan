@@ -171,7 +171,7 @@ class ReportOutputTests(unittest.TestCase):
                           if k not in ("queue", "verification", "verification_counts", "parts")}, {
             "open_count": 12, "fix_now": 1, "verify_first": 11,
             "fixed": 12, "accepted": 12, "excluded": 18,
-            "unverified": 9, "unverified_high": 9,
+            "unverified": 9, "unverified_high": 9, "insufficient_high": 18,
         })
         self.assertEqual(model["parts"], {
             "code": {"total": 36, "open_count": 12, "fix_now": 1, "verify_first": 11, "open_hm": 12},

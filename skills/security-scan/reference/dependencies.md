@@ -23,7 +23,8 @@ verdict (or `Unverified`) and keeps a prior manual review as
 `--into` replaces the `D-*` findings in `findings.json`, records every audit
 that did not run under `limitations`, and stamps `dependency_scan` with the
 count it wrote; `scripts/contract_check.py` rejects a file whose `D-*` count
-differs, so `D-*` findings are never hand-written, merged or split. It covers, across npm, Composer, Python,
+differs, so `D-*` findings are never hand-written or split; `findings.py merge`
+accepts only `validation`/`verification` on an existing `D-*` ID. It covers, across npm, Composer, Python,
 Bundler, Go, Cargo, Maven/Gradle/NuGet (inventory and sources), CI workflows,
 Dockerfiles and Compose files:
 

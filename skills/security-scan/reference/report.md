@@ -86,6 +86,9 @@ assessment of the target application. A run without the `invariant_ledger`
 opt-in adds this limitation verbatim: "invariant ledger and close-check not
 machine-checked (no invariant_ledger opt-in)" — the ledger and the close-check
 were kept in scratch and nothing in the record proves their counts.
+`contract_check.py` requires that line without the opt-in and rejects it with
+the opt-in; with `--no-pdf` it also requires "assessment.pdf not produced: no
+PDF engine". Keep both in English, verbatim, in any report language.
 
 Describe weaknesses and parameters, not working payloads. Never print secret
 values: use location and kind only. Evidence summaries and commands must be

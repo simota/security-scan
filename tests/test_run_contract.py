@@ -60,7 +60,9 @@ class RunContractTests(unittest.TestCase):
             }],
             "perspectives": [{"name": n, "result": "1 High" if n == "Actor and tenant" else "N/A - synthetic"}
                              for n in names],
-            "checked_ok": [], "decisions": [], "limitations": [], "next_steps": [],
+            "checked_ok": [], "decisions": [], "next_steps": [],
+            "limitations": ["assessment.pdf not produced: no PDF engine",
+                            "invariant ledger and close-check not machine-checked (no invariant_ledger opt-in)"],
         }
 
     def build(self) -> dict:

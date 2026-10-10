@@ -6,7 +6,8 @@
 OUT_DIR holds findings.json and the rendered outputs. The contract (SKILL.md,
 "Run contract") fixes what differs between hosts when left to judgment: record
 format, ID scheme, where D-* findings come from, perspective coverage, the
-fields every code finding carries, and the output file set. It checks shape
+fields every code finding carries, the limitations the contract requires
+(no PDF, no invariant ledger) and the output file set. It checks shape
 and provenance markers only; it cannot tell whether a finding is true.
 
 Exit codes: 0 contract holds, 1 violations listed on stderr, 2 unreadable input.
@@ -30,6 +31,8 @@ CODE_FIELDS = ("actor", "request", "impact", "fix")
 CLAIMS = ("reachability", "preconditions", "defenses", "impact")
 SEVERITY_RANK = {"High": 0, "Medium": 1, "Low": 2, "Info": 3}
 RENDERED = ("dashboard.html", "assessment.html")
+NO_PDF = "assessment.pdf not produced"
+NO_LEDGER = "invariant ledger and close-check not machine-checked"
 SOURCE_STAMP = re.compile(rb'<meta name="security-scan-source" content="sha256:([0-9a-f]{64})">')
 
 
@@ -114,7 +117,18 @@ def check(data, out_dir, pdf=True, allow=()):
         add("dependency_scan: missing; run deps_scan.py <repo> [--audit] --into findings.json")
     elif stamp.get("findings") != len(deps):
         add(f"D-*: {len(deps)} present but deps_scan.py wrote {stamp.get('findings')}; "
-            "never hand-write, merge or split D-* findings")
+            "never hand-write or split D-* findings; merge only their validation/verification")
+
+    # Limitations SKILL.md requires verbatim, matched case-insensitively as substrings.
+    limits = [str(x).lower() for x in data.get("limitations", [])] if isinstance(data.get("limitations"), list) else []
+    if not pdf and not any(NO_PDF in x for x in limits):
+        add('limitations: --no-pdf requires "assessment.pdf not produced: no PDF engine"')
+    ledger_line = any(NO_LEDGER in x for x in limits)
+    if "invariant_ledger" not in data and not ledger_line:
+        add('limitations: without invariant_ledger, state "invariant ledger and close-check not machine-checked '
+            '(no invariant_ledger opt-in)"')
+    elif "invariant_ledger" in data and ledger_line:
+        add("limitations: says the invariant ledger is not machine-checked, but invariant_ledger is recorded")
 
     names = perspective_names()
     recorded = [p.get("name") for p in perspectives if isinstance(p, dict)]
@@ -153,10 +167,11 @@ def check(data, out_dir, pdf=True, allow=()):
         expected.add("evidence")
     hints = {"deps.json": "run deps_scan.py <repo> [--audit] --out {out}/deps.json --into {out}/findings.json",
              "evidence": "run evidence_capture.py <repo> --findings {out}/findings.json <paths>",
-             "assessment.pdf": "run render.py findings.json --out {out} (if it exits 3 with no PDF engine, "
-                               "record that in limitations and pass --no-pdf)"}
+             "assessment.pdf": "run render.py {out}/findings.json --repo <repo> --out {out} (if it exits 3 with "
+                               "no PDF engine: merge the limitation 'assessment.pdf not produced: no PDF engine', "
+                               "re-run render.py with --repo, then contract_check.py --no-pdf)"}
     for name in sorted(expected - present):
-        hint = hints.get(name, "run render.py findings.json --out {out}").format(out=out_dir)
+        hint = hints.get(name, "run render.py {out}/findings.json --repo <repo> --out {out}").format(out=out_dir)
         add(f"outputs: {name} missing; {hint}")
     # A report rendered before the last merge or --into does not show the record.
     # render.py stamps each page with the digest of the findings.json it read;

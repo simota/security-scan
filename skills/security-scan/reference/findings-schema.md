@@ -49,7 +49,7 @@ python3 scripts/findings.py merge <out>/findings.json <scratch>/frag-002.json
 
 A fragment holds `meta`, `findings`, `evidence`, `test_runs`, `expert`,
 `three_pass`, `evidence_integrity`, `invariant_ledger`, `perspectives`, `checked_ok`, `decisions`,
-`limitations` and `next_steps`. First capture source to create the version-2
+`limitations`, `next_steps` and `remove`. First capture source to create the version-2
 assessment pin; only then merge extension profiles or test runs. For example,
 write a new scratch fragment containing `{"evidence_integrity":{"required":true}}`
 or the `three_pass`/`expert` declarations documented in their references, and
@@ -69,7 +69,10 @@ Merge semantics are explicit:
 - A `perspectives` entry replaces the recorded entry with the same `name`, so a
   later fragment can correct a `Not checked` result; new names append.
 - The ordinary `checked_ok`, `decisions`, `limitations` and `next_steps` lists
-  append without duplicates.
+  append without duplicates. To delete an entry, send
+  `{"remove": {"limitations": ["exact text"]}}` (any of those four lists): the
+  exact entries are removed before the fragment's additions, and an entry that
+  is not recorded is refused (exit 1), so a typo cannot leave the old text.
 - The merge takes the same `findings.json.workflow.lock` writer lock as
   `verification_workflow.py`, refuses when the file changed after it was read,
   and replaces it atomically, keeping its permissions.
@@ -490,7 +493,8 @@ excerpts are source code, so the outputs carry the repository's confidentiality.
 IDs starting with `D-` belong to `scripts/deps_scan.py`: `--into findings.json`
 replaces them on each run and stamps the top-level `dependency_scan` record
 (`tool`, `audit`, `findings`, `not_run`), so do not hand-write findings with
-that prefix. Code findings use `F-001`… without gaps; `scripts/contract_check.py`
+that prefix. `findings.py merge` refuses a fragment that creates a `D-*` ID or
+sends any key other than `id`, `validation` and `verification` for one. Code findings use `F-001`… without gaps; `scripts/contract_check.py`
 checks both, together with the rest of the run contract.
 
 Same rules as the report: no working payloads, no secret values.

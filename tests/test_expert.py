@@ -74,6 +74,9 @@ def complete_data():
     data["dependency_scan"] = {"tool": "deps_scan.py", "audit": True, "findings": 0, "not_run": 0}
     data["meta"]["assessor"] = "Test host (model)"
     data["perspectives"] = [{"name": n, "result": "N/A - synthetic"} for n in contract_check.perspective_names()]
+    data.setdefault("limitations", []).extend(["assessment.pdf not produced: no PDF engine",
+                                               "invariant ledger and close-check not machine-checked "
+                                               "(no invariant_ledger opt-in)"])
     return data
 
 

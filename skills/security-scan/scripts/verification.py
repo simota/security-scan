@@ -47,7 +47,7 @@ CLAIMS = ("reachability", "preconditions", "defenses", "impact")
 LEVELS = ("legacy", "incomplete", "static_supported", "runtime_supported", "environment_unverified")
 RETESTS = ("not_requested", "fix_claimed", "verified", "incomplete")
 GAPS = (
-    "legacy_details_missing", "verdict_unresolved", "claims_incomplete", "falsification_incomplete",
+    "legacy_details_missing", "scanner_unreviewed", "verdict_unresolved", "claims_incomplete", "falsification_incomplete",
     "review_missing", "review_disagreement", "environment_unknown",
     "runtime_incomplete", "runtime_contradiction", "runtime_boundary_unverified", "retest_missing",
     "retest_before_unverified", "retest_after_unverified", "retest_case_mismatch", "retest_order_invalid",
@@ -292,6 +292,14 @@ class _Validator:
         if not self.structured or "verification" not in finding or isinstance(finding["verification"], str):
             if self.structured and "remediation" in finding:
                 self.error(where + ".remediation", "requires structured verification")
+            fixed = ["retest_missing"] if finding.get("status") == "Fixed" else []
+            if self.structured and "verification" not in finding and str(finding.get("id", "")).startswith("D-"):
+                # A fresh scanner finding in a version-2 record is pending review, not legacy.
+                validation = finding.get("validation")
+                manual = isinstance(validation, dict) and validation.get("method") not in (None, "auto")
+                return {"level": "incomplete", "retest": "fix_claimed" if fixed else "not_requested",
+                        "gaps": ["legacy_details_missing" if manual else "scanner_unreviewed"] + fixed,
+                        "evidence_ids": [], "run_ids": [], "integrity": integrity_state(self.data, [], None)}
             return {"level": "legacy", "retest": "fix_claimed" if finding.get("status") == "Fixed" else "not_requested",
                     "gaps": ["legacy_details_missing"] + (["retest_missing"] if finding.get("status") == "Fixed" else []),
                     "evidence_ids": [], "run_ids": [], "integrity": integrity_state(self.data, [], None)}

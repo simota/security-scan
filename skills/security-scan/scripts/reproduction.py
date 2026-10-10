@@ -209,7 +209,8 @@ def export_records(manifest, result, out):
 
 
 def child_timeout(timeout):
-    """The child runtime's own deadline: a quarter of the run, at least 2 s, is margin."""
+    """The child runtime's own deadline: a quarter of the run, at least 2 s, is margin,
+    except that the child always keeps 1 s, so --timeout 2 leaves a 1 s margin."""
     return max(1, timeout - max(2, timeout // 4))
 
 

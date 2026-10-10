@@ -88,7 +88,7 @@ class ReportScopeTests(unittest.TestCase):
 
     def test_headline_when_nothing_is_unverified(self):
         html = render.render_dashboard(load(legacy()), render.LABELS["en"], "en")
-        self.assertIn("R.unverified?fmt(L.unverified_line", html)
+        self.assertIn("summary.appendChild(el('strong',null,D.headline))", html)
 
 
 class StrictIdTests(unittest.TestCase):

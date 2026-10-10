@@ -13,7 +13,9 @@ replaced, not recursively merged. `findings`, `evidence` and `test_runs` records
 `verification` to F-003) and a new one appended; a `perspectives` entry
 replaces the recorded entry with the same `name` (so a later fragment can
 correct a result), and the other list sections (`checked_ok`, `decisions`,
-`limitations`, `next_steps`) are appended without duplicates. FINDINGS is
+`limitations`, `next_steps`) are appended without duplicates; a fragment's
+`remove` object (e.g. {"limitations": ["exact text"]}) first deletes exact
+entries from those lists, and an entry that is not recorded is refused. FINDINGS is
 created when absent and written atomically, under the same writer lock as
 verification_workflow.py, only if no other writer changed it meanwhile. Profiles and test runs require a captured version-2 record.
 `schema_version`, `assessment` and `meta.commit` come only from evidence_capture.py;
@@ -25,6 +27,9 @@ Finding text describes the weakness, not an attack: the request shape is the
 method, path and parameter names, with placeholders such as `<other tenant's
 order id>`. Literal payload strings in a finding's prose fields are refused, so
 the report never carries a working exploit.
+
+`D-*` findings belong to deps_scan.py: a fragment may only add `validation` or
+`verification` to an existing `D-*` ID, never create one or change its other fields.
 
 Exit codes: 0 merged, 1 a fragment was refused (reason on stderr), 2 unreadable
 input or schema error.
@@ -44,6 +49,7 @@ import render  # noqa: E402
 from expert import derive_expert  # noqa: E402
 
 LISTS = ("perspectives", "checked_ok", "decisions", "limitations", "next_steps")
+REMOVABLE = LISTS[1:]  # `remove` deletes exact entries from these lists
 PROFILES = ("expert", "three_pass", "evidence_integrity", "invariant_ledger")
 OBJECTS = ("meta", *PROFILES)
 RECORDS = ("findings", "evidence", "test_runs")
@@ -51,6 +57,8 @@ EXPERT_FIELDS = {"version", "mode", "host", "consent", "preflight", "spawns", "r
                  "reconciliation", "discovery", "variants", "omission", "panels",
                  "calibration", "ratings", "severity_resolutions", "reception", "qa"}
 RESERVED_FINDING = {"verification_workflow", "verdict", "source_link", "snippet"}
+# D-* findings belong to deps_scan.py; a fragment may only record their review.
+DEP_REVIEW = {"id", "validation", "verification"}
 PROSE = ("title", "actor", "request", "impact", "fix")
 # Literal attack strings, not descriptions of them. Prose names the weakness
 # and the parameter; the payload itself never belongs in the report.
@@ -70,7 +78,10 @@ def read_json(path, raw=None):
         if render.json_depth(value) > render.MAX_JSON_DEPTH:
             raise ValueError(f"JSON nesting deeper than {render.MAX_JSON_DEPTH} levels")
         return value
-    except (OSError, UnicodeError, ValueError, RecursionError) as e:
+    except RecursionError:
+        # Older Pythons stop decoding deep input themselves; report it the same way.
+        raise render.SchemaError(f"{path}: JSON nesting deeper than {render.MAX_JSON_DEPTH} levels") from None
+    except (OSError, UnicodeError, ValueError) as e:
         raise render.SchemaError(f"{path}: {e}") from None
 
 
@@ -87,7 +98,7 @@ def fragment_problems(fragment, name):
     """Check patch structure before applying it, including writer-owned fields."""
     if not isinstance(fragment, dict):
         return [f"{name}: a fragment must be a JSON object"]
-    unsupported = fragment.keys() - {*OBJECTS, *RECORDS, *LISTS}
+    unsupported = fragment.keys() - {*OBJECTS, *RECORDS, *LISTS, "remove"}
     if unsupported:
         return [f"{name}: unsupported keys {sorted(unsupported)}; schema_version and assessment "
                 "come from evidence_capture.py"]
@@ -98,6 +109,10 @@ def fragment_problems(fragment, name):
     for key in (*RECORDS, *LISTS):
         if key in fragment and not isinstance(fragment[key], list):
             problems.append(f"{name}: {key} must be a list")
+    remove = fragment.get("remove", {})
+    if not isinstance(remove, dict) or remove.keys() - set(REMOVABLE) or any(
+            not isinstance(v, list) or not all(isinstance(x, str) for x in v) for v in remove.values()):
+        problems.append(f"{name}: remove must map {', '.join(REMOVABLE)} to lists of exact entries")
     if problems:
         return problems
     if "commit" in fragment.get("meta", {}):
@@ -117,6 +132,9 @@ def fragment_problems(fragment, name):
             seen.add(identifier)
             if key == "findings" and RESERVED_FINDING.intersection(record):
                 problems.append(f"{name}: {identifier}: workflow journals and derived fields cannot be merged")
+            if key == "findings" and identifier.startswith("D-") and record.keys() - DEP_REVIEW:
+                problems.append(f"{name}: {identifier}: D-* scanner fields {sorted(record.keys() - DEP_REVIEW)} "
+                                "come only from deps_scan.py; merge only validation/verification")
     pending = [fragment]
     while pending:
         value = pending.pop()
@@ -156,6 +174,8 @@ def upsert(items, updates):
 
 
 def merge(base, fragment):
+    for key, entries in fragment.get("remove", {}).items():
+        base[key] = [item for item in base.get(key, []) if item not in entries]
     for key in OBJECTS:
         if isinstance(fragment.get(key), dict):
             base.setdefault(key, {}).update(fragment[key])
@@ -236,8 +256,14 @@ def main(argv=None):
         print(f"error: {e}", file=sys.stderr)
         return 2
     refused = []
+    known = {f.get("id") for f in base.get("findings", []) if isinstance(f, dict) and isinstance(f.get("id"), str)} \
+        if isinstance(base, dict) and isinstance(base.get("findings"), list) else set()
     for name, fragment in fragments:
         refused += fragment_problems(fragment, name)
+        if isinstance(fragment, dict) and isinstance(fragment.get("findings"), list):
+            refused += [f"{name}: {f['id']}: D-* findings are created only by deps_scan.py --into"
+                        for f in fragment["findings"] if isinstance(f, dict) and isinstance(f.get("id"), str)
+                        and f["id"].startswith("D-") and f["id"] not in known]
     if refused:
         print("\n".join(refused), file=sys.stderr)
         return 1
@@ -247,7 +273,7 @@ def main(argv=None):
         if base:
             render.validate_data(copy.deepcopy(base))
             derive_expert(base, render.SchemaError)
-        for _, fragment in fragments:
+        for name, fragment in fragments:
             if any(key in fragment for key in (*PROFILES, "test_runs")) and base.get("schema_version") != 2:
                 raise render.SchemaError("extension profiles and test_runs require evidence_capture.py first")
             # Evidence IDs come from evidence_capture.py; records citing guessed IDs
@@ -256,6 +282,13 @@ def main(argv=None):
                     isinstance(f, dict) and "verification" in f for f in fragment.get("findings", []))):
                 raise render.SchemaError("verification and evidence require evidence_capture.py first; "
                                          "cite the IDs it prints")
+            # A missing entry is refused, so a typo cannot leave the old text in place.
+            missing = [f"{name}: remove.{key}: {entry!r} is not recorded"
+                       for key, entries in fragment.get("remove", {}).items()
+                       for entry in entries if entry not in base.get(key, [])]
+            if missing:
+                print("\n".join(missing), file=sys.stderr)
+                return 1
             base = merge(base, fragment)
         render.validate_data(copy.deepcopy(base))
         # Shape errors fail; incomplete later phases are permitted and stay held.
