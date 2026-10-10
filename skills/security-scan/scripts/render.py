@@ -1457,8 +1457,8 @@ _PLAIN_VALUE = re.compile(r"[\^~<>=].*|v?\d+(?:\.\d+)+[\w.+-]*|(?:~|\.{1,2})?(?:
                           r"|[a-z][a-z0-9+.-]*://[^?#@\s]*|[A-Za-z][A-Za-z ]*[.!?:]?")
 # Recognizable credentials, keyed or not: provider token prefixes, webhook and
 # bot URLs whose path is the credential, and an HTTP Authorization value
-# (Bearer/Basic followed by a token holding a digit, so `Bearer ${token}`,
-# `"Bearer " + token` and prose stay readable).
+# (Bearer/Basic followed by a token holding a digit, or any token right after an
+# Authorization key, so `Bearer ${token}`, `"Bearer " + token` and prose stay readable).
 TOKEN_RE = re.compile(r"\b(?:gh[opsu]_[A-Za-z0-9]{36,}|github_pat_\w{22,}|A(?:KIA|SIA)[0-9A-Z]{16}"
                       r"|xox[abprse]-[A-Za-z0-9-]{10,}|[sr]k_(?:live|test)_[A-Za-z0-9]{16,}|glpat-[\w-]{20,}"
                       r"|AIza[\w-]{35}|sk-(?:proj|ant|svcacct|admin)-[\w-]{20,}|sk-[A-Za-z0-9]{32,}"
@@ -1467,7 +1467,8 @@ TOKEN_RE = re.compile(r"\b(?:gh[opsu]_[A-Za-z0-9]{36,}|github_pat_\w{22,}|A(?:KI
                       r"|discord(?:app)?\.com/api/webhooks/\d+/[\w-]{20,}"
                       r"|(?:api\.telegram\.org/bot)?\d{6,12}:AA[\w-]{30,}"
                       r"|[Bb]earer[ \t]+(?=[A-Za-z._~+/-]*\d)[\w.~+/-]{16,}=*"
-                      r"|[Bb]asic[ \t]+(?=[A-Za-z+/]*\d)[A-Za-z0-9+/]{16,}={0,2}(?![\w.~+/-]))")
+                      r"|[Bb]asic[ \t]+(?=[A-Za-z+/]*\d)[A-Za-z0-9+/]{16,}={0,2}(?![\w.~+/-])"
+                      r"|(?i:authorization)[\"']?[ \t]*[:=,][ \t]*[\"'`]?(?:[Bb]earer|[Bb]asic)[ \t]+[\w.~+/-]{16,}=*)")
 # A literal signing key passed positionally: jwt.sign(payload, "key"),
 # jwt.encode(claims, 'key', ...), jwt.decode(token, "key"). The first argument
 # is a simple expression or a flat {...} object literal.

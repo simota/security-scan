@@ -136,12 +136,26 @@ class CodexRound8Tests(Base):
         self.assertFalse(self.high(run + "          SHA=main\n          git checkout \"$SHA\"\n"))
         self.assertTrue(self.high(run + "          git checkout \"$SHA\"\n          SHA=main\n"))
 
+    def test_shell_assignment_shadows_inherited_env(self):
+        step = ("      - run: |\n          SHA=main\n          git checkout \"$SHA\"\n"
+                "        env:\n          SHA: ${{ github.event.pull_request.head.sha }}\n")
+        self.assertFalse(self.high(PRT + "    steps:\n" + step))
+
     def test_assignment_and_checkout_on_one_row(self):
         for step in ('      - run: SHA=${{ github.event.pull_request.head.sha }}; git checkout "$SHA"\n',
                      '      - run: |\n          SHA=${{ github.event.pull_request.head.sha }} && git checkout "$SHA"\n'):
             with self.subTest(step=step):
                 self.assertTrue(self.high(PRT + "    steps:\n" + step))
         self.assertTrue(self.high(PRT + "    steps:\n      - run: git checkout ${{ github.head_ref || 'main' }}\n"))
+
+
+class ServiceUrlPathTests(unittest.TestCase):
+    def test_at_sign_in_a_service_url_path_is_kept(self):
+        for url in ("ftp://files.example.com/pub/icon@2x.png", "sftp://files.example.com/home/alice@example.com",
+                    "postgres://db.example.com/analytics/v@2"):
+            with self.subTest(url=url):
+                self.assertFalse(has_url_credentials(url))
+        self.assertTrue(has_url_credentials("postgres://app.svc:1234/PW/SECRET@h.com/x"))
 
 
 class UrlUserinfoTests(unittest.TestCase):

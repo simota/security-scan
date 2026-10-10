@@ -69,8 +69,9 @@ def _source_path(value):
 
 
 def location_paths(location):
-    """Every path a finding's location names (one, or a comma/semicolon list)."""
-    return {path for path in map(_source_path, re.split(r"[,;]", str(location or ""))) if path}
+    """The path a finding's `path:line` location names (contract_check allows one)."""
+    path = _source_path(location)
+    return {path} if path else set()
 
 
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")

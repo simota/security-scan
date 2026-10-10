@@ -1616,8 +1616,9 @@ def check_workflow(c, p, privileged=None, calls=None):
                 out = 0
                 for m in ENV_USE.finditer(x):
                     n = m[1] or m[2]
-                    out = max(out, 2 if n == "GITHUB_HEAD_REF" else step[n] if n in step else names.get(n, 0),
-                              shell.get(n, 0))
+                    # A shell assignment that already ran shadows the inherited env value.
+                    out = max(out, shell[n] if n in shell else 2 if n == "GITHUB_HEAD_REF"
+                              else step[n] if n in step else names.get(n, 0))
                     if out == 2:
                         break
                 return out

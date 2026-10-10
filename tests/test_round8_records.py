@@ -245,11 +245,8 @@ class SecretsLocationTests(Pipeline):
         state = verification.derive_verification(data)["F-001"]
         self.assertNotIn("claims_incomplete", state["gaps"])
         self.assertEqual(state["gaps"], ["review_missing"])  # High: independent review still owed.
-        # Any path of a multi-location finding counts.
-        data["findings"][0]["location"] = "src/settings.py:3, src/crypto.py:2"
-        self.assertEqual(verification.location_paths(data["findings"][0]["location"]),
-                         {"src/settings.py", "src/crypto.py"})
-        render.validate_data(copy.deepcopy(data))
+        # A location is one path:line, as contract_check requires.
+        self.assertEqual(verification.location_paths("src/crypto.py:2"), {"src/crypto.py"})
 
 
 class PayloadFieldTests(unittest.TestCase):
@@ -325,6 +322,18 @@ class CodexRound8RecordTests(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertTrue(render.secret_in_source("src/auth.js", line + "\n"))
         self.assertFalse(render.secret_in_source("src/auth.js", "jwt.sign(payload, process.env.JWT_SECRET)\n"))
+
+    def test_letter_only_authorization_values_are_masked_and_refused(self):
+        for line in ('headers = {"Authorization": "Bearer abcdefghijklmnopqrstuvwxyz"}',
+                     "Authorization: Basic YWFhOmJiYmJiYmJiYmJiYmJiYg=="):
+            with self.subTest(line=line):
+                self.assertTrue(render.secret_in_source("src/client.py", line + "\n"))
+                secret = line.split()[-1].strip('"}')
+                self.assertNotIn(secret, render.redact(line))
+        for line in ('headers["Authorization"] = "Bearer " + token', "headers.Authorization = `Bearer ${token}`"):
+            with self.subTest(line=line):
+                self.assertFalse(render.secret_in_source("src/client.py", line + "\n"))
+                self.assertEqual(render.redact(line), line)
 
 
 if __name__ == "__main__":

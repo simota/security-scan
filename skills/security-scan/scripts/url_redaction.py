@@ -46,9 +46,10 @@ def hidden_userinfo(token):
         return True
     if not segment:
         return False  # '/@scope' (npm) and '/@vite/client' paths.
-    # Any later '@' of a database or service URL ends a password with '/', '?' or '#' in it
-    # (postgres://app.svc:1234/PW/SECRET@h.com): those paths name a database, not a file or user.
-    if SERVICE_SCHEME_RE.match(scheme):
+    # A later '@' of a database or service URL ends a password with '/', '?' or '#' in it
+    # (postgres://app.svc:1234/PW/SECRET@h.com) when a ':' in the authority starts that
+    # password; ftp://files.example.com/pub/icon@2x.png is a path.
+    if SERVICE_SCHEME_RE.match(scheme) and ":" in netloc:
         return True
     name, colon, port = netloc.rpartition(":")
     nested = re.search(r"[/?#]", segment)

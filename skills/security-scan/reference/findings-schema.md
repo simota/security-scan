@@ -297,8 +297,7 @@ or revision and does not substitute for these flags.
   - `impact`: the claimed data exposure, action or state change follows
   - A finding with `category` `Secrets` must cite, among its claims, at least
     one `source` record for a path its `location` names (`source_path`, or the
-    record's `location` without `:line`; a comma- or semicolon-separated
-    `location` may name several). Source captured from another file does not
+    record's `location` without `:line`). Source captured from another file does not
     support it: without such a record its claims are incomplete and `Valid` is
     refused. `evidence_capture.py` never copies a file holding a secret, so a
     committed secret stays `Likely` with a limitation that the value was not
