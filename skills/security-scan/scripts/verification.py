@@ -9,16 +9,24 @@ import unicodedata
 from datetime import datetime
 
 
+# Default_Ignorable_Code_Point characters that are not format (Cf) characters:
+# combining grapheme joiner, Hangul fillers, Khmer vowels, Mongolian and
+# variation selectors. They render as nothing.
+_IGNORABLE = re.compile("[\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u3164\ufe00-\ufe0f\uffa0"
+                        "\U000e0100-\U000e01ef]")
+
+
 def identity(name):
     """Compare declared identities, not spellings.
 
-    NFKC folds compatibility forms (fullwidth letters); format characters
-    (zero-width space, soft hyphen) and spaces are invisible in a report, so
-    'author' and 'author\u200b' are one identity, not two independent reviewers.
+    NFKC folds compatibility forms (fullwidth letters); invisible characters
+    (zero-width space, soft hyphen, variation selectors, fillers) are removed,
+    and runs of whitespace count as one space, so 'author' and 'author\u200b'
+    are one identity while 'Ann Lee' and 'AnnLee' stay two.
     """
-    folded = unicodedata.normalize("NFKC", name)
-    return "".join(c for c in folded if unicodedata.category(c) not in ("Cf", "Zs", "Zl", "Zp")
-                   and not c.isspace()).casefold()
+    folded = _IGNORABLE.sub("", unicodedata.normalize("NFKC", name))
+    visible = "".join(c for c in folded if unicodedata.category(c) != "Cf")
+    return " ".join(visible.split()).casefold()
 
 # One explicit ISO-8601 profile, so the same record validates identically on
 # Python 3.9 and 3.11+ (whose fromisoformat accepts many more spellings).
@@ -51,6 +59,9 @@ GAPS = (
 DEFINITIVE = ("Valid", "FalsePositive", "NotApplicable")
 
 
+_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
 class _Validator:
     def __init__(self, data, error_type, integrity=None):
         self.data, self.error_type = data, error_type
@@ -74,7 +85,7 @@ class _Validator:
         value = obj.get(key)
         if not isinstance(value, str) or not value.strip():
             self.error(where + "." + key, "required nonblank string")
-        if any(ord(char) < 32 and char not in "\n\r\t" for char in value):
+        if _CONTROL.search(value):
             self.error(where + "." + key, "must not contain control characters")
         return value
 

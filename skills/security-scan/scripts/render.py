@@ -8,6 +8,7 @@ Writes DIR/dashboard.html (self-contained), DIR/assessment.html and DIR/assessme
 Standard library only.
 """
 import argparse
+import hashlib
 import html
 import json
 import math
@@ -782,12 +783,16 @@ def validate_json_values(data):
                 pending.append((f"{where}.{shown}" if where else shown, entry))
 
 
-def load(path):
+def load(path, raw=None):
+    """Parse and validate findings; raw is the exact bytes when the caller already read them."""
     def invalid_constant(value):
         raise SchemaError(f"{path}: invalid JSON constant {value}")
 
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"), parse_constant=invalid_constant)
+        raw = Path(path).read_bytes() if raw is None else raw
+        data = json.loads(raw.decode("utf-8"), parse_constant=invalid_constant)
+        if json_depth(data) > MAX_JSON_DEPTH:
+            raise SchemaError(f"{path}: JSON nesting is too deep")
     except json.JSONDecodeError as e:
         raise SchemaError(f"{path}: invalid JSON: {e}")
     except UnicodeError:
@@ -797,6 +802,23 @@ def load(path):
     except RecursionError:
         raise SchemaError(f"{path}: JSON nesting is too deep") from None
     return validate_data(data)
+
+
+# Records are shallow. Newer Pythons parse very deep JSON without
+# RecursionError, so the depth is checked explicitly.
+MAX_JSON_DEPTH = 200
+
+
+def json_depth(value):
+    depth, pending = 0, [(value, 1)]
+    while pending:
+        item, level = pending.pop()
+        if isinstance(item, (dict, list)):
+            depth = max(depth, level)
+            if level > MAX_JSON_DEPTH:
+                return level
+            pending.extend((child, level + 1) for child in (item.values() if isinstance(item, dict) else item))
+    return depth
 
 
 def validate_data(data):
@@ -1273,10 +1295,36 @@ def sensitive_path(path):
             or any(part.lower() in {".ssh", ".aws", ".kube", "secrets"} for part in path.parts))
 
 
+_KEY_RUN = re.compile(r"[\w.-]+")
+_KEY = re.compile(r"(?i)password|passwd|secret|token|api[_-]?key|private[_-]?key|access[_-]?key|credential")
+_SECRET_TAIL = re.compile(r"""(?i)(['"]?\s*(?:=>|:=|[:=])\s*['"]?)"""
+                          r"""(?!\$|[A-Za-z_][\w.]*\(|process\.env|os\.environ|null\b|None\b|true\b|false\b)([^'"\s,;)]{4,})""")
+_QUOTED_TAIL = re.compile(r"""(?i)(['"]?\s*(?:=>|:=|[:=])\s*)(['"])(?:\\.|(?!\2)[^\\\n])*\2""")
+
+
+def _sub_keyed(line, tail, repl):
+    """SECRET_RE / QUOTED_SECRET_RE .sub() with one attempt per key-character run.
+
+    Every keyword position inside one run reaches the same tail at the run's
+    end, so only the run's leftmost keyword can start a match.
+    """
+    out, pos = [], 0
+    for run in _KEY_RUN.finditer(line):
+        if run.start() < pos:
+            continue
+        key = _KEY.search(line, run.start(), run.end())
+        m = key and tail.match(line, run.end())
+        if m:
+            out.append(line[pos:key.start()])
+            out.append(repl(line[key.start():run.end()], m))
+            pos = m.end()
+    return "".join(out) + line[pos:] if out else line
+
+
 def redact(line):
     line = redact_urls(line)
-    line = QUOTED_SECRET_RE.sub(lambda m: m.group(1) + m.group(2) + "********" + m.group(2), line)
-    return SECRET_RE.sub(lambda m: m.group(1) + "********", line)
+    line = _sub_keyed(line, _QUOTED_TAIL, lambda key, m: key + m.group(1) + m.group(2) + "********" + m.group(2))
+    return _sub_keyed(line, _SECRET_TAIL, lambda key, m: key + m.group(1) + "********")
 
 
 def attach_sources(data, repo, context=3):
@@ -2246,7 +2294,9 @@ def main(argv=None):
     if a.evidence_repository and not a.evidence_root:
         p.error("--evidence-repository requires --evidence-root")
     try:
-        data = load(a.findings)
+        # One read: the stamp must describe exactly the bytes that were rendered.
+        source = Path(a.findings).read_bytes()
+        data = load(a.findings, source)
         integrity = None
         if a.evidence_root is not None:
             try:
@@ -2260,6 +2310,11 @@ def main(argv=None):
         # input decoder but exceed the encoder limit inside the report payload.
         dashboard = render_dashboard(data, L, a.lang, integrity=integrity)
         assessment = render_assessment_html(data, L, a.lang, integrity=integrity)
+        # Bind each page to the exact findings.json bytes it shows, so
+        # contract_check.py can tell a stale report without trusting mtimes.
+        digest = hashlib.sha256(source).hexdigest()
+        stamp = f'<meta name="security-scan-source" content="sha256:{digest}">'
+        dashboard, assessment = (page.replace("<head>", "<head>" + stamp, 1) for page in (dashboard, assessment))
     except RecursionError:
         print("render.py: report: JSON nesting is too deep to render", file=sys.stderr)
         return 2

@@ -73,6 +73,13 @@ class AuditBoundaryTests(unittest.TestCase):
         # The audit runs on a copy: neither the repository's .npmrc nor inherited
         # npm_config_* variables can redirect the advisory registry.
         self.assertNotIn("--prefix=" + str(self.root), argv)
+        for flag in ("--json", "--package-lock-only"):
+            self.assertIn(flag, argv)
+        prefixes = [a.split("=", 1)[1] for a in argv if a.startswith("--prefix=")]
+        self.assertEqual(len(prefixes), 1)
+        work = Path(prefixes[0])
+        self.assertNotIn(self.root, (work, *work.parents))
+        self.assertEqual(Path(run.call_args.args[1]), work)  # runs in the isolated copy
         self.assertIn("--registry=https://registry.npmjs.org/", argv)
         self.assertTrue(any(a.startswith("--userconfig=") for a in argv))
         self.assertTrue(any(a.startswith("--globalconfig=") for a in argv))

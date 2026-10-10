@@ -310,7 +310,8 @@ def _capture(repo, out_root, source_root, findings_name, paths, commit, until):
         raise CaptureError("findings file exceeds size limit")
     for rel, location, blob in new:
         _write_source(out_root, location, blob, budget)
-    _write_report(out_root, findings_name, serialized, original, identity)
+    if serialized != original:  # A rerun that adds nothing leaves the file untouched.
+        _write_report(out_root, findings_name, serialized, original, identity)
     return mapping
 
 

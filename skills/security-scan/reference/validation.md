@@ -89,8 +89,9 @@ not sufficient on its own.
   each High finding verification-incomplete, and name that in the chat
   summary's first line. Never invent a reviewer identity or record the same
   agent under a second name. Identities are compared after Unicode NFKC
-  folding, with case, spaces and invisible format characters ignored, so a
-  respelling (`author`, `AUTHOR`, `author` + zero-width space) is one reviewer
+  folding, with case and invisible characters ignored and runs of whitespace
+  counted as one space, so a respelling (`author`, `AUTHOR`, `author` +
+  zero-width space) is one reviewer while `Ann Lee` and `AnnLee` stay two
 - A retest's after-fix, positive-control and regression runs must be recorded
   no earlier than the before-fix failure they retest (`retest_order_invalid`)
 - Store only sanitized observations. Never store secrets, real credentials,

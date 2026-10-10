@@ -208,9 +208,14 @@ def export_records(manifest, result, out):
     return records
 
 
+def child_timeout(timeout):
+    """The child runtime's own deadline: a quarter of the run, at least 2 s, is margin."""
+    return max(1, timeout - max(2, timeout // 4))
+
+
 def run(bundle, findings, out, timeout=10, evidence_root=None, evidence_repository=None):
-    if type(timeout) is not int or not 1 <= timeout <= 60:
-        raise BundleError("Timeout must be an integer 1..60 seconds")
+    if type(timeout) is not int or not 2 <= timeout <= 60:
+        raise BundleError("Timeout must be an integer 2..60 seconds")
     manifest = verify(bundle, findings, evidence_root, evidence_repository)
     bundle = runtime.safe_path(bundle, True)
     out = runtime.safe_path(out, True)
@@ -229,10 +234,11 @@ def run(bundle, findings, out, timeout=10, evidence_root=None, evidence_reposito
             # No shell, plan-derived argv, project hooks, imports or stored commands.
             program = ("__file__ = " + repr(str(bundle / "run.py")) + "\n" +
                        runtime.read_bytes(Path(__file__).with_name("reproduction_runtime.py")).decode("utf-8") +
-                       # The child stops a second before the parent would kill it, so a
-                       # slow replay reports "timeout" itself and cleans up its fixture.
+                       # The child stops well before the parent would kill it (startup,
+                       # the evidence check and one action plus cleanup fit in the margin),
+                       # so a slow replay reports "timeout" itself and cleans up its fixture.
                        '\n\nif __name__ == "__main__":\n    sys.exit(entry("run", evidence_checked=True, timeout={}))\n'
-                       .format(max(1, timeout - 1)))
+                       .format(child_timeout(timeout)))
             process = subprocess.run([sys.executable, "-I", "-S", "-c", program,
                                       "--findings", str(runtime.safe_path(findings, False))],
                                      cwd=str(bundle), env={"PATH": os.defpath}, stdin=subprocess.DEVNULL,
@@ -298,6 +304,9 @@ def main(argv=None):
                          args.evidence_root, args.evidence_repository)
         print(json.dumps(result, ensure_ascii=True, indent=2))
         return 0 if result["status"] in ("not_run", "completed") else 3
+    except RecursionError:
+        print("reproduction error: input JSON nesting is too deep.", file=sys.stderr)
+        return 2
     except (BundleError, OSError, ValueError, KeyError, TypeError) as exc:
         # Errors can contain arbitrary findings strings. Never echo those values.
         print("reproduction error: {}. Check the documented input contract and unchanged owned files.".format(type(exc).__name__), file=sys.stderr)

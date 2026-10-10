@@ -65,7 +65,7 @@ Documentation sections (`Vn.1 … Documentation`) are checked as `decisions`
 | V3.6 | External Resource Integrity | Build and delivery | BD1 | no | Assets served by a CDN outside the repo `UNKNOWN` |
 | V3.7 | Other Browser Security Considerations | Client side | CS2 | partly | none: decidable from source |
 | V4.1 | Generic Web Service Security | Configuration and deployment; Integrations | CD4, IG1 | partly | none: decidable from source |
-| V4.2 | HTTP Message Structure Validation | Configuration and deployment | UNKNOWN (no step) | no | Mostly server/proxy config |
+| V4.2 | HTTP Message Structure Validation | Configuration and deployment | CD6 | partly | Edge config outside the repo `UNKNOWN` |
 | V4.3 | GraphQL | Availability; Data exposure | AV1, DE1 | partly | none: decidable from source |
 | V4.4 | WebSocket | Integrations | IG4 | yes | none: decidable from source |
 | V5.1 | File Handling Documentation | Files and content | — (decisions) | no | none: decidable from source |
@@ -111,14 +111,14 @@ Documentation sections (`Vn.1 … Documentation`) are checked as `decisions`
 | V12.3 | General Service to Service Communication Security | Secrets | SE3 | no | Network-level mutual TLS outside the repo `UNKNOWN` |
 | V13.1 | Configuration Documentation | Configuration and deployment | — (decisions) | no | none: decidable from source |
 | V13.2 | Backend Communication Configuration | Configuration and deployment; Integrations | CD1, IG2 | partly | none: decidable from source |
-| V13.3 | Secret Management | Secrets | SE1 | no | Vault and key custody `UNKNOWN` |
+| V13.3 | Secret Management | Secrets; Build and delivery | SE1, BD2 | no | Vault and key custody `UNKNOWN` |
 | V13.4 | Unintended Information Leakage | Configuration and deployment; Data exposure | CD1, DE2 | no | Deployed flags `UNKNOWN` |
 | V14.1 | Data Protection Documentation | Privacy | — (decisions) | partly | none: decidable from source |
 | V14.2 | General Data Protection | Data exposure; Privacy | DE1, DE3, PR1 | yes | Data actually stored not visible |
 | V14.3 | Client-side Data Protection | Client side | CS3 | partly | none: decidable from source |
 | V15.1 | Secure Coding and Architecture Documentation | Dependencies and platform | — (decisions) | no | none: decidable from source |
 | V15.2 | Security Architecture and Dependencies | Dependencies and platform; Build and delivery; Availability | DP1, DP2, BD1, AV1 | no | Advisory databases at run time (`deps_scan.py --audit`); vendor EOL schedule |
-| V15.3 | Defensive Coding | Input handling; Data exposure; Integrations | IN5, DE1, IG3 | partly | none: decidable from source |
+| V15.3 | Defensive Coding | Input handling; Data exposure; Integrations | IN5, IN7, DE1, IG3 | partly | none: decidable from source |
 | V15.4 | Safe Concurrency | Business rules | BR3 | yes | Interleavings need runtime to confirm |
 | V16.1 | Security Logging Documentation | Data exposure | — (decisions) | no | none: decidable from source |
 | V16.2 | General Logging | Data exposure | DE3 | no | Log shipping `UNKNOWN` |
@@ -140,9 +140,9 @@ Documentation sections (`Vn.1 … Documentation`) are checked as `decisions`
 | API5:2023 Broken Function Level Authorization | Role and privilege | RP1–RP6 | ROLE | yes | none: decidable from source |
 | API6:2023 Unrestricted Access to Sensitive Business Flows | Business rules; Availability | BR1, BR4, AV2 | QTY, STATE | yes | Limit effectiveness is runtime |
 | API7:2023 Server Side Request Forgery | Integrations | IG2, FC3 | TRUST | partly | Egress network rules `UNKNOWN` |
-| API8:2023 Security Misconfiguration | Configuration and deployment | CD1–CD3, DE2 | — | no | Deployed config `UNKNOWN` |
+| API8:2023 Security Misconfiguration | Configuration and deployment | CD1–CD3, CD5–CD7, DE2 | — | no | Deployed config `UNKNOWN` |
 | API9:2023 Improper Inventory Management | Configuration and deployment | CD4, AT3 | — | partly | Gateway-exposed routes `UNKNOWN` |
-| API10:2023 Unsafe Consumption of APIs | Integrations | IG1, IG3 | TRUST | yes | Third-party behaviour outside the repo |
+| API10:2023 Unsafe Consumption of APIs | Integrations | IG1, IG3, IG5 | TRUST | yes | Third-party behaviour outside the repo |
 
 ## CWE Top 25 (2024)
 

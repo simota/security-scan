@@ -56,13 +56,33 @@ class RunContractReviewTests(unittest.TestCase):
             mutate(broken["findings"][0]["verification"])
             self.assertTrue(any("structured verification" in p for p in self.problems(broken)))
 
-    def test_reports_older_than_the_record_fail(self):
+    def test_reports_must_be_rendered_from_the_current_record(self):
         data = self.build()
         self.render()
+        # Timestamps do not matter: a touched or copied file with the same bytes is fresh.
         stamp = (self.out / "dashboard.html").stat().st_mtime
         os.utime(self.out / "findings.json", (stamp + 10, stamp + 10))
+        self.assertEqual(self.problems(data), [])
+        # Any change after rendering is stale, even within the same second.
+        (self.out / "findings.json").write_text((self.out / "findings.json").read_text() + " ")
         found = self.problems(data)
-        self.assertTrue(any("dashboard.html is older than findings.json" in p for p in found))
+        self.assertTrue(any("dashboard.html was not rendered from the current findings.json" in p for p in found))
+        self.assertTrue(any("assessment.html was not rendered from the current findings.json" in p for p in found))
+
+    def test_excluded_findings_keep_their_place_in_the_numbering(self):
+        data = self.build()
+        self.render()
+        high = copy.deepcopy(data["findings"][0])
+        data["findings"][0]["severity"] = "Low"
+        data["findings"].append(dict(high, id="F-002", severity="High",
+                                     validation={"verdict": "FalsePositive", "evidence": "ruled out", "method": "review"}))
+        self.assertNotIn("F-*: number code findings in severity order (High first), then path", self.problems(data))
+
+    def test_rerunning_capture_without_new_paths_leaves_the_record_untouched(self):
+        self.build()
+        before = (self.findings.read_bytes(), self.findings.stat().st_mtime_ns)
+        self.capture.capture(self.repo, self.findings, ["src/orders.py"])
+        self.assertEqual((self.findings.read_bytes(), self.findings.stat().st_mtime_ns), before)
 
     def test_perspective_names_come_only_from_the_perspective_table(self):
         names = self.contract.perspective_names()

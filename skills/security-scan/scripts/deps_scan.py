@@ -26,6 +26,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -46,8 +47,6 @@ LOCKS = {
     "go.mod": ["go.sum"],
     "Cargo.toml": ["Cargo.lock"],
     "pyproject.toml": ["poetry.lock", "uv.lock", "pdm.lock", "Pipfile.lock", "requirements.lock"],
-    "setup.py": ["poetry.lock", "uv.lock", "pdm.lock", "Pipfile.lock", "requirements.lock"],
-    "setup.cfg": ["poetry.lock", "uv.lock", "pdm.lock", "Pipfile.lock", "requirements.lock"],
     "Pipfile": ["Pipfile.lock"],
 }
 ECOSYSTEM = {"package.json": "npm", "composer.json": "composer", "Gemfile": "bundler", "go.mod": "go",
@@ -73,7 +72,9 @@ CAT_BUILD = "Build and delivery"
 def safe_output(value):
     """Sanitize all string fields, including inventory, references and history."""
     if isinstance(value, str):
-        return redact_urls(value)
+        # Undecodable file names arrive as surrogate escapes; keep them visible
+        # as \udcXX text so the output is always valid UTF-8 JSON.
+        return redact_urls(value.encode("utf-8", "backslashreplace").decode("utf-8"))
     if isinstance(value, list):
         return [safe_output(v) for v in value]
     if isinstance(value, dict):
@@ -155,17 +156,48 @@ def walk(root, not_run=None):
         dirs[:] = kept
         for name in files:
             path = Path(d) / name
-            if safe_file(path, root):
+            try:  # Ancestors were already lstat-checked by this walk.
+                regular = stat.S_ISREG(os.lstat(path).st_mode)
+            except OSError:
+                regular = False
+            if regular:
                 yield path
             else:
                 skipped(path)
 
 
+_LINE_INDEX = {}
+_BREAKS = "\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"  # str.splitlines() separators
+_QUOTED = re.compile('(?="([^"' + _BREAKS + ']*)")')
+
+
+def _line_index(text):
+    """Per text: line end offsets and the first offset of every quote-free "X" substring."""
+    hit = _LINE_INDEX.get(id(text))
+    if hit is None or hit[0] is not text:
+        import itertools
+        ends = list(itertools.accumulate(len(l) for l in text.splitlines(True)))
+        first = {}
+        for m in _QUOTED.finditer(text):  # zero-width: every quote, overlaps included
+            first.setdefault(m[1], m.start())
+        _LINE_INDEX.clear()
+        hit = _LINE_INDEX[id(text)] = (text, ends, first)
+    return hit
+
+
 def line_of(text, needle):
-    for i, ln in enumerate(text.splitlines(), 1):
-        if needle in ln:
-            return i
-    return None
+    import bisect
+    _, ends, first = _line_index(text)
+    if not ends:
+        return None
+    inner = needle[1:-1]
+    if len(needle) >= 2 and needle[0] == needle[-1] == '"' and not any(ch in inner for ch in '"' + _BREAKS):
+        pos = first.get(inner, -1)
+    elif any(ch in needle for ch in _BREAKS):
+        return None
+    else:
+        pos = text.find(needle)
+    return None if pos < 0 else bisect.bisect_right(ends, pos) + 1
 
 
 def read(p):
@@ -297,7 +329,7 @@ def workflow_run_blocks(c, path, text):
     flow collections and unsupported forms are explicitly incomplete.
     """
     mapping = re.compile(r'''^( *)(- +)?(?:([A-Za-z0-9_.-]+)|"([A-Za-z0-9_.-]+)"|'([A-Za-z0-9_.-]+)')\s*:\s*(.*)$''')
-    stack, block, run_lines = [], None, []
+    stack, block, run_lines, step_uses = [], None, [], {}
     if text.lstrip().startswith(("{", "[")):
         incomplete(c, "workflow run scan", path, "flow-style workflow requires manual review")
     for number, line in enumerate(text.splitlines(), 1):
@@ -339,10 +371,16 @@ def workflow_run_blocks(c, path, text):
         key, value = next(x for x in match.group(3, 4, 5) if x is not None), match[6]
         while stack and stack[-1][0] >= level:
             stack.pop()
-        # run: is a shell script; with.script (actions/github-script) is JavaScript.
-        # Both evaluate ${{ }} before the code runs.
+        # The `uses:` of the step at this level; a new sequence item starts a new step.
+        if match[2]:
+            step_uses[level] = None
+        if key == "uses":
+            step_uses[level] = value.split("#", 1)[0].strip().strip("'\"")
+        # run: is a shell script; with.script of actions/github-script is JavaScript.
+        # Both evaluate ${{ }} before the code runs. Other actions' script inputs are data.
         is_run = bool(stack) and (key == "run" and stack[-1][1] == "steps"
-                                  or key == "script" and stack[-1][1] == "with")
+                                  or key == "script" and stack[-1][1] == "with"
+                                  and str(step_uses.get(stack[-1][0]) or "").startswith("actions/github-script@"))
         if (value.startswith(("*", "&", "!"))
                 or key == "steps" and value and not value.startswith("#")
                 or value.startswith(("{", "[")) and (key == "jobs" or stack and stack[-1][1] == "jobs")):
@@ -405,6 +443,12 @@ def untrusted_workflow_expression(c, path, expression):
         ("event", "comment", "id"), ("event", "review", "id"),
     }
     untrusted = False
+    close, stack = {}, []
+    for i, tok in enumerate(tokens):
+        if tok == "[":
+            stack.append(i)
+        elif tok == "]" and stack:
+            close[stack.pop()] = i + 1
     for index, token in enumerate(tokens):
         if token.lower() != "github" or index and tokens[index - 1] == ".":
             continue
@@ -417,11 +461,8 @@ def untrusted_workflow_expression(c, path, expression):
                 parts.append(part.lower())
                 cursor += 2
             elif tokens[cursor] == "[":
-                end, depth = cursor + 1, 1
-                while end < len(tokens) and depth:
-                    depth += (tokens[end] == "[") - (tokens[end] == "]")
-                    end += 1
-                if depth:
+                end = close.get(cursor)
+                if end is None:
                     incomplete(c, "workflow run scan", path, "unclosed property selector requires manual review")
                     break
                 selector = tokens[cursor + 1:end - 1]
@@ -489,8 +530,8 @@ def isolated_composer_audit(c, root, lock, exe):
 
 def declares_python_dependencies(text):
     """A pyproject.toml that only configures tools has nothing to lock."""
-    return re.search(r"^\s*(dev-)?(dependencies|optional-dependencies)\s*=|"
-                     r"^\s*\[(project\.optional-dependencies|tool\.poetry(\.group\.[^\]]+)?\.dependencies|"
+    return re.search(r"^[^\S\n]*(dev-)?(dependencies|optional-dependencies)\s*=|"
+                     r"^[^\S\n]*\[(project\.optional-dependencies|tool\.poetry(\.group\.[^\]]+)?\.dependencies|"
                      r"tool\.poetry\.dev-dependencies|tool\.pdm\.dev-dependencies|dependency-groups)\]",
                      text, re.M) is not None
 
@@ -577,17 +618,24 @@ def check_npm_lock(c, p):
     # empty-path URL can turn its query/fragment into bare "host" text that the
     # final URL sanitizer no longer recognizes.
     hosts = {}
+    cursor = [0, 1]
+    def line_at(pos):  # finditer offsets only increase
+        cursor[1] += text.count("\n", cursor[0], pos); cursor[0] = pos
+        return cursor[1]
     resolved = re.compile(r'"resolved"\s*:\s*("(?:[^"\\]|\\.)*")'
-                          r'|^\s+resolved\s+("(?:[^"\\]|\\.)*")'
+                          r'|^[^\S\n]+resolved\s+("(?:[^"\\]|\\.)*")'
                           r'|\btarball:\s*("(?:[^"\\]|\\.)*"|[^\s,}]+)', re.M)
     for match in resolved.finditer(text):
         try:
             raw = match[1] or match[2] or match[3]
-            url = json.loads(raw) if raw.startswith('"') else raw
+            url = json.loads(raw) if raw.startswith('"') else raw.strip("'")
             parsed = urlsplit(url)
-            if re.match(r"(git(\+[a-z]+)?|github|gitlab|bitbucket|file|link)$", parsed.scheme.lower()):
+            # Git hosts' archive endpoints are git sources served as tarballs.
+            archive = re.match(r"(codeload\.github\.com|gitlab\.com|bitbucket\.org)$", parsed.hostname or "") and (
+                parsed.hostname == "codeload.github.com" or "/-/archive/" in parsed.path or "/get/" in parsed.path)
+            if archive or re.match(r"(git(\+[a-z]+)?|github|gitlab|bitbucket|file|link)$", parsed.scheme.lower()):
                 if "outside" not in hosts:
-                    hosts["outside"] = text.count("\n", 0, match.start()) + 1
+                    hosts["outside"] = line_at(match.start())
                 continue
             if parsed.scheme.lower() not in ("http", "https"):
                 continue
@@ -601,7 +649,24 @@ def check_npm_lock(c, p):
             incomplete(c, "lockfile URL scan", p, "invalid resolved URL; host requires manual review")
             continue
         if host not in hosts:
-            hosts[host] = text.count("\n", 0, match.start()) + 1
+            hosts[host] = line_at(match.start())
+    # pnpm records git dependencies as resolution: {commit, repo, type: git}.
+    git_resolution, region_end, typed = None, -1, None
+    for opener in re.finditer(r"\bresolution:\s*\{", text):
+        if opener.end() <= region_end:
+            continue  # Same {...} region as a failed opener: its suffix cannot match either.
+        stops = [i for i in (text.find("}", opener.end()), text.find("\n", opener.end())) if i >= 0]
+        region_end = min(stops) if stops else len(text)
+        if typed is not None and typed.start() < opener.end():
+            typed = None
+        typed = typed or re.compile(r"\btype:\s*git\b").search(text, opener.end())
+        if typed is None:
+            break
+        if typed.start() < region_end:
+            git_resolution = opener
+            break
+    if git_resolution and "outside" not in hosts:
+        hosts["outside"] = text.count("\n", 0, git_resolution.start()) + 1
     if "outside" in hosts:
         c.add("Medium", "lockfile resolves a package from git or a local path, not a registry", p,
               hosts.pop("outside"), impact="Bypasses registry integrity and advisory coverage; the source can change",
@@ -698,6 +763,10 @@ def check_requirements(c, p):
             c.add("Medium", "pip --extra-index-url mixes a second index with PyPI", p, i,
                   impact="A public package can shadow an internal one with the same name",
                   fix="Use a single index (a mirror that proxies PyPI) or pin hashes", category=CAT_BUILD)
+        elif re.match(r"^--trusted-host\b", s) or re.match(r"^(--index-url|--extra-index-url|-i|-f|--find-links)[\s=]+http://", s):
+            c.add("Medium", "pip installs from a source without TLS verification (see source location)", p, i,
+                  impact="A network attacker can serve modified packages", category=CAT_BUILD,
+                  fix="Use an https:// index with a trusted CA")
         elif s.startswith("--index-url") or s.startswith("-i "):
             c.add("Info", "pip index overridden (see source location)", p, i, impact="Confirm the index is trusted",
                   category=CAT_BUILD)
@@ -747,11 +816,170 @@ def check_gomod(c, p):
                   impact="Builds depend on code outside module verification", category=CAT_BUILD)
 
 
-def check_workflow(c, p):
+PRIVILEGED_TRIGGERS = ("pull_request_target", "workflow_run")
+UNTRUSTED_REF = re.compile(r"\$\{\{\s*github\.(?:head_ref|event\.pull_request\.head\.(?:sha|ref|repo\.full_name)"
+                           r"|event\.workflow_run\.head_(?:sha|branch|repository\.full_name))\b")
+
+
+def workflow_triggers(text):
+    """Trigger names, from `on: x`, `on: [x, y]` and block `on:` keys (conservative)."""
+    found, in_on = set(), None
+    for ln in text.splitlines():
+        m = re.match(r"""^(\s*)["']?on["']?\s*:\s*(.*)$""", ln)
+        if m and not m.group(1):
+            found |= set(re.findall(r"[a-z_]+", m.group(2).split("#")[0]))
+            in_on = 0
+            continue
+        if in_on is not None:
+            if ln.strip() and not ln[:1].isspace() and not ln.lstrip().startswith("#"):
+                in_on = None
+                continue
+            k = re.match(r"""^(\s+)(?:-\s+)?["']?([a-z_]+)["']?\s*(:|$)""", ln)
+            if k and (not in_on or len(k.group(1)) <= in_on):
+                in_on = len(k.group(1))
+                found.add(k.group(2))
+    return found
+
+
+def privileged_workflows(files, root):
+    """Workflows that run with secrets on outsider events, plus local reusable
+    workflows and actions they call (which inherit that context)."""
+    root = Path(root).resolve()
+    priv = {}
+    for p in files:
+        if ".github/workflows" in str(p).replace(os.sep, "/") and p.suffix in (".yml", ".yaml"):
+            t = workflow_triggers(read(p)) & set(PRIVILEGED_TRIGGERS)
+            if t:
+                priv[p.resolve()] = sorted(t)[0]
+    # Follow local calls to a fixed point: a callee's own callees run in the
+    # same privileged context (a -> b.yml -> c.yml).
+    pending = list(priv)
+    while pending:
+        p = pending.pop()
+        repo = root if (root / ".github") in p.parents else next((a.parent for a in p.parents if a.name == ".github"), None)
+        if repo is None:
+            continue
+        for m in re.finditer(r"""uses\s*:\s*["']?\./([^\s"'#@]+)""", read(p)):
+            target = (repo / m.group(1)).resolve()
+            for cand in (target, target / "action.yml", target / "action.yaml"):
+                # Only files of this checkout; scan() visits nothing else anyway.
+                if (cand == root or root in cand.parents) and cand.is_file() and cand not in priv:
+                    priv[cand] = priv[p]
+                    pending.append(cand)
+    return priv
+
+
+SOURCE_CONFIGS = {"pom.xml", "settings.xml", "build.gradle", "build.gradle.kts", "settings.gradle",
+                  "settings.gradle.kts", "nuget.config", "NuGet.Config", "pip.conf", "pip.ini", ".pypirc",
+                  "bunfig.toml", ".npmrc", ".yarnrc", ".yarnrc.yml", ".gitmodules", "Gemfile"}
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+TLS_OFF = re.compile(r"""^\s*(?:strict-ssl\s*=\s*false|["']?enableStrictSsl["']?\s*:\s*false|trusted-host\s*=|--trusted-host\b"""
+                     r"""|allowInsecureProtocol\s*(?:=|\()\s*true|isAllowInsecureProtocol\s*=\s*true)""", re.I)
+
+
+def check_source_transport(c, p):
+    """Package/submodule sources over plaintext http:// or git://, and disabled TLS checks."""
     text = read(p)
+    in_repo = 0
+    for i, ln in enumerate(text.splitlines(), 1):
+        if ln.lstrip().startswith(("#", "//", ";", "<!--")):
+            continue
+        if p.suffix == ".xml":
+            # Maven: only <repository>/<pluginRepository>/<mirror> URLs fetch code;
+            # project <url>, <scm> and xmlns values are metadata.
+            in_repo += len(re.findall(r"<(?:repository|pluginRepository|snapshotRepository|mirror)>", ln))
+            hit = in_repo > 0
+            in_repo -= len(re.findall(r"</(?:repository|pluginRepository|snapshotRepository|mirror)>", ln))
+            if not hit:
+                continue
+        elif p.suffix in (".gradle", ".kts") and not re.search(r"\b(url|uri|maven)\b", ln):
+            continue  # Gradle: only repository declarations fetch code.
+        elif p.name == "Gemfile" and not re.match(r"\s*(source|gem|git)\b", ln):
+            continue
+        for m in re.finditer(r"""\b(http|git)://([^\s"'<>/:]+)""", ln):
+            if m.group(2).lower() in LOCAL_HOSTS:
+                continue
+            c.add("Medium", f"{p.name} fetches code over plaintext {m.group(1)}://", p, i, category=CAT_BUILD,
+                  impact="Anyone on the network path can substitute packages that then run in builds",
+                  fix="Use https:// (or ssh for git) for every package source")
+            break
+        if TLS_OFF.search(ln):
+            c.add("Medium", f"{p.name} disables TLS verification for a package source", p, i, category=CAT_BUILD,
+                  impact="A network attacker can serve modified packages", fix="Remove it and trust the CA instead")
+
+
+def check_extra_sources(c, p):
+    text = read(p)
+    if p.name in ("pip.conf", "pip.ini"):
+        for i, ln in enumerate(text.splitlines(), 1):
+            if re.match(r"\s*extra-index-url\s*=", ln):
+                c.add("Medium", "pip config adds a second index beside PyPI", p, i, category=CAT_BUILD,
+                      impact="Dependency confusion: a public package with an internal name may be installed",
+                      fix="Use a single index that proxies PyPI, or pin hashes")
+    elif p.name.lower() == "nuget.config":
+        adds = [i for i, ln in enumerate(text.splitlines(), 1) if re.search(r"<add\s+key=", ln)]
+        # <clear/> only drops inherited sources; two declared sources still race
+        # for every package id unless packageSourceMapping assigns them.
+        if len(adds) > 1 and "<packageSourceMapping" not in text:
+            c.add("Medium", "nuget.config mixes several package sources without packageSourceMapping", p, adds[1],
+                  category=CAT_BUILD, impact="Dependency confusion: any source may satisfy any package id",
+                  fix="Add <packageSourceMapping> so each package prefix comes from one source")
+    elif p.name == ".pypirc":
+        for i, ln in enumerate(text.splitlines(), 1):
+            if re.match(r"\s*password\s*[=:]\s*[^\s$%{]", ln):
+                c.add("High", ".pypirc contains a literal upload credential", p, i, category="Secrets",
+                      impact="Anyone with repository access can publish this project's packages",
+                      fix="Remove it, rotate the token, use trusted publishing or an environment variable")
+
+
+def check_workflow(c, p, privileged=None):
+    text = read(p)
+    lines = text.splitlines()
+    if "workflow_run" in workflow_triggers(text):
+        c.add("Medium", "workflow triggers on workflow_run", p, line_of(text, "workflow_run"), category=CAT_BUILD,
+              confidence="Suspected",
+              impact="Runs with repository secrets after fork PR workflows; dangerous if it uses their artifacts or code",
+              fix="Treat artifacts and head refs of the triggering run as untrusted data; never execute them")
+    if privileged:
+        step_uses = ""
+        for i, ln in enumerate(lines, 1):
+            # The PR head is only executed when a checkout step fetches it; the same
+            # value passed to another action's ref/repository input is data.
+            if re.match(r"\s*-\s", ln):
+                step_uses = ""
+            used = re.match(r"""\s*(?:-\s+)?["']?uses["']?\s*:\s*["']?([^\s"'#]+)""", ln)
+            if used:
+                step_uses = used.group(1)
+            if (re.match(r"\s*(?:ref|repository)\s*:", ln) and UNTRUSTED_REF.search(ln)
+                    and re.match(r"actions/checkout@", step_uses)):
+                c.add("High", f"{privileged} workflow checks out the pull request's code", p, i,
+                      category=CAT_BUILD, confidence="Suspected",
+                      impact="Fork authors' code runs with repository secrets and a write token (pwn request)",
+                      fix="Use pull_request for building PR code, or never run anything from the checkout")
+            if re.match(r"""\s*(?:-\s+)?uses\s*:\s*["']?[\w.-]+/[\w.-]*download-artifact@""", ln, re.I) \
+                    and privileged == "workflow_run":
+                c.add("Medium", "workflow_run workflow downloads artifacts from the triggering run", p, i,
+                      category=CAT_BUILD, confidence="Suspected",
+                      impact="A fork PR controls the artifact; executing or interpolating it runs with secrets",
+                      fix="Extract to a temp dir, validate as data, never execute it or write it to GITHUB_ENV")
+            if re.match(r"""\s*runs-on\s*:.*\bself-hosted\b""", ln):
+                c.add("Medium", f"{privileged} job runs on a self-hosted runner", p, i, category=CAT_BUILD,
+                      confidence="Suspected",
+                      impact="Outsider-triggered jobs can persist on the runner host and its network",
+                      fix="Use GitHub-hosted or ephemeral, isolated runners for outsider-triggered events")
+    for i, ln in enumerate(lines, 1):
+        if re.match(r"""\s*permissions\s*:\s*["']?write-all\b""", ln):
+            c.add("Medium" if privileged else "Low", "workflow grants permissions: write-all", p, i,
+                  category=CAT_BUILD, impact="Any compromised step can push code, releases and packages",
+                  fix="Grant only the scopes each job needs, read-only by default")
+        m = re.match(r"""\s*(?:-\s+)?uses\s*:\s*["']?([\w.-]+/[\w.-]+/\.github/workflows/[^\s"'#]+)""", ln)
+        if m and any(re.match(r"\s*secrets\s*:\s*inherit\b", x) for x in lines[i:i + 8]):
+            c.add("Medium", f"every secret is passed to external reusable workflow {m.group(1)}", p, i,
+                  category=CAT_BUILD, impact="A change in that repository can read all of this repository's secrets",
+                  fix="Pass only the named secrets it needs and pin it to a commit SHA")
     for i, ln in enumerate(text.splitlines(), 1):
         # Only a YAML `uses:` key; comments and shell text mentioning it are not steps.
-        m = re.match(r"""^\s*(?:-\s+)?\{?\s*["']?uses["']?\s*:\s*([^\s#,}]+)""", ln)
+        m = re.match(r"""^\s*(?:-\s+)?(?:\{\s*)?["']?uses["']?\s*:\s*([^\s#,}]+)""", ln)
         if m:
             ref = m.group(1).strip("'\"")
             if ref.startswith("./") or ref.startswith("docker://"):
@@ -785,9 +1013,11 @@ def check_workflow(c, p):
             incomplete(c, "workflow run scan", p, "double-quoted run escapes require manual review")
             continue
         reported = set()
+        seen_pos, seen_nl = 0, 0
         for start, expression in workflow_expressions(c, p, script):
             if untrusted_workflow_expression(c, p, expression):
-                line = block[script.count("\n", 0, start)][0]
+                seen_nl += script.count("\n", seen_pos, start); seen_pos = start
+                line = block[seen_nl][0]
                 if line in reported:
                     continue
                 reported.add(line)
@@ -798,11 +1028,19 @@ def check_workflow(c, p):
 
 def check_dockerfile(c, p):
     text = read(p)
-    stages = set()
+    stages, args = set(), {}
     for i, ln in enumerate(text.splitlines(), 1):
+        a = re.match(r"\s*ARG\s+(\w+)=(\S+)", ln, re.I)
+        if a and not stages:
+            args[a.group(1)] = a.group(2).strip("'\"")
+        add = re.match(r"\s*ADD\s+(?:--\S+\s+)*(https?://\S+)", ln, re.I)
+        if add and "--checksum=" not in ln:
+            c.add("Low", "build downloads a remote file with ADD and no --checksum", p, i, category=CAT_BUILD,
+                  impact="The image contains whatever the URL serves at build time",
+                  fix="Add --checksum=sha256:... or download a pinned release and verify it")
         m = re.match(r"\s*FROM\s+(?:--platform=\S+\s+)?(\S+)(?:\s+AS\s+(\S+))?", ln, re.I)
         if m:
-            img = m.group(1)
+            img = re.sub(r"\$\{?(\w+)\}?", lambda v: args.get(v.group(1), v.group(0)), m.group(1))
             earlier_stage = img.lower() in stages
             if m.group(2):
                 stages.add(m.group(2).lower())
@@ -812,10 +1050,26 @@ def check_dockerfile(c, p):
             if ":" not in name or name.endswith(":latest"):
                 c.add("Low", f"base image {img} is not pinned", p, i, category=CAT_BUILD,
                       impact="Rebuilds pull a different image", fix="Pin a version tag, ideally a digest")
-        if re.search(r"(curl|wget)[^|\n]*\|\s*(sh|bash)", ln):
+        segments = ln.split("|")
+        if any(re.match(r"\s*(sh|bash)", seg) and re.search(r"curl|wget", prev)
+               for prev, seg in zip(segments, segments[1:])):
             c.add("Low", "remote script piped into a shell during build", p, i, category=CAT_BUILD,
                   impact="Build executes whatever the URL serves at that moment",
                   fix="Download a pinned version and verify its checksum")
+
+COMPOSE_FILE = re.compile(r"(?:docker-)?compose(?:[.-][\w.-]+)?\.ya?ml$")
+
+
+def check_compose(c, p):
+    for i, ln in enumerate(read(p).splitlines(), 1):
+        m = re.match(r"""\s*image\s*:\s*["']?([^\s"'#]+)""", ln)
+        if not m or "$" in m.group(1) or "@sha256:" in m.group(1):
+            continue
+        img = m.group(1)
+        name = img.split("/")[-1]
+        if ":" not in name or name.endswith(":latest"):
+            c.add("Low", f"compose image {img} is not pinned", p, i, category=CAT_BUILD,
+                  impact="Each pull can run a different image", fix="Pin a version tag, ideally a digest")
 
 
 # ---------- inventory ----------
@@ -1025,11 +1279,17 @@ def parse_osv(c, data, root, lock):
                     continue
                 reported.add(group)
                 ids = list(groups[group].get("ids", [])) if group is not None else []
+                # Fix versions and references may sit on any alias record of the group.
+                members = [v] + [x for x in vulnerabilities if x is not v and isinstance(x, dict)
+                                 and group is not None and group_of.get(x.get("id")) == group]
+                aliases = aliases + [a for x in members[1:] for a in x.get("aliases") or [] if isinstance(a, str)]
                 malicious = [a for a in aliases + ids if a.startswith("MAL-")]
-                aliases = [a for a in aliases if a.startswith("CVE-")][:2]
+                aliases = sorted({a for a in aliases if a.startswith("CVE-")})[:2]
+                fixed = ", ".join(dict.fromkeys(x for m in members for x in osv_fixed(m, info["name"]).split(", ") if x))
+                refs = [r for m in members for r in osv_refs(m)]
                 vuln(c, osv_severity(v, group_sev), info["name"], info.get("version", ""),
                      [v["id"]] + aliases + malicious + ids, v.get("summary", ""), lock, "osv-scanner",
-                     osv_fixed(v, info["name"]), osv_refs(v))
+                     fixed, refs)
 
 
 def audit_osv(c, root, files):
@@ -1418,14 +1678,49 @@ def lock_context(lock):
     return ctx
 
 
-def npm_needles(name):
-    """Import forms only: a quoted word such as 'debug' elsewhere is not a use."""
-    needles = []
-    for quote in ("'", '"', "`"):
-        for tail in (quote, "/"):
-            target = quote + name + tail
-            needles += ["require(" + target, "from " + target, "import(" + target, "import " + target]
-    return needles
+def npm_import(name):
+    """Import forms of an npm package: require/import calls, static imports, test mocks."""
+    target = r"""\s*['"`]""" + re.escape(name) + r"""['"`/]"""
+    return re.compile(r"(?:\brequire(?:\.resolve)?|\bimport|\bjest\.(?:mock|requireActual))\s*\(" + target
+                      + r"|\b(?:from|import)" + target)
+
+
+_IMPORT_SITE = re.compile(r"""(?=(?:\brequire(?:\.resolve)?|\bimport|\bjest\.(?:mock|requireActual))\s*\(\s*['"`]([^'"`]{0,257})"""
+                          r"""|\b(?:from|import)\s*['"`]([^'"`]{0,257}))""")
+_QUOTE_SITE = re.compile(r"""(?=(['"`])([^'"`]{0,257}))""")
+
+
+def npm_index(texts):
+    """One pass: every name npm_import() could match, and every quoted name form."""
+    imports, quoted = set(), set()
+    for t in texts:
+        for m in _IMPORT_SITE.finditer(t):
+            run = m[1] if m[1] is not None else m[2]
+            end = m.end(1) if m[1] is not None else m.end(2)
+            if len(run) <= 256 and t[end:end + 1] in ("'", '"', "`"):
+                imports.add(run)
+            imports.update(run[:j] for j, ch in enumerate(run) if ch == "/" and j <= 256)
+        for m in _QUOTE_SITE.finditer(t):
+            q, run, end = m[1], m[2], m.end(2)
+            if len(run) <= 256 and t[end:end + 1] == q:
+                quoted.add(q + run + q)
+            quoted.update(q + run[:j] + "/" for j, ch in enumerate(run) if ch == "/" and j <= 256)
+    return imports, quoted
+
+
+def npm_referenced(name, texts, index=None):
+    """yes for an import form; unknown when the quoted name appears another way; else no."""
+    if index is not None and name and len(name) <= 256 and not any(q in name for q in "'\"`"):
+        imports, quoted = index
+        if name in imports:
+            return "yes"
+        forms = [q + name + q for q in ("'", '"', "`")] + [q + name + "/" for q in ("'", '"', "`")]
+        return "unknown" if any(n in quoted for n in forms) else "no"
+    pattern = npm_import(name)
+    if any(pattern.search(t) for t in texts):
+        return "yes"
+    quoted = [q + name + q for q in ("'", '"', "`")] + [q + name + "/" for q in ("'", '"', "`")]
+    return "unknown" if any(n in t for t in texts for n in quoted) else "no"
 
 
 def triage(c, root):
@@ -1433,10 +1728,13 @@ def triage(c, root):
     if not deps:
         return
     texts = source_index(root)
+    index = None
     ctxs = {}
     for f in deps:
         lock = str(Path(root) / f["lockfile"])
-        ctx = ctxs.setdefault(lock, lock_context(lock))
+        if lock not in ctxs:  # setdefault() would re-parse the lockfile per finding
+            ctxs[lock] = lock_context(lock)
+        ctx = ctxs[lock]
         name = f["package"]
         if name in ctx["dev"] and name not in ctx["runtime"]:
             exposure = "dev-only"
@@ -1447,8 +1745,15 @@ def triage(c, root):
         direct = "direct" if name in ctx["direct"] else ("transitive" if ctx["direct"] else "unknown")
         npm_family = Path(lock).name in LOCKS["package.json"]
         # Other ecosystems have no needle model: report "unknown", never a false "no".
-        needles = ctx["needles"].get(name) or (npm_needles(name) if npm_family else [])
-        referenced = "yes" if needles and any(n in t for t in texts for n in needles) else ("no" if needles else "unknown")
+        needles = ctx["needles"].get(name)
+        if needles:
+            referenced = "yes" if any(n in t for t in texts for n in needles) else "no"
+        elif npm_family:
+            if index is None:
+                index = npm_index(texts)
+            referenced = npm_referenced(name, texts, index)
+        else:
+            referenced = "unknown"
         if f.get("malicious"):
             verdict = "Likely"
             why = "malicious-package report: treat as valid until removed"
@@ -1475,6 +1780,7 @@ def scan(root, audit):
     root = Path(root).resolve()
     c = Collector(root)
     files = sorted(walk(root, c.not_run))
+    privileged = privileged_workflows(files, root)
     for p in files:
         n = p.name
         if n in LOCKS:
@@ -1495,9 +1801,14 @@ def scan(root, audit):
             check_gomod(c, p)
         elif n.startswith("Dockerfile") or n.endswith(".Dockerfile"):
             check_dockerfile(c, p)
+        elif COMPOSE_FILE.fullmatch(n):
+            check_compose(c, p)
         elif p.suffix in (".yml", ".yaml") and (".github/workflows" in str(p).replace(os.sep, "/")
                                                 or n in ("action.yml", "action.yaml")):
-            check_workflow(c, p)
+            check_workflow(c, p, privileged.get(p.resolve()))
+        if n in SOURCE_CONFIGS or p.parent.name == ".cargo" and n in ("config", "config.toml"):
+            check_source_transport(c, p)
+            check_extra_sources(c, p)
         if n == "composer.lock":
             inventory_composer_lock(c, p)
         elif n == "package-lock.json":
@@ -1579,7 +1890,11 @@ def main(argv=None):
     result = safe_output(scan(root, a.audit))
     blob = json.dumps(result, ensure_ascii=False, indent=2)
     if a.out:
-        Path(a.out).write_text(blob + "\n", encoding="utf-8")
+        try:
+            Path(a.out).write_text(blob + "\n", encoding="utf-8")
+        except OSError as exc:
+            print(f"deps_scan.py: cannot write {a.out}: {exc.strerror or exc}", file=sys.stderr)
+            return 2
     elif not a.into:
         print(blob)
     if a.into:

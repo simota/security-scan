@@ -12,6 +12,7 @@ and provenance markers only; it cannot tell whether a finding is true.
 Exit codes: 0 contract holds, 1 violations listed on stderr, 2 unreadable input.
 """
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -28,7 +29,23 @@ VERDICTS = {"Valid", "Likely", "Unverified", "Unlikely", "FalsePositive", "NotAp
 CODE_FIELDS = ("actor", "request", "impact", "fix")
 CLAIMS = ("reachability", "preconditions", "defenses", "impact")
 SEVERITY_RANK = {"High": 0, "Medium": 1, "Low": 2, "Info": 3}
-RENDERED = ("dashboard.html", "assessment.html", "assessment.pdf")
+RENDERED = ("dashboard.html", "assessment.html")
+SOURCE_STAMP = re.compile(rb'<meta name="security-scan-source" content="sha256:([0-9a-f]{64})">')
+
+
+MAX_JSON_DEPTH = 200  # Newer Pythons parse very deep JSON without RecursionError.
+
+
+def json_depth(value):
+    depth, pending = 0, [(value, 1)]
+    while pending:
+        item, level = pending.pop()
+        if isinstance(item, (dict, list)):
+            depth = max(depth, level)
+            if level > MAX_JSON_DEPTH:
+                return level
+            pending.extend((child, level + 1) for child in (item.values() if isinstance(item, dict) else item))
+    return depth
 
 
 def perspective_names():
@@ -57,7 +74,8 @@ def check(data, out_dir, pdf=True, allow=()):
     meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
     if not isinstance(data.get("findings"), list):
         add("findings: required list")
-    findings = [f for f in data.get("findings") or [] if isinstance(f, dict)]
+    raw_findings = data.get("findings")
+    findings = [f for f in raw_findings if isinstance(f, dict)] if isinstance(raw_findings, list) else []
     perspectives = data.get("perspectives") if isinstance(data.get("perspectives"), list) else []
 
     def commit(value):
@@ -82,8 +100,12 @@ def check(data, out_dir, pdf=True, allow=()):
     numbers = sorted(int(CODE_ID.fullmatch(f["id"]).group(1)) for f in code)
     if numbers != list(range(1, len(numbers) + 1)):
         add("F-*: number code findings F-001..F-%03d without gaps" % len(numbers))
+    # Excluded findings keep their ID when a later review rules them out, so
+    # only included findings must follow severity order.
     ranks = [SEVERITY_RANK.get(f.get("severity"), len(SEVERITY_RANK))
-             for f in sorted(code, key=lambda f: f["id"])]
+             for f in sorted(code, key=lambda f: f["id"])
+             if not (isinstance(f.get("validation"), dict)
+                     and f["validation"].get("verdict") in ("FalsePositive", "NotApplicable"))]
     if ranks != sorted(ranks):
         add("F-*: number code findings in severity order (High first), then path")
 
@@ -137,11 +159,16 @@ def check(data, out_dir, pdf=True, allow=()):
         hint = hints.get(name, "run render.py findings.json --out {out}").format(out=out_dir)
         add(f"outputs: {name} missing; {hint}")
     # A report rendered before the last merge or --into does not show the record.
+    # render.py stamps each page with the digest of the findings.json it read;
+    # bytes, not mtimes, so copies and same-second writes are judged correctly.
     try:
-        recorded = (out_dir / "findings.json").stat().st_mtime
+        recorded = hashlib.sha256((out_dir / "findings.json").read_bytes()).hexdigest()
         for name in RENDERED:
-            if name in present and (out_dir / name).stat().st_mtime < recorded:
-                add(f"outputs: {name} is older than findings.json; render after the last merge or --into")
+            if name in present:
+                stamp = SOURCE_STAMP.search((out_dir / name).read_bytes()[:4096])
+                if not stamp or stamp.group(1).decode() != recorded:
+                    add(f"outputs: {name} was not rendered from the current findings.json; "
+                        "render after the last merge or --into")
     except OSError:
         pass
     extra = {"run"} if "expert" in data else set()  # expert grade keeps its run records beside the report
@@ -158,6 +185,8 @@ def main(argv=None):
     a = p.parse_args(argv)
     try:
         data = json.loads((a.out_dir / "findings.json").read_text(encoding="utf-8"))
+        if json_depth(data) > MAX_JSON_DEPTH:
+            raise RecursionError
         if not isinstance(data, dict):
             raise ValueError("findings.json must hold a JSON object")
     except RecursionError:

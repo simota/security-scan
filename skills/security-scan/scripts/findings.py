@@ -65,7 +65,11 @@ PAYLOAD = re.compile(
 def read_json(path, raw=None):
     try:
         raw = Path(path).read_bytes() if raw is None else raw
-        return json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object)
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object)
+        # Deeper input would overflow copy/validation recursion later.
+        if render.json_depth(value) > render.MAX_JSON_DEPTH:
+            raise ValueError(f"JSON nesting deeper than {render.MAX_JSON_DEPTH} levels")
+        return value
     except (OSError, UnicodeError, ValueError, RecursionError) as e:
         raise render.SchemaError(f"{path}: {e}") from None
 

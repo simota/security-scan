@@ -71,8 +71,10 @@ checklist-only runs, which write no files).
 | Info | A hardening note with no attacker path |
 
 Each further condition the attacker does not control lowers severity one level.
-An `Environment-dependent` finding is graded as if its stated condition holds,
-and names that condition.
+An `Environment-dependent` finding is graded as if its stated condition holds
+when that condition is the shipped default or the repository's own config;
+when the repository does not show the setting either way, that setting is the
+one condition of the Medium row. Name the condition in both cases.
 
 ## When the host refuses an action
 

@@ -9,7 +9,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "skills/security-scan"
-STEP_ROW = re.compile(r"^\| ([A-Z]{2}\d) \|.*\| ([^|]+) \|$")
+STEP_ROW = re.compile(r"^\| ([A-Z]{2}\d+) \|.*\| ([^|]+) \|$")
 PERSPECTIVES = ("Actor and tenant", "Role and privilege", "Identity and session", "Input handling",
                 "Data exposure", "Business rules", "Files and content", "Availability",
                 "Configuration and deployment", "Secrets", "Dependencies and platform",
@@ -30,9 +30,10 @@ def catalog_cells():
 
 def expand(steps):
     out = set()
-    for start, end in re.findall(r"\b([A-Z]{2}\d)(?:–([A-Z]{2}\d))?\b", steps):
+    # Step numbers may exceed 9 (AT10), so ranges compare the whole number.
+    for start, end in re.findall(r"\b([A-Z]{2}\d+)(?:–([A-Z]{2}\d+))?\b", steps):
         if end:
-            out |= {start[:2] + str(n) for n in range(int(start[2]), int(end[2]) + 1)}
+            out |= {start[:2] + str(n) for n in range(int(start[2:]), int(end[2:]) + 1)}
         else:
             out.add(start)
     return out

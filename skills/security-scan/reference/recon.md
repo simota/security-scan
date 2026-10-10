@@ -112,7 +112,9 @@ Where input can change meaning: raw SQL fragments, ORDER BY and column names,
 shell execution, filesystem paths, HTML rendered without escaping (server
 templates, SPA raw-HTML bindings, emails), URL attributes bound from data,
 outbound HTTP to user-influenced URLs, HTML-to-PDF renderers, deserializers,
-XML parsers, log statements.
+XML parsers, log statements, deep merges of request objects, spreadsheet
+exports, prompts sent to model APIs, model tool/function dispatch and
+vector-store queries.
 
 ## 7. Files
 
