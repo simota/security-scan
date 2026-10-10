@@ -522,6 +522,16 @@ def untrusted_workflow_expression(c, path, expression):
         ("event", "workflow_run", "id"), ("event", "workflow_run", "head_sha"),
         ("event", "workflow_run", "run_attempt"), ("event", "workflow_run", "run_number"),
     }
+    # contains(github.event.pull_request.title, 'WIP') as the whole expression yields only true/false.
+    k = next((k for k, tok in enumerate(tokens) if tok != "!"), len(tokens))
+    if tokens[k + 1:k + 2] == ["("] and tokens[k].lower() in ("contains", "startswith", "endswith"):
+        depth = 0
+        for i, tok in enumerate(tokens[k + 1:], k + 1):
+            depth += (tok == "(") - (tok == ")")
+            if not depth:
+                if i == len(tokens) - 1:
+                    return False
+                break
     untrusted = False
     close, stack = {}, []
     for i, tok in enumerate(tokens):
@@ -954,9 +964,34 @@ OUTPUT_USE = re.compile(r"\bsteps\.([\w-]+)\.outputs\.([\w-]+)")
 INPUT_USE = re.compile(r"(?<![\w.])inputs\.([\w-]+)")
 
 
+BRACKET = re.compile(r"\[\s*'([\w-]+)'\s*\]")
+# `NAME=value`, `export NAME=value` (also local/declare) of a run script line.
+SHELL_ASSIGN = re.compile(r"\s*(?:(?:export|local|declare|readonly|typeset)(?:\s+-\w+)*\s+)?([A-Za-z_]\w*)=(.*)")
+
+
+def dotted(value):
+    """github['head_ref'] and github.event['pull_request']['head'] as the dotted paths they read."""
+    return BRACKET.sub(r".\1", value) if "[" in value else value
+
+
+def pull_ref(value):
+    return "pull/" in value or "/pr/" in value
+
+
 def head_expr(value):
-    """UNTRUSTED_HEAD, where a bare PR or issue number counts only inside a pull/<n>/ ref."""
-    return any(not PR_NUMBER.fullmatch(m[0]) or "pull/" in value for m in UNTRUSTED_HEAD.finditer(value))
+    """UNTRUSTED_HEAD, where a bare PR or issue number counts only inside a pull/<n>/ or /pr/<n> ref."""
+    value = dotted(value)
+    return any(not PR_NUMBER.fullmatch(m[0]) or pull_ref(value) for m in UNTRUSTED_HEAD.finditer(value))
+
+
+def head_level(value):
+    """2 when value names the PR head; 1 for a bare PR number, which is the head only in a ref (counts)."""
+    return 2 if head_expr(value) else 1 if PR_NUMBER.search(dotted(value)) else 0
+
+
+def counts(value, level):
+    """A use site of a source at `level` checks out the head: always at 2, at 1 inside a pull/<n> ref."""
+    return level == 2 or level == 1 and pull_ref(value)
 
 
 def strip_comment(line):
@@ -974,6 +1009,7 @@ def strip_comment(line):
 
 def head_value(value):
     """True when a checkout input names the PR head (or refs/pull/<number>)."""
+    value = dotted(value)
     return bool(HEAD_REF.search(value) or "pull/" in value and PR_NUMBER.search(value))
 
 
@@ -1019,9 +1055,18 @@ def mapping_values(lines, index, value, end):
             for k, i, v, stop in entries if k is not None}
 
 
+def local_targets(root, rel, memo):
+    """Files of this checkout that `uses: ./rel` runs (a workflow or an action directory), once per string."""
+    if rel not in memo:
+        target = (root / rel).resolve()
+        memo[rel] = [cand for cand in (target, target / "action.yml", target / "action.yaml")
+                     if (cand == root or root in cand.parents) and cand.is_file()]
+    return memo[rel]
+
+
 def local_calls(files, root, privileged):
     """callee -> [(caller, {input: value}, caller is privileged)] of local `uses: ./x` jobs and steps."""
-    root, calls = Path(root).resolve(), {}
+    root, calls, memo = Path(root).resolve(), {}, {}
     for p in files:
         if not (is_workflow(p) or p.name in ("action.yml", "action.yaml")):
             continue
@@ -1037,11 +1082,9 @@ def local_calls(files, root, privileged):
             m = re.match(r"""["']?\./([^\s"'#@]*)""", uses)
             if not m:
                 continue
-            target = (root / m[1]).resolve()
             values = mapping_values(lines, given[0], given[1], end) if given else {}
-            for cand in (target, target / "action.yml", target / "action.yaml"):
-                if (cand == root or root in cand.parents) and cand.is_file():
-                    calls.setdefault(cand, []).append((p, values, p.resolve() in privileged))
+            for cand in local_targets(root, m[1], memo):
+                calls.setdefault(cand, []).append((p, values, p.resolve() in privileged))
     return calls
 
 
@@ -1113,8 +1156,7 @@ def is_workflow(p):
 def privileged_workflows(files, root):
     """Workflows that run with secrets on outsider events, plus local reusable
     workflows and actions they call (which inherit that context)."""
-    root = Path(root).resolve()
-    priv = {}
+    root, priv, memo = Path(root).resolve(), {}, {}
     for p in files:
         if is_workflow(p):
             text = read(p)
@@ -1127,10 +1169,8 @@ def privileged_workflows(files, root):
     while pending:
         p = pending.pop()
         for m in re.finditer(r"""\buses["']?[ \t]*:[ \t]*["']?(?:\.|\$)/([^\s"'#@]*)""", read(p)):
-            target = (root / m.group(1)).resolve()
-            for cand in (target, target / "action.yml", target / "action.yaml"):
-                # Only files of this checkout; scan() visits nothing else anyway.
-                if (cand == root or root in cand.parents) and cand.is_file() and cand not in priv:
+            for cand in local_targets(root, m.group(1), memo):  # Only files of this checkout.
+                if cand not in priv:
                     priv[cand] = priv[p]
                     pending.append(cand)
     return priv
@@ -1257,9 +1297,22 @@ def check_extra_sources(c, p):
                       fix="Remove it, rotate the token, use trusted publishing or an environment variable")
 
 
+ITEM_DASH, ITEM_KEY = re.compile(r" *- +"), re.compile(r"""( *)(- +)?["']?([\w.-]+)["']?\s*:(?:\s+(.*))?$""")
+_items_memo = {}
+
+
 def yaml_items(lines):
     """Block-sequence items (conservative): {start, end, parent, keys}; keys maps the
-    item's own keys to (index, value). Block scalar contents are skipped."""
+    item's own keys to (index, value). Block scalar contents are skipped. One file is
+    parsed by several checks: the last result is reused (callers only read it)."""
+    key = "\n".join(lines)
+    if key not in _items_memo:
+        _items_memo.clear()
+        _items_memo[key] = parse_items(lines)
+    return _items_memo[key]
+
+
+def parse_items(lines):
     items, stack, scalar, last = [], [], None, []  # last: (indent, index, dash), indents increasing
     for i, ln in enumerate(lines):
         s = ln.strip()
@@ -1272,7 +1325,7 @@ def yaml_items(lines):
             scalar = None
         while stack and indent <= stack[-1][0]:
             stack.pop()[1]["end"] = i
-        dash = re.match(r" *- +", ln)
+        dash = ITEM_DASH.match(ln)
         while last and last[-1][0] > indent:
             last.pop()  # A shallower later line is always the nearer parent candidate.
         if dash:
@@ -1285,7 +1338,7 @@ def yaml_items(lines):
             if last and last[-1][0] == indent:
                 last.pop()
             last.append((indent, i, bool(dash)))
-        m = re.match(r"""( *)(- +)?["']?([\w.-]+)["']?\s*:(?:\s+(.*))?$""", ln)
+        m = ITEM_KEY.match(ln)
         if m:
             level, value = len(m[1]) + len(m[2] or ""), (m[4] or "").strip()
             if stack and stack[-1][1]["level"] == level:
@@ -1422,9 +1475,11 @@ def moved_args(commands):
 
 
 def branch(ref):
-    """`pr`, `heads/pr` and `refs/heads/pr` name one local branch for checkout."""
+    """`pr`, `heads/pr` and `refs/heads/pr` name one local branch for checkout; `refs/remotes/origin/pr`
+    and `remotes/origin/pr` the remote-tracking branch `origin/pr`."""
     ref = ref.lstrip("+")
-    return ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref[6:] if ref.startswith("heads/") else ref
+    prefix = next((x for x in ("refs/heads/", "heads/", "refs/remotes/", "remotes/") if ref.startswith(x)), "")
+    return ref[len(prefix):]
 
 
 def check_workflow(c, p, privileged=None, calls=None):
@@ -1471,11 +1526,18 @@ def check_workflow(c, p, privileged=None, calls=None):
     def run_rows(st):
         """(line number, text) of a run step; double-quoted YAML escapes decoded into lines."""
         rows = [(i + 1, lines[i]) for i in own(st) if i >= st["keys"]["run"][0]]
-        if not st["keys"]["run"][1].startswith('"'):
-            return rows
-        decode = {"n": "\n", "t": "\t"}
-        return [(n, part) for n, x in rows
-                for part in re.sub(r"\\(.)", lambda m: decode.get(m[1], m[1]), x).split("\n")]
+        if st["keys"]["run"][1].startswith('"'):
+            decode = {"n": "\n", "t": "\t"}
+            rows = [(n, part) for n, x in rows
+                    for part in re.sub(r"\\(.)", lambda m: decode.get(m[1], m[1]), x).split("\n")]
+        joined = []  # A shell line ending in `\` continues on the next row: one command, first row's number.
+        for n, x in rows:
+            if joined and joined[-1][1][-1].endswith("\\"):
+                joined[-1][1][-1] = joined[-1][1][-1][:-1]
+                joined[-1][1].append(x)
+            else:
+                joined.append((n, [x]))
+        return [(n, " ".join(parts)) for n, parts in joined]
 
     head_checkout = False
     if privileged:
@@ -1489,12 +1551,21 @@ def check_workflow(c, p, privileged=None, calls=None):
             running += depth[i]
             in_step[i] = running > 0
 
+        def caller_level(value):
+            """head_level of what privileged local callers pass for each inputs.X in value."""
+            return max((head_level(given[name]) for name in (INPUT_USE.findall(value) if "inputs" in value else ())
+                        for _, given, caller_privileged in callers if caller_privileged and name in given), default=0)
+
+        def taint(value):
+            return max(head_level(value), caller_level(value))
+
         def assigned(rows):
+            """{name: level} of `name: value` rows, also quoted keys and one-line flow maps (env: {A: x})."""
             out, until = {}, 0
             for i in rows:
                 if i < until:
                     continue  # inside a block scalar already read as a value
-                m = re.match(r"""([ \t]*)(?:-[ \t]+)?([A-Za-z_]\w*)[ \t]*:[ \t]*["']?(.*)$""", lines[i])
+                m = re.match(r"""([ \t]*)(?:-[ \t]+)?["']?([A-Za-z_]\w*)["']?[ \t]*:[ \t]*["']?(.*)$""", lines[i])
                 if m:
                     value = m[3]
                     if re.match(r"[|>][-+0-9]*[ \t]*(?:#.*)?$", value):  # block scalar: its lines are the value
@@ -1504,7 +1575,9 @@ def check_workflow(c, p, privileged=None, calls=None):
                             body.append(lines[k])
                             k += 1
                         value, until = "\n".join(body), k
-                    out[m[2]] = out.get(m[2], False) or head_expr(value)
+                    pairs = flow_pairs(value).items() if value.lstrip().startswith("{") else ()
+                    for name, v in [(m[2], value), *pairs]:
+                        out[name] = max(out.get(name, 0), taint(v))
             return out
 
         workflow_env, job_env, job_names, written, outputs = assigned(top_rows), {}, {}, {}, {}
@@ -1515,12 +1588,23 @@ def check_workflow(c, p, privileged=None, calls=None):
             if job not in job_env:
                 job_env[job] = dict(workflow_env, **(assigned(i for i in range(*job) if not in_step[i]) if job else {}))
             if (job, writes) not in job_names:
-                job_names[job, writes] = {k for k, v in list(job_env[job].items())
-                                          + list(written.get(job, {}).items() if writes else ()) if v}
-            step, names = assigned(own(st)), job_names[job, writes]
-            matcher = lambda x: any(n == "GITHUB_HEAD_REF" or (step[n] if n in step else n in names)
-                                    for n in (m[1] or m[2] for m in ENV_USE.finditer(x)))
+                names = job_names[job, writes] = dict(job_env[job])
+                for k, v in written.get(job, {}).items() if writes else ():
+                    names[k] = max(names.get(k, 0), v)
+            step, names, shell = assigned(own(st)), job_names[job, writes], {}
+
+            def env_level(x):
+                out = 0
+                for m in ENV_USE.finditer(x):
+                    n = m[1] or m[2]
+                    out = max(out, 2 if n == "GITHUB_HEAD_REF" else step[n] if n in step else names.get(n, 0),
+                              shell.get(n, 0))
+                    if out == 2:
+                        break
+                return out
+            matcher = lambda x: counts(x, env_level(x))
             matcher.defined = lambda n: n in step or n in job_env[job]
+            matcher.level, matcher.shell = env_level, shell
             return matcher
 
         for st in steps:  # $GITHUB_ENV / $GITHUB_OUTPUT writes of PR-head values, per job
@@ -1529,26 +1613,25 @@ def check_workflow(c, p, privileged=None, calls=None):
                 for _, x in run_rows(st):
                     for kind, name, value in github_writes(x) if "GITHUB_" in x else ():
                         env_ref = env_ref or step_env(st, job, writes=False)
-                        bad = bool(head_expr(value) or head_value(value) or env_ref(value))
+                        bad = max(taint(value), env_ref.level(value))
+                        bad = 2 if counts(value, bad) or head_value(value) else bad
                         if kind == "GITHUB_ENV":
-                            written.setdefault(job, {})[name] = written.get(job, {}).get(name, False) or bad
+                            written.setdefault(job, {})[name] = max(written.get(job, {}).get(name, 0), bad)
                         elif step_value(st, "id"):
                             outputs.setdefault(job, {})[(step_value(st, "id"), name)] = bad
 
         def ref_source(value, job, env_ref):
             """'head' when a checkout input is the PR head; else the unresolved sources it names."""
-            if head_value(value) or env_ref(value):
+            if head_value(value) or env_ref(value) or counts(value, caller_level(value)):
                 return "head"
             kinds = set()
             for sid, name in OUTPUT_USE.findall(value):
-                if outputs.get(job, {}).get((sid, name)):
+                if counts(value, outputs.get(job, {}).get((sid, name), 0)):
                     return "head"
                 kinds.add("a step output")
             for name in INPUT_USE.findall(value):
                 for _, given, caller_privileged in callers:
                     v = given.get(name, "")
-                    if caller_privileged and head_value(v):
-                        return "head"
                     if caller_privileged and "${{" in v and not HEAD_REF.search(v):
                         kinds.add("a caller's input")
             if re.search(r"\bneeds\.[\w-]+\.outputs\.", value):
@@ -1593,10 +1676,12 @@ def check_workflow(c, p, privileged=None, calls=None):
                     if not m:
                         continue
                     if m[1] is not None:  # flow mapping, possibly over several lines
-                        flow, j = strip_comment(m[1]), k + 1
-                        while flow_depth(flow) > 0 and j < len(rows):
-                            flow, j = flow + " " + strip_comment(lines[rows[j]]).strip(), j + 1
-                        values = [v for key, v in flow_pairs(flow).items() if key in ("ref", "repository")]
+                        parts, j = [strip_comment(m[1])], k + 1
+                        depth = flow_depth(parts[0])  # running depth: each row is scanned once
+                        while depth > 0 and j < len(rows):
+                            parts.append(strip_comment(lines[rows[j]]).strip())
+                            depth, j = depth + flow_depth(parts[-1]), j + 1
+                        values = [v for key, v in flow_pairs(" ".join(parts)).items() if key in ("ref", "repository")]
                     else:  # plain, quoted or block scalar value, possibly continued on later lines
                         value, level, j = strip_comment(m[2]), len(lines[i]) - len(lines[i].lstrip()), k + 1
                         while j < len(rows) and (not lines[rows[j]].strip()
@@ -1614,9 +1699,14 @@ def check_workflow(c, p, privileged=None, calls=None):
                 title = f"{privileged} workflow checks out the pull request's code"
             elif "run" in st["keys"]:
                 run = run_rows(st)
-                untrusted = lambda x: (head_expr(x) or env_ref(x)
+                untrusted = lambda x: (counts(x, taint(x)) or env_ref(x)
                                        or re.search(r"\bpull/[^\s/]*/(?:head|merge)\b", x)
-                                       or any(outputs.get(job, {}).get(o) for o in OUTPUT_USE.findall(x)))
+                                       or any(counts(x, outputs.get(job, {}).get(o, 0)) for o in OUTPUT_USE.findall(x)))
+                for _, x in run:  # SHA=${{ …head.sha }} / export REF="$GITHUB_HEAD_REF" taint $SHA / $REF later
+                    a = "=" in x and SHELL_ASSIGN.match(x)
+                    if a:
+                        env_ref.shell[a[1]] = max(env_ref.shell.get(a[1], 0), 2 if untrusted(a[2])
+                                                  else max(taint(a[2]), env_ref.level(a[2])))
                 # Fetching the PR head is data until this step checks it out, resets or
                 # merges onto it: FETCH_HEAD, the fetched ref or a local refspec target.
                 fetches = [a for _, x in run for sub, a in git_commands(x) if sub == "fetch" and untrusted(" ".join(a))]
