@@ -536,5 +536,43 @@ class CodexRound8gRecordTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 1.0)
 
 
+class CodexRound8hRecordTests(unittest.TestCase):
+    def test_static_template_literal_jwt_keys_are_refused_and_masked(self):
+        for text in ("jwt.sign(payload, `supersecret`)", "token = jwt.sign({id: user.id}, `supersecret`, opts)",
+                     "jwt.encode(payload, key=`supersecret`)", "jwt.sign(\n  payload,\n  `supersecret`\n)"):
+            with self.subTest(text=text):
+                self.assertTrue(render.secret_in_source("src/auth.js", text + "\n"))
+                self.assertNotIn("supersecret", render.mask_multiline(text))
+                if "\n" not in text:
+                    self.assertNotIn("supersecret", render.redact(text))
+        for text in ("jwt.sign(payload, `${process.env.KEY}`)", "jwt.sign(payload, `pre${key}`)"):
+            with self.subTest(text=text):
+                self.assertFalse(render.secret_in_source("src/auth.js", text + "\n"))
+                self.assertEqual(render.redact(text), text)
+        started = time.monotonic()
+        for text in ("jwt.sign(a, `" + "x" * 200000, "jwt.sign(a, `" * 15000, "jwt.sign(a, `" + "${" * 100000):
+            render.mask_multiline(text)
+            render.secret_in_source("a.js", text)
+            render.redact(text)
+        self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_arrow_separated_authorization_values_are_refused_and_masked(self):
+        for line in ("$headers = ['Authorization' => 'Bearer supersecret'];",
+                     'headers = { "Authorization" => "Basic supersecret" }', "['authorization'=>'bearer supersecret']"):
+            with self.subTest(line=line):
+                self.assertTrue(render.secret_in_source("src/client.php", line + "\n"))
+                self.assertNotIn("supersecret", render.redact(line))
+                self.assertNotIn("supersecret", render.mask_multiline(line))
+        for line in ("$h = ['Authorization' => 'Bearer ' . $token];", "['Authorization' => \"Bearer {$token}\"]"):
+            with self.subTest(line=line):
+                self.assertFalse(render.secret_in_source("src/client.php", line + "\n"))
+        started = time.monotonic()
+        for text in ("Authorization =>" + " " * 200000, "Authorization=>" * 14000, "'Authorization' => 'Bearer " + "a" * 200000):
+            render.secret_in_source("a.php", text)
+            render.mask_multiline(text)
+            render.redact(text)
+        self.assertLess(time.monotonic() - started, 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()

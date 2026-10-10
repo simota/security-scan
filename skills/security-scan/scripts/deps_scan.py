@@ -971,6 +971,8 @@ SHELL_SEP = re.compile(r"(;|&&|\|\||(?<![<>])\|&?|(?<![<>])&(?!>))")
 # FUNCTION_DECL is a header whose `{` opens the next non-blank row.
 _FUNCTION = r"\s*(?:function\s+[^\s(){}]+\s*(?:\(\s*\))?|[^\s(){}=]+\s*\(\s*\))\s*"
 FUNCTION_HEADER, FUNCTION_DECL = re.compile(_FUNCTION + r"\{(?:\s+|$)"), re.compile(_FUNCTION + "$")
+# A here-document operator (`<<EOF`, `<<-'EOF'`; not a `<<<` here-string or `1 << 2`) and its delimiter.
+HEREDOC = re.compile(r"""(?<!<)<<(?!<)[-~]?\s*['"]?([A-Za-z_]\w*)['"]?""")
 
 
 BRACKET = re.compile(r"\[\s*'([\w-]+)'\s*\]")
@@ -1833,8 +1835,15 @@ def check_workflow(c, p, privileged=None, calls=None):
                 # but never clear it. Braces are counted from a function header to its `}`.
                 # So is one in a subshell: inside `( … )`, a pipeline stage, a backgrounded
                 # command, or a `{ …; }` group that is piped or backgrounded.
+                # A here-document body (up to its delimiter row) is data, not commands; a `{ … }`
+                # group entered conditionally keeps every command in it conditional.
                 segments, depth, braces, sep, paren, groups, closed, spans, pending = [], 0, 0, ";", 0, [], None, [], False
+                docs, in_group = [], 0
                 for k, row in run:
+                    if docs:
+                        docs = docs[row.strip() == docs[0]:]
+                        continue
+                    docs = HEREDOC.findall(RUN_KEY.sub("", row))
                     parts = SHELL_SEP.split(shell_text(RUN_KEY.sub("", row)))
                     for j in range(0, len(parts), 2):
                         sep = parts[j - 1] if j else sep  # a row ending in `&&` continues on the next
@@ -1847,11 +1856,13 @@ def check_workflow(c, p, privileged=None, calls=None):
                         pending = bool(FUNCTION_DECL.match(parts[j])) or pending and not parts[j].strip()
                         braces = max(0, braces + (bool(header) or braces > 0 and word == ["{"]) - (braces > 0 and word == ["}"]))
                         cond = (depth > 0 or braces > 0 or sep in ("&&", "||", "|", "|&") or paren > 0
-                                or parts[j].lstrip().startswith("("))
+                                or parts[j].lstrip().startswith("(") or in_group > 0)
                         if not in_fn and not header and word == ["{"]:
-                            groups.append((len(segments), sep in ("|", "|&")))
+                            groups.append((len(segments), sep in ("|", "|&"), cond))
+                            in_group += cond
                         elif not in_fn and word == ["}"] and groups:
-                            closed, piped = groups.pop()
+                            closed, piped, entered = groups.pop()
+                            in_group -= entered
                             if piped:
                                 spans.append((closed, len(segments)))
                                 cond = True
