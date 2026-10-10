@@ -967,8 +967,10 @@ INPUT_USE = re.compile(r"(?<![\w.])inputs\.([\w-]+)")
 # A run key with its block-scalar indicator; shell separators, with pipes and `&` but not redirections (2>&1, &>).
 RUN_KEY = re.compile(r"""^\s*(?:-\s+)?["']?run["']?\s*:\s*(?:[|>][-+0-9]*\s*(?:#.*)?$)?""")
 SHELL_SEP = re.compile(r"(;|&&|\|\||(?<![<>])\|&?|(?<![<>])&(?!>))")
-# A shell function header and its opening brace: `f() {`, `function f {`, `function f() {`.
-FUNCTION_HEADER = re.compile(r"\s*(?:function\s+[^\s(){}]+\s*(?:\(\s*\))?|[^\s(){}=]+\s*\(\s*\))\s*\{(?:\s+|$)")
+# A shell function header and its opening brace: `f() {`, `function f {`, `function f() {`;
+# FUNCTION_DECL is a header whose `{` opens the next non-blank row.
+_FUNCTION = r"\s*(?:function\s+[^\s(){}]+\s*(?:\(\s*\))?|[^\s(){}=]+\s*\(\s*\))\s*"
+FUNCTION_HEADER, FUNCTION_DECL = re.compile(_FUNCTION + r"\{(?:\s+|$)"), re.compile(_FUNCTION + "$")
 
 
 BRACKET = re.compile(r"\[\s*'([\w-]+)'\s*\]")
@@ -1094,10 +1096,11 @@ def local_targets(root, rel, memo):
 ENV_NAME = re.compile(r"\benv\.([A-Za-z_]\w*)")
 
 
-def env_aliases(value, env, hops=8):
-    """value plus what its env.X names hold, followed through aliases (REF: ${{ env.SHA }}), bounded and cycle-safe."""
+def env_aliases(value, env):
+    """value plus what its env.X names hold, followed through aliases (REF: ${{ env.SHA }}) to a
+    fixed point: each name is expanded once, so cycles end and the result is bounded by env."""
     out, seen, todo = [value], set(), ENV_NAME.findall(value)
-    for _ in range(hops):
+    while todo:
         todo = [n for n in dict.fromkeys(todo) if n in env and n not in seen]
         seen.update(todo)
         out += [env[n] for n in todo]
@@ -1659,7 +1662,8 @@ def check_workflow(c, p, privileged=None, calls=None):
 
         def assigned(rows, outer={}):
             """{name: level} of `name: value` rows, also quoted keys and one-line flow maps (env: {A: x});
-            REF: ${{ env.SHA }} takes SHA's level from this map or the outer one, through up to 8 aliases."""
+            REF: ${{ env.SHA }} takes SHA's level from this map or the outer one, through any chain of aliases
+            (a fixed point, cycle-safe)."""
             out, until, raw = {}, 0, {}
             for i in rows:
                 if i < until:
@@ -1679,13 +1683,18 @@ def check_workflow(c, p, privileged=None, calls=None):
                         out[name] = max(out.get(name, 0), taint(v))
                         if "env." in v:
                             raw[name] = raw.get(name, "") + " " + v
-            aliases = {k: ENV_NAME.findall(v) for k, v in raw.items()}
-            for _ in range(8 if aliases else 0):
-                grown = {k: max([out[k]] + [max(out.get(n, 0), outer.get(n, 0)) for n in names])
-                         for k, names in aliases.items()}
-                if all(out[k] == v for k, v in grown.items()):
-                    break
-                out.update(grown)
+            users = {}  # name -> names whose value reads it; a rise is pushed to them (levels only rise: linear)
+            for k, v in raw.items():
+                for n in ENV_NAME.findall(v):
+                    users.setdefault(n, []).append(k)
+                    out[k] = max(out[k], out.get(n, 0), outer.get(n, 0))
+            todo = list(raw)
+            while todo:
+                n = todo.pop()
+                for k in users.get(n, ()):
+                    if out[n] > out[k]:
+                        out[k] = out[n]
+                        todo.append(k)
             return out
 
         workflow_env, job_env, job_names, written, outputs = assigned(top_rows), {}, {}, {}, {}
@@ -1824,7 +1833,7 @@ def check_workflow(c, p, privileged=None, calls=None):
                 # but never clear it. Braces are counted from a function header to its `}`.
                 # So is one in a subshell: inside `( … )`, a pipeline stage, a backgrounded
                 # command, or a `{ …; }` group that is piped or backgrounded.
-                segments, depth, braces, sep, paren, groups, closed, spans = [], 0, 0, ";", 0, [], None, []
+                segments, depth, braces, sep, paren, groups, closed, spans, pending = [], 0, 0, ";", 0, [], None, [], False
                 for k, row in run:
                     parts = SHELL_SEP.split(shell_text(RUN_KEY.sub("", row)))
                     for j in range(0, len(parts), 2):
@@ -1834,7 +1843,8 @@ def check_workflow(c, p, privileged=None, calls=None):
                         word, in_fn, closed = parts[j].split(None, 1)[:1], braces > 0, None
                         depth = max(0, depth + (word in (["if"], ["case"], ["for"], ["while"], ["until"], ["select"]))
                                     - (word in (["fi"], ["esac"], ["done"])))
-                        header = FUNCTION_HEADER.match(parts[j])
+                        header = FUNCTION_HEADER.match(parts[j]) or pending and word == ["{"] and re.match(r"\s*\{", parts[j])
+                        pending = bool(FUNCTION_DECL.match(parts[j])) or pending and not parts[j].strip()
                         braces = max(0, braces + (bool(header) or braces > 0 and word == ["{"]) - (braces > 0 and word == ["}"]))
                         cond = (depth > 0 or braces > 0 or sep in ("&&", "||", "|", "|&") or paren > 0
                                 or parts[j].lstrip().startswith("("))

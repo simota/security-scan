@@ -363,5 +363,42 @@ class CodexRound8eScanTests(Base):
         self.assertTrue(any("x/action.yml: too many local call paths" in x for x in self.not_run()))
 
 
+class CodexRound8gScanTests(Base):
+    HEAD, ACTION, fresh = CodexRound8eScanTests.HEAD, CodexRound8eScanTests.ACTION, CodexRound8eScanTests.fresh
+
+    def test_env_alias_chains_of_any_length_resolve(self):
+        names = [chr(65 + i) for i in range(12)]  # A holds the head; B..L each alias the one before
+        env = "    env:\n      A: %s\n" % self.HEAD + "".join(
+            "      %s: ${{ env.%s }}\n" % (b, a) for a, b in zip(names, names[1:]))
+        for use in ('      - run: git checkout "$L"\n', CHECKOUT + "          ref: ${{ env.L }}\n"):
+            with self.subTest(use=use):
+                self.assertTrue(self.high(PRT + env + "    steps:\n" + use))
+                self.fresh()
+        self.assertTrue(self.high({W + "a.yml": PRT + env + "    steps:\n      - uses: ./.github/actions/co\n"
+                                   "        with:\n          sha: ${{ env.L }}\n", ".github/actions/co/action.yml": self.ACTION}))
+        self.fresh()
+        self.assertFalse(self.high(PRT + env.replace(self.HEAD, "main") + "    steps:\n      - run: git checkout \"$L\"\n"))
+        self.fresh()
+        self.timed(PRT + "    env:\n      V0: %s\n" % self.HEAD + "".join(
+            "      V%d: ${{ env.V%d }}\n" % (i + 1, i) for i in range(3000)) + "    steps:\n      - run: git checkout \"$V3000\"\n")
+
+    def test_function_brace_on_the_next_row_opens_its_body(self):
+        head = "          SHA=" + self.HEAD + "\n"
+        for header in ("f ()", "function f", "function f()"):
+            for gap in ("", "\n"):
+                body = header + "\n" + gap + "          {\n            SHA=main\n          }\n"
+                with self.subTest(body=body):
+                    self.assertTrue(self.high(PRT + "    steps:\n      - run: |\n" + head + "          " + body
+                                              + '          git checkout "$SHA"\n'))
+                    self.fresh()
+        # A brace group that follows an ordinary command is not a function body.
+        self.assertFalse(self.high(PRT + "    steps:\n      - run: |\n" + head + "          echo x\n"
+                                   "          {\n            SHA=main\n          }\n          git checkout \"$SHA\"\n"))
+        started = time.monotonic()
+        deps_scan.FUNCTION_DECL.match("function " + "a" * 200000 + " (" + " " * 200000)
+        deps_scan.FUNCTION_DECL.match("a" * 200000 + " (" + " " * 200000)
+        self.assertLess(time.monotonic() - started, 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()

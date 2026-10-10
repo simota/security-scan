@@ -494,5 +494,47 @@ class CodexRound8fRecordTests(unittest.TestCase):
         self.assertFalse(render.secret_in_source("src/client.py", 'headers["Authorization"] = "Bearer " + token\n'))
 
 
+class CodexRound8gRecordTests(unittest.TestCase):
+    def test_first_position_keyword_jwt_keys_are_refused_and_masked(self):
+        key = "super" + "secret"
+        for text in ('jwt.encode(key="' + key + '", payload=payload)', "jwt.encode(secret='" + key + "', payload=p)",
+                     'jwt.encode(signing_key="' + key + '")', 'jwt.encode(payload=p, key="' + key + '")',
+                     'jwt.encode(\n    key="' + key + '",\n    payload=p,\n)'):
+            with self.subTest(text=text):
+                self.assertTrue(render.secret_in_source("src/auth.py", text + "\n"))
+                self.assertNotIn(key, render.mask_multiline(text))
+                if "\n" not in text:
+                    self.assertNotIn(key, render.redact(text))
+        for text in ("jwt.encode(key=settings.SECRET, payload=p)", 'jwt.encode(key=os.environ["JWT_KEY"], payload=p)',
+                     'jwt.decode(token, algorithms=["HS256"])', 'jwt.decode(algorithms=["HS256"], jwt=token)'):
+            with self.subTest(text=text):
+                self.assertFalse(render.secret_in_source("src/auth.py", text + "\n"))
+                self.assertEqual(render.redact(text), text)
+        started = time.monotonic()
+        for text in ("jwt.encode(key=" + " " * 200000, "jwt.encode(key=" + "'x" * 100000, "jwt.encode(" + "key=" * 50000):
+            render.mask_multiline(text)
+            render.secret_in_source("a.py", text)
+            render.redact(text)
+        self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_authorization_schemes_are_case_insensitive(self):
+        for line in ("Authorization: BEARER supersecret", "Authorization: bAsIc supersecret",
+                     'headers = {"authorization": "bearer supersecret"}', 'h = "BEARER ' + "abcdefgh" + '12345678"',
+                     'h = "BASIC ' + "dXNlcjpw" + 'YXNzMTIzNDU2"'):
+            with self.subTest(line=line):
+                self.assertTrue(render.secret_in_source("src/client.py", line + "\n"))
+                self.assertNotIn(line.split()[-1].strip("'\"}"), render.redact(line))
+        for line in ("Authorization: BEARER ${TOKEN}", "Use BASIC authentication only over TLS.",
+                     'headers["Authorization"] = "BEARER " + token'):
+            with self.subTest(line=line):
+                self.assertFalse(render.secret_in_source("src/client.py", line + "\n"))
+        started = time.monotonic()
+        for text in ("Authorization: BEARER " + "a" * 200000, "BASIC " * 40000, "bEaReR " + "1" * 200000 + "!"):
+            render.secret_in_source("a.yml", text)
+            render.mask_multiline(text)
+            render.redact(text)
+        self.assertLess(time.monotonic() - started, 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()

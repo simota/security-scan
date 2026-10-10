@@ -1469,7 +1469,7 @@ _PLAIN_VALUE = re.compile(r"[\^~<>=].*|v?\d+(?:\.\d+)+[\w.+-]*|(?:~|\.{1,2})?(?:
 # bot URLs whose path is the credential, and an HTTP Authorization value
 # (Bearer/Basic followed by a token holding a digit, or any token right after an
 # Authorization key, also on the next line or after a YAML block-scalar indicator, so `Bearer ${token}`, `"Bearer " + token` and prose stay readable).
-_AUTH_CTX = r"(?i:authorization)[\"']?[ \t]*\]?[ \t]*[:=,](?:[ \t]*[|>][-+0-9]{0,2}[ \t]*(?=[\r\n]))?\s{0,40}[\"'`]?(?:[Bb]earer|[Bb]asic)[ \t]+"
+_AUTH_CTX = r"(?i:authorization)[\"']?[ \t]*\]?[ \t]*[:=,](?:[ \t]*[|>][-+0-9]{0,2}[ \t]*(?=[\r\n]))?\s{0,40}[\"'`]?(?i:bearer|basic)[ \t]+"
 # After an Authorization key any whole token counts, but not a placeholder (one repeated
 # character, YOUR_TOKEN, token), prose (`Bearer flows; …`) nor an expression (`abc" + x`, `abc${x}`).
 _AUTH_END = r"""(?:[ \t]*(?:[\r\n]|$)|["'`,)}\]\\])"""
@@ -1482,22 +1482,23 @@ TOKEN_RE = re.compile(r"\b(?:gh[opsu]_[A-Za-z0-9]{36,}|github_pat_\w{22,}|A(?:KI
                       r"|hooks\.slack\.com/(?:services|workflows|triggers)/[\w/-]{20,}"
                       r"|discord(?:app)?\.com/api/webhooks/\d+/[\w-]{20,}"
                       r"|(?:api\.telegram\.org/bot)?\d{6,12}:AA[\w-]{30,}"
-                      r"|[Bb]earer[ \t]+(?=[A-Za-z._~+/-]*\d)[\w.~+/-]{16,}=*"
-                      r"|[Bb]asic[ \t]+(?=[A-Za-z+/]*\d)[A-Za-z0-9+/]{16,}={0,2}(?![\w.~+/-])"
+                      r"|(?i:bearer)[ \t]+(?=[A-Za-z._~+/-]*\d)[\w.~+/-]{16,}=*"
+                      r"|(?i:basic)[ \t]+(?=[A-Za-z+/]*\d)[A-Za-z0-9+/]{16,}={0,2}(?![\w.~+/-])"
                       r"|" + _AUTH_CTX + _AUTH_TOKEN + ")")
 _AUTH_VALUE = re.compile("(" + _AUTH_CTX + ")" + _AUTH_TOKEN)
 # A literal signing key passed positionally or by keyword: jwt.sign(payload, "key"),
 # jwt.encode(claims, 'key', ...), jwt.decode(token, "key"), jwt.encode(payload,
-# algorithm="HS256", key="key") (also secret=, signing_key=). The first argument
-# is a simple expression, call or object literal; the call may span lines.
+# algorithm="HS256", key="key") (also secret=, signing_key=), the keyword form also first:
+# jwt.encode(key="key", payload=p). The first argument is a simple expression, call or
+# object literal; the call may span lines.
 # A bracketed group nested at most two deep, each level bounded: makePayload(user), {id: f(x)}.
 _GROUP = r"[({](?:[^(){}\n]|[({][^(){}\n]{0,200}[)}]){0,200}[)}]"
 # Keyword arguments skipped before key= are bounded too, a [list] kept whole: algorithms=["HS256", "RS256"].
 _KWARG = r"[a-z_]\w{0,40}\s{0,40}=(?!=)(?:[^,(){}\[\]\n]|\[[^\[\](){}\n]{0,200}\]|%s){0,199},\s{0,40}" % _GROUP
+_JWT_KW = r"(?:key|secret|signing_key)\s{0,40}=\s{0,40}"
 JWT_KEY_LITERAL = re.compile(r"""(?i)(\b(?:jwt|jsonwebtoken|jose|jws)\.(?:sign|encode|verify|decode)\s{0,40}\(\s{0,40}"""
-                             r"""(?:[^\s,(){}]|%s)(?:[^,(){}\n]|%s){0,199},\s{0,40}"""
-                             r"""(?:(?:%s){0,4}(?:key|secret|signing_key)\s{0,40}=\s{0,40})?(?:[rbfu]{1,2}(?=['"]))?)"""
-                             r"""(['"])((?:\\.|(?!\2)[^\\\n]){1,1024})\2""" % (_GROUP, _GROUP, _KWARG))
+                             r"""(?:(?:[^\s,(){}]|%s)(?:[^,(){}\n]|%s){0,199},\s{0,40}(?:(?:%s){0,4}%s)?|%s)(?:[rbfu]{1,2}(?=['"]))?)"""
+                             r"""(['"])((?:\\.|(?!\2)[^\\\n]){1,1024})\2""" % (_GROUP, _GROUP, _KWARG, _JWT_KW, _JWT_KW))
 # A private key block: the header followed by a base64 body line (raw or \n-escaped).
 PEM_BODY_RE = re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[ \t]*(?:\r?\n|\\r?\\n)"
                          r"(?:[\w-]+:[^\n\\]*(?:\r?\n|\\r?\\n))*[ \t]*[A-Za-z0-9+/]{16,}")
