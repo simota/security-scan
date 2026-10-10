@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -14,11 +15,15 @@ from test_security_scan import import_module
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills/security-scan/scripts"
 GIT = shutil.which("git") or "/usr/bin/git"
+# Never inherit GIT_DIR/GIT_WORK_TREE (set inside git hooks) or the host's config.
+GIT_ENV = {**{k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
+           "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}
 
 
 def git(repo: Path, *args: str) -> None:
     subprocess.run([GIT, "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
-                    "-c", "commit.gpgsign=false", *args], check=True, capture_output=True)
+                    "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", *args],
+                   check=True, capture_output=True, env=GIT_ENV, timeout=30)
 
 
 class RunContractTests(unittest.TestCase):

@@ -4,14 +4,14 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from test_deps_scan_review import DepsScanReviewTests
+import test_deps_scan_review as deps_tests  # module import: its tests are not re-collected
 
 
 class SupplyChainReviewTests(unittest.TestCase):
     # Borrow the fixture helpers without re-running the borrowed class's tests.
-    setUpClass = DepsScanReviewTests.__dict__["setUpClass"]
-    setUp = DepsScanReviewTests.setUp
-    write = DepsScanReviewTests.write
+    setUpClass = deps_tests.DepsScanReviewTests.__dict__["setUpClass"]
+    setUp = deps_tests.DepsScanReviewTests.setUp
+    write = deps_tests.DepsScanReviewTests.write
 
     def findings(self):
         return [(f["severity"], f["location"], f["title"]) for f in self.deps.scan(self.root, False)["findings"]]

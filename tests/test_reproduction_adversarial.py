@@ -1,5 +1,6 @@
 """Independent bundle integrity tests. Only inert, owned temporary fixtures run."""
 import importlib.util
+import itertools
 import json
 import os
 from pathlib import Path
@@ -307,7 +308,9 @@ class ReproductionAdversarialTests(unittest.TestCase):
 
     def test_child_reports_timeout_when_a_cycle_times_out(self):
         manifest = self.generate()
-        with patch.object(self.runtime.time, "monotonic", side_effect=[0, 0, 0, 0, 0, 100, 100, 100, 100]):
+        # Five readings at the start, then the clock is past the deadline for good.
+        clock = itertools.chain([0, 0, 0, 0, 0], itertools.repeat(100))
+        with patch.object(self.runtime.time, "monotonic", side_effect=lambda: next(clock)):
             result = self.runtime.repeat(self.bundle, manifest, timeout=10)
         self.assertEqual(result["status"], "timeout")
         self.assertFalse(result["repeatable"])

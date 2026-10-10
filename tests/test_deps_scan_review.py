@@ -46,6 +46,9 @@ class DepsScanReviewTests(unittest.TestCase):
                 self.write(name, value)
                 result = self.deps.scan(self.root, False)
                 self.assertIsInstance(result["findings"], list)
+                if not value.startswith("{"):
+                    # Not an object: recorded as incomplete for that file, never silently clean.
+                    self.assertTrue(any(name in n["reason"] for n in result["not_run"]), result["not_run"])
 
     def test_bom_package_json_is_still_checked(self):
         self.write("package.json", "\ufeff" + json.dumps({"dependencies": {"left": "*"}}))

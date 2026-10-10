@@ -13,7 +13,7 @@ sys.path.insert(0, str(ROOT / "skills/security-scan/scripts"))
 import render  # noqa: E402
 import verification  # noqa: E402
 import verification_workflow as workflow  # noqa: E402
-from test_record_tools_review import WorkflowReviewTests  # noqa: E402
+import test_record_tools_review as record_tests  # noqa: E402  (module import: its tests are not re-collected)
 
 
 class RecordError(ValueError):
@@ -55,7 +55,9 @@ class IdentityAndRetestTests(unittest.TestCase):
         self.assertIn("retest_order_invalid", render._GAP_LABELS)
 
 
-class WorkflowSecondReviewTests(WorkflowReviewTests):
+class WorkflowSecondReviewTests(unittest.TestCase):
+    setUp = record_tests.WorkflowReviewTests.setUp
+    output = record_tests.WorkflowReviewTests.output
     def test_invisible_actor_spelling_is_not_independent(self):
         workflow.initialize(self.data, self.identifier, "coordinator")
         workflow.submit(self.data, self.identifier, self.output())

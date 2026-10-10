@@ -20,6 +20,7 @@ import verification
 import verification_workflow as workflow
 
 
+@unittest.skipUnless(Path("/usr/bin/git").is_file(), "trusted /usr/bin/git required")
 class EvidenceIntegrationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

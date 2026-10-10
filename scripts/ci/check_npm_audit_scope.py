@@ -20,9 +20,6 @@ class NpmAuditScopeTests(unittest.TestCase):
         if not executable:
             raise RuntimeError("trusted npm is not installed")
         cls.npm = Path(executable).resolve()
-        cls.audit_report = cls.npm.parent.parent / "node_modules/@npmcli/arborist/lib/audit-report.js"
-        if not cls.audit_report.is_file():
-            raise RuntimeError("npm installation does not expose the offline audit test hook")
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory(prefix="security-scan-npm-scope-")
@@ -32,22 +29,45 @@ class NpmAuditScopeTests(unittest.TestCase):
         self.root.mkdir()
         self.payload = self.base / "payload.json"
         hook = self.base / "offline-audit.cjs"
+        # Capture the bulk-advisory request body at the HTTP layer instead of
+        # calling npm internals, whose private functions change between releases.
+        # No byte leaves the process: every request fails after its body is read.
         hook.write_text("""
+const fs = require('fs');
+const zlib = require('zlib');
+const { EventEmitter } = require('events');
 const blocked = () => { throw new Error('Network disabled by offline regression test'); };
+function capture(...args) {
+  const options = args.find((a) => a && typeof a === 'object' && !(a instanceof URL)) || {};
+  const target = String(args.find((a) => typeof a === 'string' || a instanceof URL) || options.path || '');
+  const request = new EventEmitter();
+  const chunks = [];
+  request.write = (chunk) => { if (chunk) chunks.push(Buffer.from(chunk)); return true; };
+  request.end = (chunk) => {
+    if (chunk) chunks.push(Buffer.from(chunk));
+    if (target.includes('/-/npm/v1/security/advisories/bulk')) {
+      let body = Buffer.concat(chunks);
+      try { body = zlib.gunzipSync(body); } catch (error) { /* not compressed */ }
+      fs.writeFileSync(process.env.SECURITY_SCAN_TEST_PAYLOAD, body);
+    }
+    process.nextTick(() => request.emit('error', new Error('Network disabled by offline regression test')));
+    return request;
+  };
+  for (const name of ['setHeader', 'setTimeout', 'setNoDelay', 'setSocketKeepAlive', 'removeHeader', 'flushHeaders']) {
+    request[name] = () => request;
+  }
+  request.abort = request.destroy = () => request;
+  request.getHeader = () => undefined;
+  return request;
+}
 for (const name of ['http', 'https']) {
   const module = require(name);
-  module.request = module.get = blocked;
+  module.request = capture;
+  module.get = blocked;
 }
 require('net').Socket.prototype.connect = blocked;
 require('tls').connect = blocked;
 globalThis.fetch = blocked;
-const fs = require('fs');
-const AuditReport = require(""" + json.dumps(str(self.audit_report)) + """);
-AuditReport.load = async (tree, opts) => {
-  const report = new AuditReport(tree, opts);
-  fs.writeFileSync(process.env.SECURITY_SCAN_TEST_PAYLOAD, JSON.stringify(report.prepareBulkData()));
-  return report;
-};
 """, encoding="utf-8")
         config = self.base / "empty.npmrc"
         config.write_text("", encoding="utf-8")
@@ -81,6 +101,12 @@ AuditReport.load = async (tree, opts) => {
         path.write_text(json.dumps(lock), encoding="utf-8")
         return path
 
+    def assertOnlyNetworkBlocked(self, collector):
+        # The blocked request makes npm report an error object; any other
+        # not_run reason (workspaces, invalid input) means scope was refused.
+        self.assertEqual([n["reason"] for n in collector.not_run],
+                         ["package-lock.json: audit returned an error object"])
+
     def audit(self, lock, config="", env=None):
         (self.root / ".npmrc").write_text(config, encoding="utf-8")
         self.payload.unlink(missing_ok=True)
@@ -95,19 +121,22 @@ AuditReport.load = async (tree, opts) => {
                 with self.subTest(version=version, config=config):
                     collector = self.audit(self.fixture(version), config,
                                            {"NODE_ENV": "production", "NPM_CONFIG_WORKSPACES": "false"})
-                    self.assertEqual(collector.not_run, [])
+                    self.assertOnlyNetworkBlocked(collector)
                     self.assertEqual(json.loads(self.payload.read_text()),
                                      {"root-dep": ["1.0.0"], "dev-dep": ["1.0.0"],
                                       "orphan-dep": ["1.0.0"]})
 
-    def test_inherited_workspace_filters_fail_before_advisory_io(self):
+    def test_inherited_workspace_filters_cannot_narrow_the_audit(self):
+        # The audit runs on a copy with empty user/global config and no
+        # npm_config_* variables, so a repository or environment workspace
+        # selector cannot drop packages from the advisory request.
         for config, env in (("workspace=SYNTHETIC_SELECTED_WORKSPACE\n", {}),
                             ("", {"NPM_CONFIG_WORKSPACE": "SYNTHETIC_SELECTED_WORKSPACE"}),
                             ("", {"npm_config_workspace": "SYNTHETIC_SELECTED_WORKSPACE"})):
             with self.subTest(config=config, env=env):
                 collector = self.audit(self.fixture(3), config, env)
-                self.assertTrue(collector.not_run)
-                self.assertFalse(self.payload.exists())
+                self.assertOnlyNetworkBlocked(collector)
+                self.assertEqual(set(json.loads(self.payload.read_text())), {"root-dep", "dev-dep", "orphan-dep"})
                 self.assertNotIn("SYNTHETIC_SELECTED_WORKSPACE", json.dumps(collector.not_run))
 
     def test_prefix_keeps_a_nested_single_project_at_its_own_lock(self):
@@ -115,7 +144,7 @@ AuditReport.load = async (tree, opts) => {
             "workspaces": ["project"], "dependencies": {"outer-dep": "1.0.0"}}), encoding="utf-8")
         (self.base / ".npmrc").write_text("workspace=root-fixture\n", encoding="utf-8")
         collector = self.audit(self.fixture(3))
-        self.assertEqual(collector.not_run, [])
+        self.assertOnlyNetworkBlocked(collector)
         self.assertEqual(set(json.loads(self.payload.read_text())), {"root-dep", "dev-dep", "orphan-dep"})
 
 

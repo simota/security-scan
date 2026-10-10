@@ -113,8 +113,9 @@ python3 scripts/ci/check_npm_audit_scope.py -v
 
 Default tests mock advisory subprocesses. The optional npm test invokes a
 trusted installed npm, mocks its advisory layer, blocks network calls and
-checks the actual package payload for lockfile versions 1, 2 and 3. It also
-checks that inherited workspace selectors fail before advisory I/O.
+checks the actual package payload for lockfile versions 1, 2 and 3, captured
+from the advisory request body. It also checks that inherited workspace
+selectors cannot narrow that payload, since the audit runs on an isolated copy.
 The optional browser test aborts network
 requests and renders only an inert local fixture. It verifies that HTML-like
 finding titles and source snippets survive JSON decoding and that the dashboard
