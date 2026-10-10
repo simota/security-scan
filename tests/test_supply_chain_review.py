@@ -28,7 +28,8 @@ class SupplyChainReviewTests(unittest.TestCase):
                    "      - uses: actions/checkout@" + sha + "\n        with:\n          ref: ${{ github.head_ref }}\n")
         self.write(".github/workflows/wr.yml",
                    "on:\n  workflow_run:\n    workflows: [CI]\njobs:\n  x:\n    runs-on: ubuntu-latest\n    steps:\n"
-                   "      - uses: actions/download-artifact@" + sha + "\n")
+                   "      - uses: actions/download-artifact@" + sha + "\n"
+                   "        with:\n          run-id: ${{ github.event.workflow_run.id }}\n")
         self.write(".github/workflows/safe.yml",
                    "on: pull_request\njobs:\n  j:\n    runs-on: [self-hosted]\n    steps:\n"
                    "      - uses: actions/checkout@" + sha + "\n        with:\n"

@@ -41,9 +41,9 @@ Dockerfiles and Compose files:
 | Install-time scripts, `allow-plugins: true` | Dependency code runs on every install, including CI |
 | Actions not pinned to a commit SHA, or with no version at all | A moved or hijacked tag runs with the pipeline's secrets |
 | `pull_request_target`, `workflow_run`, event text inside `run:` or `github-script` | Outsider-controlled input reaches a privileged pipeline |
-| A privileged workflow (or a local workflow/action it calls) checking out the PR head, downloading the triggering run's artifacts, or running on a self-hosted runner | The "pwn request": fork code runs with secrets and a write token |
+| A privileged workflow (or a local workflow/action it calls) checking out the PR head (with `actions/checkout` or `git`/`gh pr checkout` in `run:`), downloading the triggering run's artifacts (`run-id:`), or running on a self-hosted runner; Confirmed when a later step builds or runs the checkout | The "pwn request": fork code runs with secrets and a write token |
 | `permissions: write-all`, `secrets: inherit` to another repository's workflow | One compromised step or repository gets every scope or secret |
-| Unpinned base images (including `ARG` defaults) and Compose images, `ADD <url>` without `--checksum`, `curl … \| sh` in builds | The build executes whatever is served that day |
+| Unpinned base images (including `ARG` defaults), Compose images and workflow `container:`/`services:`/`docker://` images, `ADD <url>` without `--checksum`, `curl … \| sh` in builds | The build executes whatever is served that day |
 | Known vulnerabilities (`--audit`) | Advisories matched against the exact locked versions |
 | Malicious packages (`--audit` with osv-scanner) | OSV includes OpenSSF malicious-package reports (`MAL-` IDs), reported as High |
 | Abandoned packages (Composer) | No fixes will come |
@@ -53,6 +53,10 @@ Dockerfiles and Compose files:
 when OSV covered the lock). `npm audit` and `pip-audit` run only as fallbacks
 for locks OSV did not cover: npm on single-project locks, pip-audit on plain
 `name==version` requirements.
+Generated-output directories (`build`, `dist`, `target`, `vendor`, `.next`,
+`.nuxt`, `.cache*`) are not scanned; when one directly holds a manifest or
+lockfile, `not_run` names it so a first-party package there can be scanned
+separately. Files over 64 MiB are not read and are listed the same way.
 Missing tools are listed under `not_run`; say so in the report rather than
 implying the audit was complete. Audits query public advisory databases with
 the package list, so they need network access; ask before running them if the

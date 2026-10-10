@@ -292,7 +292,7 @@ class AuditBoundaryTests(unittest.TestCase):
         self.write("package.json", {})
         self.write("pnpm-workspace.yaml", 'packages: ["apps/*"]\n')
         self.write("pnpm-lock.yaml", "lockfileVersion: 9.0\n")
-        member = self.write("apps/site/package.json", {})
+        member = self.write("apps/site/package.json", {"dependencies": {"left": "1.0.0"}})
         c = self.collector()
         self.deps.check_lockfile(c, member)
         self.assertFalse(c.findings)
