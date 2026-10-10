@@ -44,7 +44,7 @@ class RunContractReviewTests(unittest.TestCase):
         low = copy.deepcopy(data["findings"][0])
         data["findings"][0]["severity"] = "Low"
         data["findings"].append(dict(low, id="F-002", severity="High"))
-        self.assertIn("F-*: number code findings in severity order (High first), then path", self.problems(data))
+        self.assertIn("F-*: number code findings in severity order (High first), then path and line", self.problems(data))
 
     def test_verification_needs_four_claims_and_a_falsification_check(self):
         data = self.build()
@@ -76,7 +76,7 @@ class RunContractReviewTests(unittest.TestCase):
         data["findings"][0]["severity"] = "Low"
         data["findings"].append(dict(high, id="F-002", severity="High",
                                      validation={"verdict": "FalsePositive", "evidence": "ruled out", "method": "review"}))
-        self.assertNotIn("F-*: number code findings in severity order (High first), then path", self.problems(data))
+        self.assertNotIn("F-*: number code findings in severity order (High first), then path and line", self.problems(data))
 
     def test_rerunning_capture_without_new_paths_leaves_the_record_untouched(self):
         self.build()

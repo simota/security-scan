@@ -144,7 +144,7 @@ def check(data, out_dir, pdf=True, allow=()):
             and not (isinstance(f.get("validation"), dict)
                      and f["validation"].get("verdict") in ("FalsePositive", "NotApplicable"))]
     if keys != sorted(keys):
-        add("F-*: number code findings in severity order (High first), then path")
+        add("F-*: number code findings in severity order (High first), then path and line")
 
     stamp = data.get("dependency_scan")
     if not isinstance(stamp, dict) or stamp.get("tool") != "deps_scan.py":
