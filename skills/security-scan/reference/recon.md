@@ -131,11 +131,13 @@ secret handling, deployment artifacts.
 
 ## 9. Dependencies
 
-The audit command for each ecosystem present (`composer audit`, `npm audit` /
-`yarn npm audit` / `pnpm audit`, `pip-audit`, `bundle audit`, `govulncheck`,
-`cargo audit`, `osv-scanner`). They need network access to vulnerability
-databases; if that is unavailable, record the versions and say the audit was not
-run.
+Run `scripts/deps_scan.py <repo> --out <out>/deps.json` for the inventory; the
+advisory audit is `deps_scan.py --audit` at the end of REVIEW
+(`reference/dependencies.md`). Do not run ecosystem audit tools such as
+`cargo audit`, `bundle audit` or `npm audit` against the checkout yourself:
+`deps_scan.py` runs only the ones it can isolate and records the rest in
+`not_run`. The audit needs network access to vulnerability databases; if that
+is unavailable, record the versions and say the audit was not run.
 
 ## 10. Rules the app enforces — input to the invariant ledger
 

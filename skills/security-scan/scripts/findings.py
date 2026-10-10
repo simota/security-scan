@@ -18,7 +18,8 @@ correct a result), and the other list sections (`checked_ok`, `decisions`,
 entries from those lists, and an entry that is not recorded is refused. FINDINGS is
 created when absent and written atomically, under the same writer lock as
 verification_workflow.py, only if no other writer changed it meanwhile. Profiles and test runs require a captured version-2 record.
-`schema_version`, `assessment` and `meta.commit` come only from evidence_capture.py;
+`schema_version`, `assessment`, `meta.commit` and `kind: "source"` evidence come only from
+evidence_capture.py (a fragment may change only a source record's `summary`);
 workflow journals come only from verification_workflow.py. The merged report
 must pass render.py's schema check
 before anything is written.
@@ -27,6 +28,9 @@ Finding text describes the weakness, not an attack: the request shape is the
 method, path and parameter names, with placeholders such as `<other tenant's
 order id>`. Literal payload strings in a finding's prose fields are refused, so
 the report never carries a working exploit.
+
+A fragment adds at most five new findings (updates to recorded ones are not
+counted), so a refused write loses at most that batch.
 
 `D-*` findings belong to deps_scan.py: a fragment may only add `validation` or
 `verification` to an existing `D-*` ID, never create one or change its other fields.
@@ -46,6 +50,7 @@ import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import render  # noqa: E402
+from contract_check import read_regular  # noqa: E402
 from expert import derive_expert  # noqa: E402
 
 LISTS = ("perspectives", "checked_ok", "decisions", "limitations", "next_steps")
@@ -59,22 +64,35 @@ EXPERT_FIELDS = {"version", "mode", "host", "consent", "preflight", "spawns", "r
 RESERVED_FINDING = {"verification_workflow", "verdict", "source_link", "snippet"}
 # D-* findings belong to deps_scan.py; a fragment may only record their review.
 DEP_REVIEW = {"id", "validation", "verification"}
+# Captured source evidence belongs to evidence_capture.py; a fragment may only reword it.
+SOURCE_EDITABLE = {"id", "summary"}
+# SKILL.md: write results in batches of one to five findings, so a refused write loses at most one batch.
+MAX_NEW_FINDINGS = 5
 # Merged finding ids match contract_check.py CODE_ID / DEP_ID (ASCII digits, no padding or case variants).
 FINDING_ID = re.compile(r"[FD]-[0-9]{3}")
 PROSE = ("title", "actor", "request", "impact", "fix")
 # Literal attack strings, not descriptions of them. Prose names the weakness
 # and the parameter; the payload itself never belongs in the report.
 PAYLOAD = re.compile(
-    r"<script\b|javascript:(?!\s|$)|onerror\s*=|'\s*(?:or|and)\s+['\d]|union\s+select|"
-    r"(?:\.\./){2,}|;\s*(?:rm|curl|wget|nc|bash|sh)\s|\$\(\s*(?:curl|wget|id|cat)\b|"
-    r"\{\{\s*\d+\s*\*\s*\d+\s*\}\}|169\.254\.169\.254|/etc/passwd",
+    r"<script\b|<(?:svg|img|iframe|body|details|video|audio|input|object)\b[^>]*\bon[a-z]+\s*=|"
+    r"\bon(?:error|load)\s*=|javascript:(?!\s|$)|"
+    # SQL tautologies (' OR '1'='1, " or "a"="a, OR 1=1), not prose such as "'admin' or 'member'".
+    r"\b(?:or|and)\s+(['\"]?)(\w+)\1\s*=\s*['\"]?\2\b|union\s+(?:all\s+)?select\b|"
+    # Traversal: repeated ../ or ..\\, or any URL-encoded segment; a single "../" is prose.
+    r"(?:\.\.[/\\]){2,}|\.\.(?:%2f|%5c)|%2e%2e(?:%2f|%5c|[/\\])|"
+    r";\s*(?:rm|curl|wget|nc|bash|sh)\s|[;|]\s*(?:id|whoami)\s*(?:$|[;&`])|\$\(\s*(?:curl|wget|id|cat)\b|"
+    # Template and expression probes.
+    r"\{\{\s*\d+\s*\*\s*\d+\s*\}\}|[$#]\{\s*\d+\s*\*\s*\d+\s*\}|"
+    r"\{\{\s*(?:config|self|request|settings|lipsum|cycler)\b|\$\{\s*(?:jndi|env|java|script):|"
+    r"169\.254\.169\.254|/etc/(?:passwd|shadow)\b",
     re.IGNORECASE,
 )
 
 
 def read_json(path, raw=None):
     try:
-        raw = Path(path).read_bytes() if raw is None else raw
+        # A FIFO or device would block or stream forever; only a regular file is read.
+        raw = read_regular(path) if raw is None else raw
         value = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object)
         # Deeper input would overflow copy/validation recursion later.
         if render.json_depth(value) > render.MAX_JSON_DEPTH:
@@ -96,8 +114,11 @@ def unique_object(pairs):
     return result
 
 
-def fragment_problems(fragment, name):
-    """Check patch structure before applying it, including writer-owned fields."""
+def fragment_problems(fragment, name, base=None):
+    """Check patch structure before applying it, including writer-owned fields.
+
+    base is the report being merged into; captured `source` evidence is checked against it.
+    """
     if not isinstance(fragment, dict):
         return [f"{name}: a fragment must be a JSON object"]
     unsupported = fragment.keys() - {*OBJECTS, *RECORDS, *LISTS, "remove"}
@@ -140,6 +161,16 @@ def fragment_problems(fragment, name):
             if key == "findings" and identifier.startswith("D-") and record.keys() - DEP_REVIEW:
                 problems.append(f"{name}: {identifier}: D-* scanner fields {sorted(record.keys() - DEP_REVIEW)} "
                                 "come only from deps_scan.py; merge only validation/verification")
+            if key == "evidence":
+                problems += source_evidence_problems(record, identifier, name, base)
+    recorded = base.get("findings") if isinstance(base, dict) else None
+    known = {f.get("id") for f in recorded if isinstance(f, dict) and isinstance(f.get("id"), str)} \
+        if isinstance(recorded, list) else set()
+    new = {r.get("id") for r in fragment.get("findings", []) if isinstance(r, dict)
+           and isinstance(r.get("id"), str)} - known
+    if len(new) > MAX_NEW_FINDINGS:
+        problems.append(f"{name}: {len(new)} new findings in one fragment; write at most {MAX_NEW_FINDINGS} "
+                        "per fragment and merge each batch before writing the next")
     pending = [fragment]
     while pending:
         value = pending.pop()
@@ -153,16 +184,36 @@ def fragment_problems(fragment, name):
     return problems or payload_problems(fragment, name)
 
 
+def source_evidence_problems(record, identifier, name, base):
+    """Captured source evidence belongs to evidence_capture.py; a fragment may only reword its summary."""
+    recorded = base.get("evidence") if isinstance(base, dict) else None
+    existing = next((r for r in recorded if isinstance(r, dict) and r.get("id") == identifier), None) \
+        if isinstance(recorded, list) else None
+    if isinstance(existing, dict) and existing.get("kind") == "source":
+        changed = sorted(k for k in record.keys() - SOURCE_EDITABLE if record[k] != existing.get(k))
+        if changed:
+            return [f"{name}: evidence {identifier}: captured source fields {changed} come only from "
+                    "evidence_capture.py; a fragment may change only its summary"]
+    elif record.get("kind") == "source":
+        return [f"{name}: evidence {identifier}: source evidence is created only by evidence_capture.py; "
+                "capture the path and cite the ID it prints"]
+    return []
+
+
 def payload_problems(fragment, name):
     problems = []
+    hint = "contains a literal attack string; describe the weakness and name the parameter with a placeholder instead"
     for f in fragment.get("findings", []):
         if not isinstance(f, dict):
             continue
-        for key in PROSE:
-            value = f.get(key)
+        validation = f.get("validation") if isinstance(f.get("validation"), dict) else {}
+        fields = [(key, f.get(key)) for key in PROSE] + [("validation.evidence", validation.get("evidence"))]
+        for key, value in fields:
             if isinstance(value, str) and PAYLOAD.search(value):
-                problems.append(f"{name}: {f.get('id', '?')}.{key} contains a literal attack string; "
-                                "describe the weakness and name the parameter with a placeholder instead")
+                problems.append(f"{name}: {f.get('id', '?')}.{key} {hint}")
+    for i, value in enumerate(fragment.get("checked_ok", [])):
+        if isinstance(value, str) and PAYLOAD.search(value):
+            problems.append(f"{name}: checked_ok[{i}] {hint}")
     return problems
 
 
@@ -254,7 +305,7 @@ def main(argv=None):
     args = p.parse_args(argv)
 
     try:
-        original = args.findings.read_bytes() if args.findings.exists() else None
+        original = read_regular(args.findings) if os.path.lexists(args.findings) else None
         base = read_json(args.findings, original) if original is not None else {}
         fragments = [(str(path), read_json(path)) for path in args.fragments]
     except (render.SchemaError, OSError) as e:
@@ -264,7 +315,7 @@ def main(argv=None):
     known = {f.get("id") for f in base.get("findings", []) if isinstance(f, dict) and isinstance(f.get("id"), str)} \
         if isinstance(base, dict) and isinstance(base.get("findings"), list) else set()
     for name, fragment in fragments:
-        refused += fragment_problems(fragment, name)
+        refused += fragment_problems(fragment, name, base)
         if isinstance(fragment, dict) and isinstance(fragment.get("findings"), list):
             refused += [f"{name}: {f['id']}: D-* findings are created only by deps_scan.py --into"
                         for f in fragment["findings"] if isinstance(f, dict) and isinstance(f.get("id"), str)

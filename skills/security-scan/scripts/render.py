@@ -21,11 +21,11 @@ import tempfile
 import time
 from collections import Counter
 from pathlib import Path, PurePosixPath
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 # Sibling modules must import under python3 -I / PYTHONSAFEPATH as well.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from url_redaction import URL_RE, redact_urls
+from url_redaction import URL_RE, has_url_credentials, redact_urls
 from verification import CLAIMS, derive_verification, validate_verification
 from verification_workflow import derive_workflow, validate_workflows
 from evidence_integrity import verify_evidence
@@ -68,6 +68,7 @@ LABELS = {
         "total": "Total findings",
         "open_hm": "Open High/Medium",
         "open_summary": "{n} open findings are recorded; none are High or Medium.",
+        "open_summary_one": "1 open finding is recorded; it is not High or Medium.",
         "summary_line": "{total} findings: {counts}. {open_hm} High/Medium findings remain open.",
         "search": "Search", "all": "All",
         "count": "Count",
@@ -158,6 +159,10 @@ LABELS['en'].update({'eyebrow': 'SECURITY REVIEW',
                  'the secure outcome.',
  'verify_first_note': 'Confirm reachability, preconditions and impact; record evidence before deciding '
                       'on a fix.',
+ 'verify_review_note': 'The recorded evidence is otherwise sufficient, but it needs an independent reviewer: have a '
+                       'second person re-read it and record the review before deciding on a fix.',
+ 'more_high': '{n} more open High findings in this part are listed in the findings register.',
+ 'more_high_one': '1 more open High finding in this part is listed in the findings register.',
  'missing_fix': 'Fix direction not recorded. Define the remediation after reviewing the evidence.',
  'no_open': 'No open findings are recorded. This does not establish that the system is secure.',
  'no_findings': 'No included findings are recorded. Review the scope and limitations before drawing '
@@ -215,6 +220,7 @@ LABELS['en'].update({'eyebrow': 'SECURITY REVIEW',
  'no_script': 'Enable JavaScript to use the interactive dashboard, or open the assessment for the '
               'complete report.',
  'risk_summary': '{n} open High / Medium findings need attention.',
+ 'risk_summary_one': '1 open High / Medium finding needs attention.',
  'jump_findings': 'Jump to findings',
  'findings_register': 'Findings register',
  'all_verdicts': 'All validations'})
@@ -228,6 +234,8 @@ LABELS['ja'].update({'eyebrow': 'SECURITY REVIEW',
  'verify_first': '先に検証する',
  'fix_now_note': 'Valid・Confirmed に加え、構造化された検証根拠がそろっています。記録された対応方針を基に修正し、安全な結果を確認してください。',
  'verify_first_note': '到達経路・成立条件・影響を確認し、根拠を記録してから修正要否を判断してください。',
+ 'verify_review_note': '記録された根拠はそろっていますが、別の確認者による再読が必要です。レビューを記録してから修正方針を決めてください。',
+ 'more_high': 'この区分には未対応の High がほかに {n} 件あります（指摘一覧に記載）。',
  'missing_fix': '対応方針が未記録です。根拠を確認し、修正内容を具体化してください。',
  'no_open': '未対応の指摘は記録されていません。システムの安全性を保証するものではありません。',
  'no_findings': '集計対象の指摘はありません。診断範囲と制約を確認してから判断してください。',
@@ -287,6 +295,7 @@ VERIFICATION_LABELS = {
     "en": {
         "v_title": "Verification record", "v_retest": "Remediation verification",
         "v_summary": "Recorded evidence: {static} static-supported, {runtime} locally reproduced, {pending} requiring further verification. {retested} fixes have complete retest records.",
+        "v_summary_one": "Recorded evidence: {static} static-supported, {runtime} locally reproduced, {pending} requiring further verification. {retested} fix has a complete retest record.",
         "v_note": "These labels check the supplied evidence record, not its truth. Local results do not establish deployed behavior. Counts exclude ruled-out findings.",
         "v_legacy": "Detailed verification evidence not recorded (legacy)",
         "v_incomplete": "Verification incomplete", "v_static_supported": "Supported by static evidence",
@@ -977,9 +986,25 @@ def finding_part(finding):
     return "deps" if str(finding["id"]).startswith("D-") else "code"
 
 
+_ANCHOR_INDEX = [None, {}]  # (findings list, {id(finding): position}) of the last report
+
+
 def finding_anchor(data, finding):
     """Generated anchors never interpret finding IDs as HTML or CSS."""
-    return "finding-" + str(next(i for i, f in enumerate(data["findings"], 1) if f is finding))
+    findings = data["findings"]
+    # One index per findings list, revalidated on every lookup: a reordered or
+    # edited list rebuilds it rather than returning a stale position.
+    for attempt in range(2):
+        cached, index = _ANCHOR_INDEX
+        position = index.get(id(finding)) if cached is findings else None
+        if position is not None and position <= len(findings) and findings[position - 1] is finding:
+            return "finding-" + str(position)
+        if attempt == 0:
+            index = {}
+            for i, f in enumerate(findings, 1):
+                index.setdefault(id(f), i)
+            _ANCHOR_INDEX[:] = [findings, index]
+    raise StopIteration(finding.get("id") if isinstance(finding, dict) else finding)
 
 
 def action_kind(finding, verification=None, workflow=None):
@@ -998,12 +1023,21 @@ def public_verification_state(state):
     return {key: state[key] for key in ("level", "retest", "gaps")}
 
 
+VALIDATION_FIELDS = ("verdict", "evidence", "method")
+
+
 def display_finding(finding, state):
     """Only curated verification details enter the report's embedded payload."""
     public = {key: finding[key] for key in (
         "id", "title", "severity", "confidence", "location", "status", "category",
-        "actor", "request", "impact", "fix", "validation", "verdict", "previous_validation",
-        "references", "source_link", "snippet", "cwe") if key in finding}
+        "actor", "request", "impact", "fix", "verdict", "source_link", "snippet", "cwe") if key in finding}
+    # Validation records may carry extension keys (raw HTTP dumps, scanner
+    # output): only the displayed fields enter the embedded payload.
+    for key in ("validation", "previous_validation"):
+        if isinstance(finding.get(key), dict):
+            public[key] = {k: finding[key][k] for k in VALIDATION_FIELDS if k in finding[key]}
+    if "references" in finding:
+        public["references"] = [public_reference(r) for r in finding["references"]]
     public["part"] = finding_part(finding)
     public["_verification"] = public_verification_state(state)
     return public
@@ -1074,6 +1108,20 @@ def plural(L, key, n, **values):
     return L[key + "_one" if n == 1 and key + "_one" in L else key].format(n=n, **values)
 
 
+def accounting_text(L, model, total):
+    if "a_accounting" in L:
+        return L["a_accounting"].format(total=total, **model)
+    return " ".join([plural(L, "a_accounting_total", total, **model),
+                     plural(L, "a_accounting_excluded", model["excluded"]),
+                     plural(L, "a_accounting_unverified", model["unverified"])])
+
+
+def review_only_gap(finding, state):
+    """Verify-first only because the independent evidence review is missing."""
+    return (finding["verdict"] == "Valid" and finding["confidence"] == "Confirmed"
+            and list((state or {}).get("gaps", [])) == ["review_missing"])
+
+
 def unverified_headline(model, L):
     """Unverified and insufficient-verification counts, stated separately (reference/report.md)."""
     n, m = model["unverified"], model["insufficient_high"]
@@ -1093,7 +1141,14 @@ ASSESSMENT_LABELS = {
         "a_high_insufficient_one": "1 High finding has a recorded verdict but insufficient verification.",
         "a_open_summary": "{open_count} findings are open: {fix_now} ready for remediation and {verify_first} needing verification first.",
         "a_open_summary_one": "1 finding is open: {fix_now} ready for remediation and {verify_first} needing verification first.",
-        "a_accounting": "{total} non-excluded findings in total: {open_count} Open, {fixed} Fixed and {accepted} Accepted. {excluded} excluded findings are retained separately. {unverified} non-excluded findings remain Unverified across all statuses.",
+        # English composes the accounting sentence by sentence for singular forms.
+        "a_accounting_total": "{n} non-excluded findings in total: {open_count} Open, {fixed} Fixed and {accepted} Accepted.",
+        "a_accounting_total_one": "1 non-excluded finding in total: {open_count} Open, {fixed} Fixed and {accepted} Accepted.",
+        "a_accounting_excluded": "{n} excluded findings are retained separately.",
+        "a_accounting_excluded_one": "1 excluded finding is retained separately.",
+        "a_accounting_unverified": "{n} non-excluded findings remain Unverified across all statuses.",
+        "a_accounting_unverified_one": "1 non-excluded finding remains Unverified across all statuses.",
+        "a_verify_review_action": "Evidence otherwise sufficient; an independent reviewer must re-read it and record the review.",
         "a_status_note": "Status is the recorded workflow state; Fixed and Accepted do not establish that remediation was independently verified.",
         "a_uncertainty": "Coverage is limited to the recorded scope and checks. Missing coverage is unknown, and no open findings does not establish that the system is secure.",
         "a_limits": "Assessment limits",
@@ -1153,6 +1208,7 @@ ASSESSMENT_LABELS = {
         "a_finding": "指摘事項",
         "a_next_action": "次の対応",
         "a_verify_action": "到達可能性、前提条件、影響を確認し、根拠を記録して妥当性の判定を更新してください。",
+        "a_verify_review_action": "根拠はそろっていますが、別の確認者による再読とその記録が必要です。",
         "a_fix_missing": "対応方針が記録されていません。実装前に修正方針を決めてください。",
         "a_fix_proposal": "記録された対応方針",
         "a_coverage": "記録された確認範囲",
@@ -1312,8 +1368,9 @@ SECRET_RE = re.compile(
 
 SENSITIVE_NAMES = {".npmrc", ".yarnrc", ".yarnrc.yml", ".pypirc", ".netrc", ".git-credentials",
                    "auth.json", "credentials", "credentials.json", "secrets.json", "secrets.yaml", "secrets.yml",
-                   "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"}
-SENSITIVE_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".jks", ".keystore"}
+                   "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", ".pgpass", ".htpasswd", ".dockercfg",
+                   "terraform.tfstate.backup"}
+SENSITIVE_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".tfstate", ".tfvars"}
 PRIVATE_KEY_RE = re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----")
 # The ordinary-character branch must exclude backslashes: otherwise an
 # unterminated quoted value explores exponentially many escape combinations.
@@ -1327,14 +1384,27 @@ def sensitive_path(path):
     name = path.name.lower()
     return (name == ".env" or name.startswith(".env.") or name.endswith(".env")
             or name in SENSITIVE_NAMES or path.suffix.lower() in SENSITIVE_SUFFIXES
+            or name.endswith((".tfstate.backup", ".tfvars.json"))
+            # Docker registry logins: .docker/config.json holds base64 user:password.
+            or name == "config.json" and path.parent.name.lower() == ".docker"
             or any(part.lower() in {".ssh", ".aws", ".kube", "secrets"} for part in path.parts))
 
 
 _KEY_RUN = re.compile(r"[\w.-]+")
 _KEY = re.compile(r"(?i)password|passwd|secret|token|api[_-]?key|private[_-]?key|access[_-]?key|credential")
+# Short names count only as a whole name segment: `pass=`, `db_pwd:` but not `bypass` or `passed`.
+_KEY_END = re.compile(r"(?i)(?:^|[_.-])(?:pass|pwd|passphrase)$")
 _SECRET_TAIL = re.compile(r"""(?i)(['"]?\s*(?:=>|:=|[:=])\s*['"]?)"""
                           r"""(?!\$|[A-Za-z_][\w.]*\(|process\.env|os\.environ|null\b|None\b|true\b|false\b)([^'"\s,;)]{4,})""")
-_QUOTED_TAIL = re.compile(r"""(?i)(['"]?\s*(?:=>|:=|[:=])\s*)(['"])(?:\\.|(?!\2)[^\\\n])*\2""")
+# Python/JS string prefixes (b"...", r'...', f"...") still delimit a literal.
+_QUOTED_TAIL = re.compile(r"""(?i)(['"]?\s*(?:=>|:=|[:=])\s*(?:[rbfu]{1,2}(?=['"]))?)(['"])(?:\\.|(?!\2)[^\\\n])*\2""")
+# A literal fallback default after an environment lookup is a hardcoded secret
+# too: os.environ.get("X", "lit"), getenv('X', 'lit'), ENV['X'] || 'lit',
+# value or "lit", value ?? "lit". Masked on lines that name a secret key.
+_FALLBACK_LITERAL = re.compile(r"""(?i)((?:\b(?:get|getenv|fetch|getProperty|env)\s*\(\s*[^,()\n]{1,200},\s*"""
+                               r"""|\|\|\s*|\?\?\s*|\?:\s*|\bor\s+)(?:[rbfu]{1,2}(?=['"]))?)(['"])(?:\\.|(?!\2)[^\\\n])+\2""")
+# Signed JSON Web Tokens: header.payload.signature, each base64url.
+JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{4,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*")
 
 
 def _sub_keyed(line, tail, repl):
@@ -1348,18 +1418,24 @@ def _sub_keyed(line, tail, repl):
         if run.start() < pos:
             continue
         key = _KEY.search(line, run.start(), run.end())
-        m = key and tail.match(line, run.end())
+        start = key.start() if key else run.start() if _KEY_END.search(run.group()) else None
+        m = start is not None and tail.match(line, run.end())
         if m:
-            out.append(line[pos:key.start()])
-            out.append(repl(line[key.start():run.end()], m))
+            out.append(line[pos:start])
+            out.append(repl(line[start:run.end()], m))
             pos = m.end()
     return "".join(out) + line[pos:] if out else line
 
 
 def redact(line):
     line = redact_urls(line)
+    # Recognizable credentials are masked wherever they appear, keyed or not.
+    line = JWT_RE.sub("********", TOKEN_RE.sub("********", line))
     line = _sub_keyed(line, _QUOTED_TAIL, lambda key, m: key + m.group(1) + m.group(2) + "********" + m.group(2))
-    return _sub_keyed(line, _SECRET_TAIL, lambda key, m: key + m.group(1) + "********")
+    line = _sub_keyed(line, _SECRET_TAIL, lambda key, m: key + m.group(1) + "********")
+    if _KEY.search(line) or any(_KEY_END.search(run.group()) for run in _KEY_RUN.finditer(line)):
+        line = _FALLBACK_LITERAL.sub(lambda m: m.group(1) + m.group(2) + "********" + m.group(2), line)
+    return line
 
 
 MAX_SOURCE_BYTES = 16 * 1024 * 1024
@@ -1395,7 +1471,7 @@ def secret_value(value):
 
 def secret_in_source(rel, text):
     """True when a file would put a secret-looking value into shareable output."""
-    if sensitive_path(rel) or PEM_BODY_RE.search(text) or TOKEN_RE.search(text):
+    if sensitive_path(rel) or PEM_BODY_RE.search(text) or TOKEN_RE.search(text) or JWT_RE.search(text):
         return True
     config = config_source(rel)
     for line in text.split("\n"):
@@ -1404,22 +1480,82 @@ def secret_in_source(rel, text):
             m = _SECRET_NAME.search(name) and _LITERAL_TAIL.match(line, run.end())
             if m and secret_value(m.group(2) if m.group(1) else m.group(3) if config else ""):
                 return True
-        for m in URL_RE.finditer(line):
-            try:
-                parts = urlsplit(m.group("url").replace("\\/", "/"))
-                # https://TOKEN@host carries a credential as the user name alone.
-                if parts.password or parts.username and parts.scheme.lower() in ("http", "https"):
-                    return True
-            except ValueError:
-                return True
+        # Userinfo, including a password with '/', '?' or '#', a quoted or
+        # percent-encoded one, and scheme-relative //user:pw@host URLs.
+        if has_url_credentials(line):
+            return True
     return False
+
+
+_SECRETISH_RUN = re.compile(r"[A-Za-z0-9_+/-]{12,}={0,2}")
+_QUOTED_LITERAL = re.compile(r"""(['"])([^'"\s]{8,1024})\1""")
+
+
+def secrets_finding(finding):
+    return str(finding.get("category", "")).lower() == "secrets"
+
+
+def secret_candidate(text):
+    """A value that may be an unrecognised secret: a long token mixing letters
+    and digits (keys, hex, base64), an all-caps name-like token, or a quoted
+    literal that is not a placeholder, version, path or URL. Over-matching only
+    withholds an excerpt."""
+    for m in _SECRETISH_RUN.finditer(text):
+        token = m.group()
+        if (re.search(r"\d", token) and re.search(r"[A-Za-z]", token)
+                or "_" in token and token.upper() == token and re.search(r"[A-Z]", token)):
+            return True
+    return any(secret_value(m.group(2)) for m in _QUOTED_LITERAL.finditer(text) if "*" * 8 not in m.group(2))
+
+
+def source_base(url):
+    """meta.source_url without a query or fragment: they can carry access tokens
+    (?private_token=...) and would end up before the appended path."""
+    parts = urlsplit(url)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", "")).rstrip("/")
+
+
+_SECRET_PARAM = re.compile(r"(?i)token|secret|passw|pwd|key|auth|credential|signature|^sig$|session|^code$"
+                           r"|jwt|private|^x-amz-|^x-goog-|^state$")
+
+
+def _public_params(text):
+    """Query/fragment parameters without credential-like names or values."""
+    kept = []
+    for item in text.split("&"):
+        name, _, value = item.partition("=")
+        name, value = unquote(name), unquote(value)
+        if (_SECRET_PARAM.search(name) or TOKEN_RE.search(value) or JWT_RE.search(value)
+                or secret_candidate(value) or has_url_credentials(value)):
+            continue
+        kept.append(item)
+    return "&".join(kept)
+
+
+def public_href(url):
+    """A reference URL without credential-bearing query or fragment parameters
+    (?private_token=..., #access_token=..., signatures); ordinary parameters
+    and plain anchors such as #L10-L20 are kept unchanged."""
+    parts = urlsplit(url)
+    fragment = parts.fragment
+    fragment = (_public_params(fragment) if "=" in fragment
+                else "" if TOKEN_RE.search(fragment) or JWT_RE.search(fragment) else fragment)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, _public_params(parts.query) if parts.query else "",
+                       fragment))
+
+
+def public_reference(ref):
+    """A reference as displayed: credential-free href; a URL used as the title is cleaned too."""
+    title = ref["title"]
+    return {"type": ref["type"], "url": public_href(ref["url"]),
+            "title": redact(title) if title else title}
 
 
 def attach_sources(data, repo, context=3):
     """Attach safe links and best-effort redacted excerpts; omit sensitive sources."""
     base = data["meta"].get("source_url") or ""
     if base:
-        base = http_url(base, "meta.source_url").rstrip("/")
+        base = source_base(http_url(base, "meta.source_url"))
     root = Path(repo).resolve() if repo else None
     for f in data["findings"]:
         f.pop("source_link", None)
@@ -1434,7 +1570,7 @@ def attach_sources(data, repo, context=3):
         if base:
             link = f"{base}/{quote(rel, safe='/')}#L{start}" + (f"-L{end}" if end != start else "")
             f["source_link"] = http_url(link, "source_link")
-        if not root or sensitive_path(rel) or str(f.get("category", "")).lower() == "secrets":
+        if not root or sensitive_path(rel):
             continue
         path = (root / rel).resolve()
         if root not in path.parents or not path.is_file() or sensitive_path(path.relative_to(root)):
@@ -1461,6 +1597,12 @@ def attach_sources(data, repo, context=3):
         requested_hi = hi
         hi = min(hi, lo + 199)
         redacted = [redact(lines[i - 1]) for i in range(lo, hi + 1)]
+        # A Secrets finding (a hardcoded credential, but also weak crypto or TLS)
+        # keeps its excerpt unless a cited line still holds a secret-like value
+        # that masking did not recognise, such as a bare key on its own.
+        if secrets_finding(f) and any(secret_candidate(redacted[i - lo])
+                                      for i in range(start, min(end, hi) + 1)):
+            continue
         f["snippet"] = {"start": lo, "hit": [start, end],
                         "lines": [line[:240] for line in redacted],
                         "truncated": requested_hi > hi or any(len(line) > 240 for line in redacted)}
@@ -1483,7 +1625,8 @@ def refs_html(f):
     items = []
     if f.get("source_link"):
         items.append(("source", http_url(f["source_link"], "source_link"), ""))
-    items += [(r["type"], http_url(r["url"], "references.url"), r["title"]) for r in f.get("references", [])]
+    items += [(r["type"], http_url(r["url"], "references.url"), r["title"])
+              for r in map(public_reference, f.get("references", []))]
     if not items:
         return ""
     lis = "".join(f"<li><span class='rt'>{esc(t)}</span> <a href='{esc(u)}'>{esc(title or u)}</a></li>"
@@ -1610,7 +1753,7 @@ def verification_view(data, finding, state, lang):
         match = LOC_RE.match(normalized_location)
         path = match.group("path") if match else normalized_location
         withheld = (sensitive_path(path) or sensitive_path(record.get("source_path", ""))
-                    or finding.get("category", "").lower() == "secrets")
+                    or secrets_finding(finding) and secret_candidate(text(record.get("summary"))))
         evidence_items.append(join(text(evidence_id) + " · " + value("kind_", record["kind"]),
                                    L["v_location"] + ": " + text(record["location"]),
                                    L["v_commit"] + ": " + text(record["commit"]),
@@ -1892,7 +2035,8 @@ def verification_html(view, L):
 def verification_summary_parts(model, L):
     counts = model["verification_counts"]
     return [{"key": part, "count": counts[part]} if part in counts else {"text": part}
-            for part in re.split(r"\{(static|runtime|pending|retested)\}", L["v_summary"])]
+            for part in re.split(r"\{(static|runtime|pending|retested)\}",
+                                 L["v_summary_one" if counts["retested"] == 1 and "v_summary_one" in L else "v_summary"])]
 
 
 def integrity_summary_view(states, findings, L):
@@ -1933,7 +2077,7 @@ def render_assessment_html(data, L, lang, integrity=None):
     summary = L["sentence_sep"].join([plural(L, "a_high_unverified", model["unverified_high"]),
                         plural(L, "a_high_insufficient", model["insufficient_high"]),
                         plural(L, "a_open_summary", model["open_count"], **model)])
-    accounting = L["a_accounting"].format(total=len(fs), **model)
+    accounting = accounting_text(L, model, len(fs))
 
     def value(text):
         return esc(text) if str(text or "").strip() else f"<span class='empty-value'>{esc(L['a_not_recorded'])}</span>"
@@ -2042,11 +2186,16 @@ def render_assessment_html(data, L, lang, integrity=None):
     def card(f, is_excluded=False):
         state_keys = ("severity", "status", "confidence", "verdict")
         state_header = "".join(f"<th scope='col'>{esc(L[k])}</th>" for k in state_keys)
-        state_values = "".join(f"<td>{badge(f) if k == 'severity' else esc(f[k])}</td>" for k in state_keys)
+        # An excluded record's workflow status is not an open item: say Excluded.
+        state_values = "".join(f"<td>{badge(f) if k == 'severity' else esc(L['excluded_short']) if k == 'status' and is_excluded else esc(f[k])}</td>"
+                               for k in state_keys)
         state = f"<table class='finding-state'><thead><tr>{state_header}</tr></thead><tbody><tr>{state_values}</tr></tbody></table>"
         action = ""
         if f["status"] == "Open" and not is_excluded:
-            action = f"<p class='finding-context'><strong>{esc(L['a_next_action'])}:</strong> {esc(L['a_' + action_kind(f, model['verification'][f['id']], model.get('workflows', {}).get(f['id']))])}</p>"
+            kind = action_kind(f, model['verification'][f['id']], model.get('workflows', {}).get(f['id']))
+            note = (" " + L["a_verify_review_action"] if kind == "verify_first" and "a_verify_review_action" in L
+                    and review_only_gap(f, model["verification"][f["id"]]) else "")
+            action = f"<p class='finding-context'><strong>{esc(L['a_next_action'])}:</strong> {esc(L['a_' + kind])}{esc(note)}</p>"
         context = (f"<p class='finding-context'><strong>{esc(L['location'])}:</strong> <code>{esc(f['location'])}</code></p>"
                    f"<p class='finding-context'><strong>{esc(L['category'])}:</strong> {value(f.get('category'))}</p>")
         if f.get("cwe"):
@@ -2129,8 +2278,42 @@ CHROME_CANDIDATES = [
 ]
 
 
-def to_pdf(html_path, pdf_path):
-    """Print html_path to pdf_path with headless Chrome, else WeasyPrint. Returns the engine used or None."""
+PDF_TIMEOUT_BASE, PDF_TIMEOUT_PER_FINDING, PDF_TIMEOUT_MAX = 120.0, 0.05, 900.0
+
+
+def pdf_timeout(findings=0):
+    """Seconds one engine may take: SECURITY_SCAN_PDF_TIMEOUT, else scaled by report size."""
+    value = os.environ.get("SECURITY_SCAN_PDF_TIMEOUT", "").strip()
+    if value:
+        try:
+            seconds = float(value)
+            if math.isfinite(seconds) and seconds > 0:
+                return seconds
+        except ValueError:
+            pass
+    return min(PDF_TIMEOUT_MAX, PDF_TIMEOUT_BASE + PDF_TIMEOUT_PER_FINDING * max(0, findings))
+
+
+def _running_as_root():
+    return hasattr(os, "geteuid") and os.geteuid() == 0
+
+
+def _tail(text, limit=300):
+    """The last meaningful stderr line(s), on one line, for the diagnostic."""
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    tail = " | ".join(lines[-2:])
+    return redact(tail[-limit:]) if tail else ""
+
+
+def to_pdf(html_path, pdf_path, failures=None, timeout=None):
+    """Print html_path to pdf_path with headless Chrome, else WeasyPrint. Returns the engine used or None.
+
+    failures, when a list, receives one (engine, reason, stderr tail) triple for
+    each engine that was found but failed or timed out, so the caller can tell
+    "no engine" from "engine failed".
+    """
+    failures = [] if failures is None else failures
+    timeout = pdf_timeout() if timeout is None else timeout
     # A previous run's PDF must never survive next to newer HTML.
     Path(pdf_path).unlink(missing_ok=True)
     chrome = os.environ.get("CHROME")
@@ -2141,15 +2324,26 @@ def to_pdf(html_path, pdf_path):
             continue
         pdf = Path(pdf_path)
         pdf.unlink(missing_ok=True)
-        with tempfile.TemporaryDirectory() as profile:
-            proc = subprocess.Popen(
-                [exe, "--headless=new", "--disable-gpu", "--no-pdf-header-footer",
-                 f"--user-data-dir={profile}", f"--print-to-pdf={pdf}", Path(html_path).resolve().as_uri()],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Chrome refuses to start as root without --no-sandbox (containers, CI).
+        sandbox = ["--no-sandbox"] if _running_as_root() else []
+        timed_out = False
+        with tempfile.TemporaryDirectory() as profile, tempfile.TemporaryFile("w+", encoding="utf-8",
+                                                                              errors="replace") as err:
+            try:
+                proc = subprocess.Popen(
+                    [exe, "--headless=new", "--disable-gpu", *sandbox, "--no-pdf-header-footer",
+                     f"--user-data-dir={profile}", f"--print-to-pdf={pdf}", Path(html_path).resolve().as_uri()],
+                    stdout=subprocess.DEVNULL, stderr=err)
+            except OSError as e:
+                failures.append(("chrome", "could not be started", str(e.strerror or e)))
+                continue
             # Chrome on some platforms keeps running after the PDF is written:
             # wait for the file to appear and stop growing, then stop the process.
-            last, deadline = -1, time.monotonic() + 120
-            while time.monotonic() < deadline:
+            last, deadline = -1, time.monotonic() + timeout
+            while True:
+                if time.monotonic() >= deadline:
+                    timed_out = True
+                    break
                 size = pdf.stat().st_size if pdf.exists() else -1
                 if proc.poll() is not None and size <= 0 and (size < 0 or size == last):
                     break  # Exited without writing (or left an empty file): try the next engine.
@@ -2164,16 +2358,29 @@ def to_pdf(html_path, pdf_path):
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.wait()
-        if pdf.exists() and pdf.stat().st_size > 0:
-            return "chrome"
+            if pdf.exists() and pdf.stat().st_size > 0:
+                return "chrome"
+            err.seek(0)
+            detail = _tail(err.read())
+        reason = (f"timed out after {timeout:g} s" if timed_out
+                  else f"exited with status {proc.returncode} without writing a PDF")
+        failures.append(("chrome", reason + (" (as root, with --no-sandbox)" if sandbox else ""), detail))
+        pdf.unlink(missing_ok=True)
     wp = shutil.which("weasyprint")
     if wp:
         try:
-            r = subprocess.run([wp, str(html_path), str(pdf_path)], capture_output=True, text=True, timeout=120)
-        except (subprocess.TimeoutExpired, OSError):
+            r = subprocess.run([wp, str(html_path), str(pdf_path)], capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            failures.append(("weasyprint", f"timed out after {timeout:g} s", ""))
+            Path(pdf_path).unlink(missing_ok=True)
+            return None
+        except OSError as e:
+            failures.append(("weasyprint", "could not be started", str(e.strerror or e)))
             return None
         if r.returncode == 0 and Path(pdf_path).exists():
             return "weasyprint"
+        detail = _tail(r.stderr)
+        failures.append(("weasyprint", f"exited with status {r.returncode} without writing a PDF", detail))
     return None
 
 
@@ -2260,6 +2467,10 @@ var expanded=new Set();
 function el(t,a,txt){var e=document.createElement(t);if(a)Object.keys(a).forEach(function(k){e.setAttribute(k,a[k]);});if(txt!=null)e.textContent=txt;return e;}
 function byId(id){return document.getElementById(id);}
 function fmt(text,values){return text.replace(/\{(\w+)\}/g,function(_,key){return values[key];});}
+function pl(key,n,values){return fmt(n===1&&L[key+'_one']?L[key+'_one']:L[key],values||{n:n});}
+function statusText(f){return excluded(f)?L.excluded_short:f.status;}
+function reviewOnly(f){var proof=ownValue(R.verification,f.id),gaps=proof&&proof.gaps||[];return f.verdict==='Valid'&&f.confidence==='Confirmed'&&gaps.length===1&&gaps[0]==='review_missing';}
+function guidanceText(a,f){return a==='verify_first'&&reviewOnly(f)?L.verify_review_note:L[a+'_note'];}
 function badge(f){return el('span',{'class':'badge '+f.severity},f.severity);}
 function excluded(f){return D.excluded_verdicts.indexOf(f.verdict)>=0;}
 function ownValue(map,key){return map&&Object.prototype.hasOwnProperty.call(map,key)?map[key]:undefined;}
@@ -2272,7 +2483,7 @@ document.querySelectorAll('[data-l]').forEach(function(e){e.textContent=L[e.getA
 byId('theme').onclick=function(){var root=document.documentElement,dark=root.dataset.theme?root.dataset.theme==='dark':window.matchMedia('(prefers-color-scheme: dark)').matches;root.dataset.theme=dark?'light':'dark';};
 var summary=byId('summary');
 summary.appendChild(el('strong',null,D.headline));
-summary.appendChild(el('p',null,F.length?(D.open_hm?fmt(L.risk_summary,{n:D.open_hm}):(R.open_count?fmt(L.open_summary,{n:R.open_count}):L.no_open)):L.no_findings));
+summary.appendChild(el('p',null,F.length?(D.open_hm?pl('risk_summary',D.open_hm):(R.open_count?pl('open_summary',R.open_count):L.no_open)):L.no_findings));
 var verificationSummary=byId('verification-summary'),verificationSentence=el('p');verificationSummary.setAttribute('aria-labelledby','verification-heading');verificationSummary.appendChild(el('h2',{id:'verification-heading'},L.v_title));D.verification_summary.forEach(function(part){verificationSentence.appendChild(part.key?el('strong',{'data-verification-count':part.key},part.count):document.createTextNode(part.text));});verificationSummary.appendChild(verificationSentence);verificationSummary.appendChild(el('p',{'class':'muted'},L.v_note));
 if(D.integrity_summary){var integritySummary=el('div',{'class':'integrity-summary'});integritySummary.appendChild(el('h3',null,L.i_title));integritySummary.appendChild(el('p',null,D.integrity_summary.text));integritySummary.appendChild(el('p',{'class':'muted'},D.integrity_summary.note));verificationSummary.appendChild(integritySummary);}
 function workflowNode(f){var view=ownValue(D.workflow_views,f.id);if(!view)return null;var box=el('div',{'class':'workflow-record'});box.appendChild(el('h4',null,L.w_title));box.appendChild(el('p',{'class':'workflow-status'},L.w_status+': '+view.status));box.appendChild(el('p',{'class':'workflow-next'},L.w_next+': '+view.next_stage));box.appendChild(el('p',{'class':'muted'},L.w_note));if(view.gaps.length){box.appendChild(el('h5',null,L.w_gaps));var ul=el('ul',{'class':'workflow-gaps'});view.gaps.forEach(function(gap){ul.appendChild(el('li',null,gap));});box.appendChild(ul);}view.sections.forEach(function(section){var group=el('section');group.appendChild(el('h5',null,section.title));section.items.forEach(function(item){group.appendChild(el('p',{'class':'prose'},item));});box.appendChild(group);});box.appendChild(el('p',{'class':'muted'},L.w_safety));return box;}
@@ -2280,7 +2491,7 @@ function verificationNode(f){var view=D.verification_views[f.id],box=el('div',{'
 
 [[L.open_hm,D.open_hm,'urgent',L.open_count+': '+R.open_count],[L.needs_validation,R.verify_first,'review',L.fix_now+': '+R.fix_now],[L.closed_count,[[R.fixed,'Fixed'],[R.accepted,'Accepted']],'',L.included+': '+F.length],[L.excluded_short,R.excluded,'',L.all_records+': '+ALL.length]].forEach(function(c){var d=el('div',{'class':'card '+c[2]});d.appendChild(el('span',{'class':'l'},c[0]));var n=el('div',{'class':'n'});if(Array.isArray(c[1]))c[1].forEach(function(x){var pair=el('span',{'class':'pair'},x[0]);pair.appendChild(el('span',{'class':'u'},x[1]));n.appendChild(pair);});else n.textContent=c[1];d.appendChild(n);d.appendChild(el('div',{'class':'sub'},c[3]));byId('cards').appendChild(d);});
 D.parts.forEach(function(part){var c=R.parts[part],d=el('div',{'class':'card','data-part':part});d.appendChild(el('span',{'class':'l'},L['part_'+part]+' · '+L.open_count));d.appendChild(el('div',{'class':'n'},c.open_count));d.appendChild(el('div',{'class':'sub'},fmt(L.part_card_sub,c)));byId('part-cards').appendChild(d);});
-var shownTop=0;D.parts.forEach(function(part){var top=R.queue.filter(function(item){return item.finding.part===part;}).slice(0,4);shownTop+=top.length;if(!R.queue.length)return;byId('priority').appendChild(el('h3',{'class':'part-heading',id:'priority-'+part},L['part_'+part]));var list=el('div',{'class':'priority-list'});byId('priority').appendChild(list);if(!top.length)list.appendChild(el('div',{'class':'panel muted'},L.part_none_open));top.forEach(function(item){var f=item.finding,p=el('article',{'class':'panel priority-item sev-'+f.severity}),head=el('div',{'class':'priority-top'});head.appendChild(badge(f));head.appendChild(el('span',{'class':'action-label'},L[item.action]));p.appendChild(head);var h=el('h3');h.appendChild(el('a',{href:'#'+item.anchor},f.id+' · '+f.title));p.appendChild(h);p.appendChild(el('div',{'class':'verdict'},f.confidence+' · '+f.verdict));p.appendChild(el('code',{'class':'location'},f.location));var workflowView=ownValue(D.workflow_views,f.id);if(workflowView)p.appendChild(el('p',{'class':'workflow-next'},L.w_next+': '+workflowView.next_stage));if(f.impact)p.appendChild(el('p',{'class':'impact'},f.impact));if(item.action==='fix_now')p.appendChild(el('p',{'class':'action'},f.fix||L.missing_fix));list.appendChild(p);});});
+var shownTop=0;D.parts.forEach(function(part){var items=R.queue.filter(function(item){return item.finding.part===part;}),high=items.filter(function(item){return item.finding.severity==='High';}).length,top=items.slice(0,Math.max(4,Math.min(high,12))),hiddenHigh=high-top.filter(function(item){return item.finding.severity==='High';}).length;shownTop+=top.length;if(!R.queue.length)return;byId('priority').appendChild(el('h3',{'class':'part-heading',id:'priority-'+part},L['part_'+part]));var list=el('div',{'class':'priority-list'});byId('priority').appendChild(list);if(!top.length)list.appendChild(el('div',{'class':'panel muted'},L.part_none_open));top.forEach(function(item){var f=item.finding,p=el('article',{'class':'panel priority-item sev-'+f.severity}),head=el('div',{'class':'priority-top'});head.appendChild(badge(f));head.appendChild(el('span',{'class':'action-label'},L[item.action]));p.appendChild(head);var h=el('h3');h.appendChild(el('a',{href:'#'+item.anchor},f.id+' · '+f.title));p.appendChild(h);p.appendChild(el('div',{'class':'verdict'},f.confidence+' · '+f.verdict));p.appendChild(el('code',{'class':'location'},f.location));var workflowView=ownValue(D.workflow_views,f.id);if(workflowView)p.appendChild(el('p',{'class':'workflow-next'},L.w_next+': '+workflowView.next_stage));if(f.impact)p.appendChild(el('p',{'class':'impact'},f.impact));if(item.action==='fix_now')p.appendChild(el('p',{'class':'action'},f.fix||L.missing_fix));list.appendChild(p);});if(hiddenHigh>0)byId('priority').appendChild(el('p',{'class':'section-note more-high','data-part':part},pl('more_high',hiddenHigh)));});
 if(R.queue.some(function(item){return item.action==='verify_first';})){var legend=byId('verify-legend');legend.appendChild(el('span',{'class':'action-label'},L.verify_first));legend.appendChild(document.createTextNode(' '+L.verify_first_note));legend.hidden=false;}
 if(!R.queue.length)byId('priority').appendChild(el('div',{'class':'panel muted'},L.no_open));byId('queue-note').textContent=shownTop<R.open_count?fmt(L.queue_more,{shown:shownTop,total:R.open_count}):'';
 ['scope','method','commit'].forEach(function(k){byId('scope-meta').appendChild(el('dt',null,L[k==='scope'?'scope_l':k]));byId('scope-meta').appendChild(el('dd',null,D.meta[k]||L.not_recorded));});
@@ -2292,7 +2503,8 @@ bars('c-sev','severity',SEV,true);bars('c-conf','confidence',CONF);bars('c-cat',
 function opts(id,vals,first){var s=byId(id);if(first)s.appendChild(el('option',{value:''},first));vals.forEach(function(v){var pair=Array.isArray(v)?v:[v,v];s.appendChild(el('option',{value:pair[0]},pair[1]));});s.onchange=function(){if(id==='f-verdict'&&D.excluded_verdicts.indexOf(s.value)>=0)byId('f-scope').value='all';draw();};}
 opts('f-scope',[['included',L.included_set],['excluded',L.excluded_set],['all',L.all_records]]);opts('f-part',D.parts.map(function(part){return [part,L['part_short_'+part]];}),L.part_all);opts('f-sort',[['priority',L.priority_sort],['severity',L.severity_sort]]);
 opts('f-sev',SEV,L.all);opts('f-conf',CONF,L.all);opts('f-cat',Object.keys(count(ALL,'category')).sort(),L.all);opts('f-status',ST,L.all);opts('f-verdict',D.order.verdict,L.all_verdicts);
-var q=byId('f-q');q.placeholder=L.search;q.oninput=draw;
+// Large registers redraw once typing pauses instead of on every keystroke.
+var q=byId('f-q'),searchTimer=null;q.placeholder=L.search;q.oninput=function(){clearTimeout(searchTimer);if(ALL.length>300)searchTimer=setTimeout(draw,150);else draw();};
 function v(id){return byId(id).value;}
 function reset(){['f-part','f-sev','f-conf','f-cat','f-status','f-verdict'].forEach(function(id){byId(id).value='';});byId('f-scope').value='included';byId('f-sort').value='priority';q.value='';}
 byId('reset').onclick=function(){reset();draw();};
@@ -2300,30 +2512,36 @@ function fence(text){var runs=String(text).match(/`+/g)||[],n=Math.max.apply(nul
 function oneLine(v){return String(v).replace(/\s*[\r\n]+\s*/g,' ');}
 function fenced(v){var fc=fence(v);return fc+'text\n'+v+'\n'+fc;}
 function findingMarkdown(f){var out=['## '+oneLine(f.id)+' · '+oneLine(f.title),''],p=function(label,value){if(value)out.push('- '+label+': '+oneLine(value));},block=function(label,value,raw){if(value)out.push('','### '+label,'',raw?value:fenced(value));};
-p(L.severity,f.severity);p(L.confidence,f.confidence);p(L.status,f.status);p(L.verdict,f.verdict);p(L.category,f.category);p(L.part,L['part_short_'+f.part]);p(L.location,f.location);p(L.cwe,f.cwe);
-if(f.status==='Open'&&!excluded(f)){var a=action(f);block(L[a],L[a+'_note'],true);}['actor','request','impact'].forEach(function(k){block(L[k],f[k]);});block(L.fix,f.fix);block(L.evidence,f.validation.evidence);block(L.validation_method,f.validation.method);
+p(L.severity,f.severity);p(L.confidence,f.confidence);p(L.status,statusText(f));p(L.verdict,f.verdict);p(L.category,f.category);p(L.part,L['part_short_'+f.part]);p(L.location,f.location);p(L.cwe,f.cwe);
+if(f.status==='Open'&&!excluded(f)){var a=action(f);block(L[a],guidanceText(a,f),true);}['actor','request','impact'].forEach(function(k){block(L[k],f[k]);});block(L.fix,f.fix);block(L.evidence,f.validation.evidence);block(L.validation_method,f.validation.method);
 if(f.snippet){var lines=f.snippet.lines.map(function(text,i){var n=f.snippet.start+i;return (n>=f.snippet.hit[0]&&n<=f.snippet.hit[1]?'>':' ')+String(n).padStart(5,' ')+' '+text;}).join('\n'),fc=fence(lines);block(L.snippet,fc+'\n'+lines+'\n'+fc,true);}
 var refs=(f.source_link?[{type:'source',url:f.source_link,title:L.source_link}]:[]).concat(f.references||[]);if(refs.length)block(L.references,refs.map(function(r){return '- ['+oneLine(r.type)+'] '+(r.title&&r.title!==r.url?oneLine(r.title)+' — ':'')+oneLine(r.url);}).join('\n'),true);
 [ownValue(D.workflow_views,f.id),D.verification_views[f.id]].forEach(function(view,i){if(!view)return;var body=i?[view.level,L.v_retest+': '+view.retest]:[L.w_status+': '+view.status,L.w_next+': '+view.next_stage];view.gaps.forEach(function(gap){body.push('- '+gap);});view.sections.forEach(function(section){body.push('','#### '+section.title,'');section.items.forEach(function(item){body.push(item);});});block(i?L.v_title:L.w_title,body.join('\n'));});
 return out.join('\n')+'\n';}
-function copyText(text){if(navigator.clipboard&&window.isSecureContext)return navigator.clipboard.writeText(text);return new Promise(function(resolve,reject){var prev=document.activeElement,t=el('textarea',{readonly:'','aria-hidden':'true',style:'position:fixed;top:0;left:-9999px'});t.value=text;document.body.appendChild(t);t.select();var ok=false;try{ok=document.execCommand('copy');}catch(e){}t.remove();if(prev&&prev.focus)prev.focus({preventScroll:true});if(ok)resolve();else reject(new Error('copy'));});}
+// A denied or unavailable Clipboard API falls back to the selection copy.
+function copyText(text){if(navigator.clipboard&&window.isSecureContext)return navigator.clipboard.writeText(text).catch(function(){return copyFallback(text);});return copyFallback(text);}
+function copyFallback(text){return new Promise(function(resolve,reject){var prev=document.activeElement,t=el('textarea',{readonly:'','aria-hidden':'true',style:'position:fixed;top:0;left:-9999px'});t.value=text;document.body.appendChild(t);t.select();var ok=false;try{ok=document.execCommand('copy');}catch(e){}t.remove();if(prev&&prev.focus)prev.focus({preventScroll:true});if(ok)resolve();else reject(new Error('copy'));});}
 function copyButton(f){var b=el('button',{type:'button','class':'copy-finding','aria-live':'polite'},L.copy_llm),timer;b.onclick=function(e){e.stopPropagation();var done=function(label){b.textContent=label;clearTimeout(timer);timer=setTimeout(function(){b.textContent=L.copy_llm;},2000);};copyText(findingMarkdown(f)).then(function(){done(L.copied);},function(){done(L.copy_failed);});};return b;}
-function details(f,anchor){var dt=el('tr',{'class':'detail',id:anchor+'-detail'});dt.hidden=!expanded.has(anchor);var td=el('td',{colspan:7}),dl=el('dl');
+// Detail content is built on first expansion: a large register would
+// otherwise build every record's full detail tree on each redraw.
+function details(f,anchor){var dt=el('tr',{'class':'detail',id:anchor+'-detail'});dt.hidden=!expanded.has(anchor);if(!dt.hidden)fillDetails(dt,f,anchor);return dt;}
+function fillDetails(dt,f,anchor){if(dt.firstChild)return;var td=el('td',{colspan:7}),dl=el('dl');
 var head=el('div',{'class':'detail-actions'});head.appendChild(el('strong',null,f.id+' · '+f.title));var links=el('span',{'class':'detail-links'});links.appendChild(copyButton(f));links.appendChild(el('a',{href:'#'+anchor},L.permalink));head.appendChild(links);td.appendChild(head);
-if(f.status==='Open'&&!excluded(f)){var a=action(f),guidance=el('div',{'class':'action-guidance'});guidance.appendChild(el('strong',null,L[a]));guidance.appendChild(el('p',null,L[a+'_note']));td.appendChild(guidance);}else if(excluded(f)){td.appendChild(el('p',{'class':'muted'},L.excluded_note));}
+if(f.status==='Open'&&!excluded(f)){var a=action(f),guidance=el('div',{'class':'action-guidance'});guidance.appendChild(el('strong',null,L[a]));guidance.appendChild(el('p',null,guidanceText(a,f)));td.appendChild(guidance);}else if(excluded(f)){td.appendChild(el('p',{'class':'muted'},L.excluded_note));}
 function field(label,value){dl.appendChild(el('dt',null,label));var dd=el('dd');if(value instanceof Node)dd.appendChild(value);else dd.textContent=value;dl.appendChild(dd);}
 field(L.location,f.location);if(f.cwe)field(L.cwe,f.cwe);['actor','request','impact'].forEach(function(k){if(f[k])field(L[k],f[k]);});field(L.fix,f.fix||(f.status==='Open'&&!excluded(f)?L.missing_fix:L.not_recorded));field(L.evidence,f.validation.evidence||L.missing_evidence);if(f.validation.method)field(L.validation_method,f.validation.method);
 if(f.snippet){var pre=el('pre',{'class':'snippet'});f.snippet.lines.forEach(function(text,i){var n=f.snippet.start+i,ln=el('span',{'class':n>=f.snippet.hit[0]&&n<=f.snippet.hit[1]?'hit':''});ln.appendChild(el('b',null,String(n).padStart(5,' ')+' '));ln.appendChild(document.createTextNode(text));pre.appendChild(ln);});field(L.snippet,pre);if(f.snippet.truncated)field(L.note,L.snippet_truncated);}
 var refs=(f.source_link?[{type:'source',url:f.source_link,title:L.source_link}]:[]).concat(f.references||[]);if(refs.length){var ul=el('ul',{'class':'refs'});refs.forEach(function(r){var li=el('li');li.appendChild(el('span',{'class':'rt'},r.type));li.appendChild(el('a',{href:r.url,target:'_blank',rel:'noopener noreferrer'},r.title||r.url));ul.appendChild(li);});field(L.references,ul);}td.appendChild(dl);var workflow=workflowNode(f);if(workflow)td.appendChild(workflow);td.appendChild(verificationNode(f));
-if(f.previous_validation&&typeof f.previous_validation==='object'){var history=el('aside',{'class':'history'});history.appendChild(el('strong',null,L.previous_validation));history.appendChild(el('p',null,L.history_note));['verdict','evidence','method'].forEach(function(k){if(typeof f.previous_validation[k]==='string')history.appendChild(el('p',null,f.previous_validation[k]));});td.appendChild(history);}dt.appendChild(td);return dt;}
-function searchText(f){var val=f.validation||{};return [f.id,f.title,f.location,f.category,f.actor,f.request,f.impact,f.fix,f.cwe,f.status,f.severity,f.confidence,f.verdict,val.evidence,val.method].filter(Boolean).join('\n').toLowerCase();}
-function draw(){var tb=byId('rows');tb.textContent='';var term=q.value.trim().toLowerCase(),scope=v('f-scope');var pool=scope==='all'?ALL:ALL.filter(function(f){return scope==='excluded'?excluded(f):!excluded(f);});var shown=pool.filter(function(f){return (!v('f-part')||f.part===v('f-part'))&&(!v('f-sev')||f.severity===v('f-sev'))&&(!v('f-conf')||f.confidence===v('f-conf'))&&(!v('f-cat')||f.category===v('f-cat'))&&(!v('f-status')||f.status===v('f-status'))&&(!v('f-verdict')||f.verdict===v('f-verdict'))&&(!term||searchText(f).indexOf(term)>=0);});
+if(f.previous_validation&&typeof f.previous_validation==='object'){var history=el('aside',{'class':'history'});history.appendChild(el('strong',null,L.previous_validation));history.appendChild(el('p',null,L.history_note));['verdict','evidence','method'].forEach(function(k){if(typeof f.previous_validation[k]==='string')history.appendChild(el('p',null,f.previous_validation[k]));});td.appendChild(history);}dt.appendChild(td);}
+var searchCache=new Map();
+function searchText(f){if(searchCache.has(f))return searchCache.get(f);var val=f.validation||{},text=[f.id,f.title,f.location,f.category,f.actor,f.request,f.impact,f.fix,f.cwe,f.status,f.severity,f.confidence,f.verdict,val.evidence,val.method].filter(Boolean).join('\n').toLowerCase();searchCache.set(f,text);return text;}
+function draw(){clearTimeout(searchTimer);var tb=byId('rows');tb.textContent='';var term=q.value.trim().toLowerCase(),scope=v('f-scope');var pool=scope==='all'?ALL:ALL.filter(function(f){return scope==='excluded'?excluded(f):!excluded(f);});var shown=pool.filter(function(f){return (!v('f-part')||f.part===v('f-part'))&&(!v('f-sev')||f.severity===v('f-sev'))&&(!v('f-conf')||f.confidence===v('f-conf'))&&(!v('f-cat')||f.category===v('f-cat'))&&(!v('f-status')||f.status===v('f-status'))&&(!v('f-verdict')||f.verdict===v('f-verdict'))&&(!term||searchText(f).indexOf(term)>=0);});
 shown.sort(function(a,b){var status=v('f-sort')==='priority'?Number(a.status!=='Open')-Number(b.status!=='Open'):0;return status||SEV.indexOf(a.severity)-SEV.indexOf(b.severity)||(v('f-sort')==='priority'?Number(action(a)!=='fix_now')-Number(action(b)!=='fix_now'):0)||Number(a.part==='deps')-Number(b.part==='deps')||(String(a.id)<String(b.id)?-1:String(a.id)>String(b.id)?1:0);});
 byId('result-count').textContent=fmt(L.showing,{shown:shown.length,total:pool.length});
 if(!shown.length){var empty=el('tr'),td=el('td',{colspan:7,'class':'empty'},pool.length?L.no_matches:L.no_records);empty.appendChild(td);tb.appendChild(empty);return;}
-shown.forEach(function(f){var anchor=D.anchors[f.id],tr=el('tr',{'class':'row',id:anchor}),dt=details(f,anchor);var labels=['ID',L.severity,L.confidence,L.status,L.verdict,L.title_col,L.category];var values=[f.id,null,f.confidence,f.status,f.verdict,null,f.category],button;
+shown.forEach(function(f){var anchor=D.anchors[f.id],tr=el('tr',{'class':'row',id:anchor}),dt=details(f,anchor);var labels=['ID',L.severity,L.confidence,L.status,L.verdict,L.title_col,L.category];var values=[f.id,null,f.confidence,statusText(f),f.verdict,null,f.category],button;
 values.forEach(function(value,i){var cell=el('td',{'data-label':labels[i]},value);if(i===1)cell.appendChild(badge(f));if(i===5){button=el('button',{type:'button','class':'finding-toggle','aria-expanded':String(!dt.hidden),'aria-controls':dt.id},f.title);button.appendChild(el('span',{'class':'toggle-label'},dt.hidden?L.expand:L.collapse));cell.appendChild(button);cell.appendChild(el('code',{'class':'location'},f.location));cell.appendChild(el('span',{'class':'verification-level'},D.verification_views[f.id].level));var workflowView=ownValue(D.workflow_views,f.id);if(workflowView){cell.appendChild(el('span',{'class':'workflow-status'},workflowView.status));cell.appendChild(el('span',{'class':'workflow-next'},L.w_next+': '+workflowView.next_stage));}}tr.appendChild(cell);});
-function toggle(){dt.hidden=!dt.hidden;if(dt.hidden)expanded.delete(anchor);else expanded.add(anchor);button.setAttribute('aria-expanded',String(!dt.hidden));button.querySelector('.toggle-label').textContent=dt.hidden?L.expand:L.collapse;}
+function toggle(){if(dt.hidden)fillDetails(dt,f,anchor);dt.hidden=!dt.hidden;if(dt.hidden)expanded.delete(anchor);else expanded.add(anchor);button.setAttribute('aria-expanded',String(!dt.hidden));button.querySelector('.toggle-label').textContent=dt.hidden?L.expand:L.collapse;}
 button.onclick=function(e){e.stopPropagation();toggle();};tr.onclick=function(e){if(!e.target.closest('a,button'))toggle();};tb.appendChild(tr);tb.appendChild(dt);});}
 function openHash(){var anchor=window.location.hash.slice(1),f=ALL.find(function(x){return D.anchors[x.id]===anchor;});if(!f)return;expanded.add(anchor);draw();if(!byId(anchor)){reset();if(excluded(f))byId('f-scope').value='all';expanded.add(anchor);draw();}var row=byId(anchor);row.scrollIntoView({block:'start'});row.querySelector('button').focus({preventScroll:true});}
 document.addEventListener('click',function(e){var a=e.target.closest('a[href^="#finding-"]');if(a&&a.getAttribute('href')===window.location.hash){e.preventDefault();openHash();}});
@@ -2347,8 +2565,9 @@ def render_dashboard(data, L, lang, integrity=None):
     verification_states = derive_verification(data, SchemaError, integrity=integrity)
     workflows = workflow_states(data, integrity=integrity)
     payload = {
-        "meta": {key: data["meta"][key] for key in ("project", "date", "assessor", "scope", "method", "commit", "source_url")
-                 if key in data["meta"]},
+        "meta": {**{key: data["meta"][key] for key in ("project", "date", "assessor", "scope", "method", "commit")
+                    if key in data["meta"]},
+                 **({"source_url": source_base(data["meta"]["source_url"])} if data["meta"].get("source_url") else {})},
         **({"three_pass_view": three_pass_view(data, lang, integrity=integrity)} if "three_pass" in model else {}),
         **({"expert_view": expert_view(data, lang, integrity=integrity)} if "expert" in data else {}),
         "workflow_views": {f["id"]: workflow_view(data, f, workflows[f["id"]], lang)
@@ -2378,6 +2597,23 @@ def render_dashboard(data, L, lang, integrity=None):
     # Substitute only template tokens, not token-like strings inside report data.
     return re.sub(r"__(?:LANG|TITLE|NOSCRIPT|ASSESSMENT|DATA|THREE_PASS|EXPERT)__",
                   lambda match: replacements[match.group(0)], DASHBOARD)
+
+
+def write_output(path, text):
+    """Write via a temporary file in the same directory and os.replace(), which
+    replaces a link at path instead of following it."""
+    path = Path(path)
+    fd, tmp = tempfile.mkstemp(prefix="." + path.name + ".", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        mask = os.umask(0)
+        os.umask(mask)
+        os.chmod(tmp, 0o666 & ~mask)  # The permissions write_text would give.
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def main(argv=None):
@@ -2424,8 +2660,16 @@ def main(argv=None):
     html_path = out / "assessment.html"
     try:
         out.mkdir(parents=True, exist_ok=True)
-        (out / "dashboard.html").write_text(dashboard, encoding="utf-8")
-        html_path.write_text(assessment, encoding="utf-8")
+        # A planted symlink (or FIFO, directory...) at an output name would
+        # redirect the write outside the output directory: refuse it.
+        for name in ("dashboard.html", "assessment.html", "assessment.pdf"):
+            target = out / name
+            if target.is_symlink() or (os.path.lexists(target) and not target.is_file()):
+                print(f"render.py: refusing to write {target}: it exists as a symlink or non-regular file; "
+                      "remove it and re-run", file=sys.stderr)
+                return 2
+        write_output(out / "dashboard.html", dashboard)
+        write_output(html_path, assessment)
         if a.no_pdf:
             (out / "assessment.pdf").unlink(missing_ok=True)
     except OSError as e:
@@ -2435,12 +2679,24 @@ def main(argv=None):
     print(f"wrote {html_path}")
     if a.no_pdf:
         return 0
-    engine = to_pdf(html_path, out / "assessment.pdf")
+    failures = []
+    engine = to_pdf(html_path, out / "assessment.pdf", failures, timeout=pdf_timeout(len(data["findings"])))
     if not engine:
-        print("render.py: no PDF engine found (Chrome/Chromium or weasyprint); "
-              "assessment.html is ready to print. Without an engine anywhere: merge the limitation "
-              "'assessment.pdf not produced: no PDF engine', re-run render.py with --repo, "
-              "then contract_check.py --no-pdf", file=sys.stderr)
+        rerun = (", re-run render.py <findings.json> --repo <repo> --out <out> --no-pdf, "
+                 "then contract_check.py <out> --no-pdf")
+        if failures:
+            # An engine was found but did not produce a PDF: say what happened.
+            engine_name, reason, _ = failures[-1]
+            details = "; ".join(f"{name} {why}" + (f" [{tail}]" if tail else "") for name, why, tail in failures)
+            print(f"render.py: PDF engine failed: {details}. assessment.html is ready to print. "
+                  "Fix the engine (a large report may need SECURITY_SCAN_PDF_TIMEOUT=<seconds>) and re-run; "
+                  "if it cannot be fixed: merge the limitation "
+                  f"'assessment.pdf not produced: PDF engine failed ({engine_name} {reason})'" + rerun,
+                  file=sys.stderr)
+        else:
+            print("render.py: no PDF engine found (Chrome/Chromium or weasyprint); "
+                  "assessment.html is ready to print. Without an engine anywhere: merge the limitation "
+                  "'assessment.pdf not produced: no PDF engine'" + rerun, file=sys.stderr)
         return 3
     print(f"wrote {out / 'assessment.pdf'} ({engine})")
     return 0

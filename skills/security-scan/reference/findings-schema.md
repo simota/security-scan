@@ -28,9 +28,13 @@ It writes:
   Chrome/Chromium (set `CHROME` to choose a binary) or WeasyPrint as a fallback
 
 Exit codes: `0` done, `2` the file does not match the shape (the field is
-named), `3` no PDF engine found (the HTML outputs are still written). A
-sandboxed shell may block the browser; rerun outside it if `3` appears with
-Chrome installed. Write `<dir>` outside the audited repository unless asked.
+named, or an output name exists as a symlink or non-regular file), `3` no PDF
+(the HTML outputs are still written): either no engine was found, or an engine
+was found but failed or timed out; the message says which, with the engine's
+last error line. Run as root, Chrome gets `--no-sandbox`. The PDF deadline is
+120 s plus 0.05 s per finding (at most 900 s); `SECURITY_SCAN_PDF_TIMEOUT=<seconds>`
+overrides it. A sandboxed shell may block the browser; rerun outside it if `3`
+appears with Chrome installed. Write `<dir>` outside the audited repository unless asked.
 
 ## Writing the file
 
@@ -207,7 +211,9 @@ beside `findings.json`, sets `schema_version`, `assessment` and `meta.commit`,
 appends one `SRC-NNN` record per new path and prints the path → ID map. When
 the generic `summary` should carry the sanitized observation, merge a fragment
 such as `{"evidence": [{"id": "SRC-001", "summary": "…"}]}` (never edit
-`findings.json` by hand). `verification` and `evidence` fragments are refused
+`findings.json` by hand). That `summary` is the only field a fragment may change
+on a captured `source` record, and a fragment cannot create a `source` record:
+only capture writes one. `verification` and `evidence` fragments are refused
 until capture has run, so they can only cite IDs it printed.
 
 Capture requires stable, owned local inputs and POSIX no-follow file operations.
@@ -304,7 +310,11 @@ Claim statuses are `supported`, `contradicted` or `unknown`. A structured
 falsification check, all `clear`; missing/contradictory claims or unresolved
 falsification produce a schema error. To derive sufficient static support,
 each of the four claims must include `source` evidence. Runtime-only assertions
-cannot replace the source trace. `Unverified`, `Likely` and `Unlikely` always
+cannot replace the source trace. A committed secret is the exception the
+capture rule creates: `evidence_capture.py` refuses to copy the file, so record
+that finding as `Likely`, cite its location (claims without captured evidence
+stay `unknown`) and add a limitation that the value was not captured.
+`Unverified`, `Likely` and `Unlikely` always
 derive `incomplete` with `verdict_unresolved`, even when all evidence fields
 are complete. Derivation preserves the recorded verdict rather than upgrading it.
 
@@ -482,13 +492,16 @@ Every finding should point the reader at evidence they can open:
   `path:start-end`, relative to the repository root. Render with
   `--repo <root>` to embed the lines around it (secret-looking values are
   masked), and set `meta.source_url` to a browse URL **pinned to a commit** so
-  each location also becomes a link that will not drift
+  each location also becomes a link that will not drift (its query and
+  fragment are dropped before the path is appended)
 - **Third-party libraries** — `references` lists the advisory, the fix commit
   or pull request, and any write-up. `deps_scan.py` fills these from
   supported audit results; add an `article` entry by hand when a vendor post or analysis explains the issue
   better than the advisory
 - Only absolute `http://` and `https://` URLs without credentials or control
-  characters are accepted; anything else is rejected when rendering
+  characters are accepted; anything else is rejected when rendering.
+  Credential-like query or fragment parameters (`private_token`, signatures,
+  JWTs) are dropped from the displayed link
 
 Render with `--repo` only for the requester's own copy of the report: the
 excerpts are source code, so the outputs carry the repository's confidentiality.
@@ -564,12 +577,14 @@ Without it, findings are validated as before. Shape:
 - `entries`: nonempty list of `{id, family, invariant, source, status,
   paths_read, paths_total}` plus optional `finding_ids` and `reason`
   - `id`: `INV-<nn>`, unique; `family`: `OWN`, `ROLE`, `PROP`, `STATE`, `QTY`,
-    `ID` or `TRUST`; `invariant` and `source` (`path:line`) nonblank
+    `ID` or `TRUST`; `invariant` and `source` (`path:line`, or `baseline` for a
+    seeded entry not yet tied to code) nonblank
   - `status`: `holds` (every path read: `paths_read == paths_total >= 1`; no
     `finding_ids`), `partial` (`paths_read < paths_total`: "holds on N/M, rest
     not read"), `violated` (`finding_ids` of `F-*` findings in this report, at
     least one not ruled out as FalsePositive/NotApplicable) or
-    `not_checked` (nonblank `reason`)
+    `not_checked` (nonblank `reason`) or `not_applicable` (a family the app
+    lacks: nonblank `reason`, no `finding_ids`)
 - `units` (optional): `{unit, record_inputs, trace_rows, blank_cells}` plus
   optional boolean `closed`; a unit marked `closed: true` is a schema error
   unless `trace_rows == record_inputs` and `blank_cells == 0`, and any unit
@@ -577,7 +592,8 @@ Without it, findings are validated as before. Shape:
 
 Once opted in, every `F-*` finding whose verdict is not `FalsePositive` or
 `NotApplicable` must have `Preconditions:`, `Steps:` and `Contrast:` in
-`request`, `Test:` in `fix`, and in `impact` an expected outcome followed by the
+`request`, `Test:` in `fix` (in Japanese `前提条件`, `手順`, `対比` and `テスト`,
+each with `:` or `：`), and in `impact` an expected outcome followed by the
 actual one (`expected` … `actual`, or `期待` … `実際`; `reference/invariants.md`
 §5); a missing marker is a schema error. These fields are required on every
 `F-*` finding in every run (`SKILL.md`, *Always / Never*); the opt-in only makes

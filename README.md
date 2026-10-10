@@ -173,13 +173,18 @@ Each finding carries its evidence: code findings embed the lines around
 source when `meta.source_url` is set; library findings link to the advisory,
 the fix commit or pull request on GitHub, and related articles.
 
-Sensitive paths (`.env*`, credential files and private keys), files containing
-private-key blocks, and findings categorized as `Secrets` do not embed source
-excerpts. URL credentials and common secret assignments are masked in other
-excerpts, but redaction is heuristic, not a guarantee. Inspect reports before
+Sensitive paths (`.env*`, credential files such as `.pgpass`, `.htpasswd` and
+`.docker/config.json`, Terraform `*.tfstate`/`*.tfvars`, and private keys) and
+files containing private-key blocks do not embed source excerpts; a `Secrets`
+finding keeps its excerpt unless a cited line still holds a secret-like value.
+URL credentials, known token formats (GitHub, Slack, AWS, JWTs), secret
+assignments and literal fallback defaults are masked in other excerpts, but
+redaction is heuristic, not a guarantee. Inspect reports before
 sharing them; without `--repo`, source is not embedded. `source_link` and
 `snippet` are derived fields and cannot be injected through input JSON. All
-report links must be absolute HTTP(S) URLs without credentials or controls.
+report links must be absolute HTTP(S) URLs without credentials or controls;
+token-like query and fragment parameters are dropped from displayed reference
+links, and `meta.source_url` is used without its query or fragment.
 Excerpts are capped at 200 lines and 240 characters per line; visible notes
 identify shortened excerpts. Previous validation, when available, is labelled
 as historical and never changes the current verdict or counts.

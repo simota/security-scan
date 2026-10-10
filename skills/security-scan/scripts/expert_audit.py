@@ -13,6 +13,7 @@ saved receipts never substitute for it, including when integrity is required.
 Exit codes: 0 complete, 3 held or degraded (each gap on stderr), 2 unreadable input.
 """
 import argparse
+import copy
 import html
 import json
 from pathlib import Path, PurePosixPath
@@ -23,6 +24,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import contract_check
 from expert import derive_expert
+import render
 
 
 def run_file(out_dir, rel):
@@ -84,17 +86,22 @@ def main(argv=None):
     if a.evidence_repository is not None and a.evidence_root is None:
         p.error("--evidence-repository requires --evidence-root")
     try:
-        data = json.loads((a.out_dir / "findings.json").read_text(encoding="utf-8"))
+        data = json.loads(contract_check.read_regular(a.out_dir / "findings.json").decode("utf-8"))
         if contract_check.json_depth(data) > contract_check.MAX_JSON_DEPTH:
             raise RecursionError
         if not isinstance(data, dict):
             raise ValueError("findings.json must hold a JSON object")
+        # The record gates below assume render.py's schema (meta an object, and so on).
+        render.validate_data(copy.deepcopy(data))
         result = audit(data, a.out_dir, pdf=not a.no_pdf, evidence_root=a.evidence_root,
                        evidence_repository=a.evidence_repository)
     except RecursionError:
         print("expert_audit.py: findings.json nesting is too deep", file=sys.stderr)
         return 2
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+    except render.SchemaError as exc:
+        print(f"expert_audit.py: findings.json does not match the schema: {exc}", file=sys.stderr)
+        return 2
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         print(f"expert_audit.py: {exc}", file=sys.stderr)
         return 2
     for line in result["gaps"]:

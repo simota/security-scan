@@ -323,7 +323,11 @@ class _Validator:
         all_refs.update(claim_refs)
         verdict = finding.get("validation", {}).get("verdict", "Unverified")
         if verdict == "Valid" and any(status != "supported" for status in statuses):
-            self.error(at + ".claims", "Valid requires all four claims supported with evidence")
+            # evidence_capture.py refuses to copy a file holding a secret, so such a
+            # finding has no source evidence to support every claim with.
+            self.error(at + ".claims", "Valid requires all four claims supported with evidence; a committed "
+                       "secret cannot be captured as source evidence, so record it as Likely, cite its "
+                       "location and add a limitation saying the value was not captured")
         if verdict in ("FalsePositive", "NotApplicable"):
             exclusion = self.obj(verification.get("exclusion"), at + ".exclusion")
             basis = self.enum(exclusion, "basis", ("condition_absent", "not_applicable"), at + ".exclusion")

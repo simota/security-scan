@@ -88,7 +88,8 @@ machine-checked (no invariant_ledger opt-in)" — the ledger and the close-check
 were kept in scratch and nothing in the record proves their counts.
 `contract_check.py` requires that line without the opt-in and rejects it with
 the opt-in; with `--no-pdf` it also requires "assessment.pdf not produced: no
-PDF engine", and in either mode it rejects that line while an `assessment.pdf` exists. Keep both in English, verbatim, in any report language.
+PDF engine" (or, when `render.py` found an engine that failed, the line it
+prints: "assessment.pdf not produced: PDF engine failed (<reason>)"), and in either mode it rejects that line while an `assessment.pdf` exists. Keep both in English, verbatim, in any report language.
 
 Describe weaknesses and parameters, not working payloads. Never print secret
 values: use location and kind only. Evidence summaries and commands must be

@@ -4,16 +4,20 @@ A schema-version-2 findings.json that carries `invariant_ledger` opts in: the
 ledger summary is validated and rendered into the assessment, and every active
 `F-*` finding must carry the static reproduction shape (`request` with
 `Preconditions:`, `Steps:` and `Contrast:`; `fix` with `Test:`; `impact` with
-an expected-then-actual pair), and a unit marked `closed` must match its
+an expected-then-actual pair; Japanese reports may write 前提条件 / 手順 / 対比 /
+テスト and 期待 / 実際, with an ASCII or full-width colon), and a unit marked `closed` must match its
 close-check. Without the key nothing changes. This checks recorded text only; it reads no source code.
 """
 import html
 import re
 
 FAMILIES = ("OWN", "ROLE", "PROP", "STATE", "QTY", "ID", "TRUST")
-STATUSES = ("holds", "violated", "partial", "not_checked")
-REQUEST_MARKERS = ("Preconditions:", "Steps:", "Contrast:")
-FIX_MARKERS = ("Test:",)
+STATUSES = ("holds", "violated", "partial", "not_checked", "not_applicable")
+# Each marker in English or Japanese, followed by an ASCII or full-width colon.
+REQUEST_MARKERS = (("Preconditions:", r"(?:Preconditions|前提条件)[:：]"),
+                   ("Steps:", r"(?:Steps|手順)[:：]"),
+                   ("Contrast:", r"(?:Contrast|対比)[:：]"))
+FIX_MARKERS = (("Test:", r"(?:Test|テスト)[:：]"),)
 EXCLUDED = ("FalsePositive", "NotApplicable")
 ENTRY_KEYS = {"id", "family", "invariant", "source", "status", "paths_read", "paths_total"}
 ENTRY_OPTIONAL = {"finding_ids", "reason"}
@@ -21,7 +25,7 @@ UNIT_KEYS = {"unit", "record_inputs", "trace_rows", "blank_cells"}
 UNIT_OPTIONAL = {"closed"}
 # English or Japanese ("期待" ... "実際"): the expected outcome first, then the actual one.
 EXPECTED_ACTUAL = re.compile(r"(\bexpected\b|期待).*(\bactual\b|実際)", re.IGNORECASE | re.DOTALL)
-INV_RE = re.compile(r"^INV-\d{2,}$")
+INV_RE = re.compile(r"INV-[0-9]{2,}")  # fullmatch: ASCII digits, no trailing newline
 
 LABELS = {
     "en": {"title": "Invariant ledger", "id": "ID", "family": "Family", "invariant": "Invariant",
@@ -29,13 +33,15 @@ LABELS = {
            "inputs": "Record-naming inputs", "rows": "Trace rows", "blank": "Blank cells", "state": "State",
            "closed": "closed", "open": "open",
            "holds": "holds on all {total} paths", "partial": "holds on {read}/{total}, rest not read",
-           "violated": "violated ({findings}); {read}/{total} paths read", "not_checked": "not checked ({reason})"},
+           "violated": "violated ({findings}); {read}/{total} paths read", "not_checked": "not checked ({reason})",
+           "not_applicable": "N/A ({reason})"},
     "ja": {"title": "不変条件台帳", "id": "ID", "family": "分類", "invariant": "不変条件",
            "source": "根拠", "status": "状態", "units": "レビュー単位（クローズチェック）", "unit": "単位",
            "inputs": "レコード指定入力", "rows": "トレース行", "blank": "空欄", "state": "状態",
            "closed": "完了", "open": "未完了",
            "holds": "全 {total} 経路で成立", "partial": "{read}/{total} 経路で成立、残りは未読",
-           "violated": "違反（{findings}）。{read}/{total} 経路を確認", "not_checked": "未確認（{reason}）"},
+           "violated": "違反（{findings}）。{read}/{total} 経路を確認", "not_checked": "未確認（{reason}）",
+           "not_applicable": "対象外（{reason}）"},
 }
 
 
@@ -83,7 +89,7 @@ def validate_ledger(data, error_type=ValueError):
         if not isinstance(entry, dict) or not ENTRY_KEYS <= set(entry) <= ENTRY_KEYS | ENTRY_OPTIONAL:
             fail(f"{at}: requires {', '.join(sorted(ENTRY_KEYS))}; optional {', '.join(sorted(ENTRY_OPTIONAL))}")
         identifier = _text(entry, "id", at, fail)
-        if not INV_RE.match(identifier) or identifier in seen:
+        if not INV_RE.fullmatch(identifier) or identifier in seen:
             fail(f"{at}.id: INV-<nn>, unique")
         seen.add(identifier)
         if entry["family"] not in FAMILIES:
@@ -107,8 +113,10 @@ def validate_ledger(data, error_type=ValueError):
             fail(f"{at}.finding_ids: violated requires an included (not ruled-out) finding")
         if status == "holds" and refs:
             fail(f"{at}.finding_ids: an invariant that holds cites no findings")
-        if status == "not_checked":
+        if status in ("not_checked", "not_applicable"):
             _text(entry, "reason", at, fail)
+        if status == "not_applicable" and refs:
+            fail(f"{at}.finding_ids: an invariant that does not apply cites no findings")
     units = ledger.get("units", [])
     if not isinstance(units, list):
         fail("invariant_ledger.units: must be a list")
@@ -129,7 +137,7 @@ def validate_ledger(data, error_type=ValueError):
         if not str(finding.get("id", "")).startswith("F-") or verdict in EXCLUDED:
             continue
         for key, markers in (("request", REQUEST_MARKERS), ("fix", FIX_MARKERS)):
-            missing = [m for m in markers if m not in str(finding.get(key) or "")]
+            missing = [m for m, pattern in markers if not re.search(pattern, str(finding.get(key) or ""))]
             if missing:
                 fail(f"findings[{i}].{key}: {finding['id']} lacks {', '.join(missing)} "
                      "(static reproduction steps are required once invariant_ledger is opted in)")

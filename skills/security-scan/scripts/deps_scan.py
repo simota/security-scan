@@ -244,7 +244,8 @@ def read(p):
         if os.stat(p).st_size > MAX_READ:
             _OVERSIZED.add(Path(p))
             return ""
-        return p.read_text(encoding="utf-8", errors="replace")
+        text = p.read_text(encoding="utf-8", errors="replace")
+        return text[1:] if text.startswith("\ufeff") else text  # A UTF-8 BOM is not content.
     except OSError:
         return ""
 
@@ -296,6 +297,10 @@ def pnpm_packages(path):
     return out
 
 
+class Unsupported(ValueError):
+    """A known limitation whose own message is the not_run reason."""
+
+
 def matching_lockfiles(c, manifest):
     """Return safe lockfiles, [] for absent locks, None for unknown ownership.
 
@@ -317,14 +322,14 @@ def matching_lockfiles(c, manifest):
         if not safe_file(path, root) or path.stat().st_size > MAX_READ:
             raise ValueError("unsafe workspace manifest")
         if path.name == "package.json":
-            value = json.loads(path.read_text(encoding="utf-8"))
+            value = json.loads(path.read_text(encoding="utf-8").lstrip("\ufeff"))
         else:
             try:
                 import tomllib
             except ImportError:
                 # Keep Python 3.9/3.10 supported, but do not invent TOML semantics.
-                raise ValueError("Cargo workspace discovery requires Python 3.11+") from None
-            value = tomllib.loads(path.read_text(encoding="utf-8"))
+                raise Unsupported("Cargo workspace discovery requires Python 3.11+") from None
+            value = tomllib.loads(path.read_text(encoding="utf-8").lstrip("\ufeff"))
         if not isinstance(value, dict):
             raise ValueError("workspace manifest must be an object")
         return value
@@ -384,6 +389,8 @@ def matching_lockfiles(c, manifest):
             if directory == root:
                 break
             directory = directory.parent
+    except Unsupported as exc:
+        return unknown(str(exc))
     except (ValueError, OSError, UnicodeError, TypeError, AttributeError, RecursionError):
         # Never copy manifest values or exception text, which may contain secrets.
         return unknown("workspace syntax or ownership could not be validated safely")
@@ -502,7 +509,7 @@ def untrusted_workflow_expression(c, path, expression):
     tokens = re.findall(r"'(?:[^']|'')*'|[A-Za-z_][A-Za-z0-9_-]*|[0-9]+|[^\s]", expression)
     events = {"issue", "pull_request", "comment", "review", "review_comment", "head_commit", "commits",
               "discussion", "discussion_comment", "workflow_run", "pages"}
-    fields = {"title", "body", "message", "name", "ref", "label", "email", "page_name",
+    fields = {"title", "display_title", "body", "message", "name", "ref", "label", "email", "page_name",
               "head_branch", "default_branch"}
     safe_event_paths = {
         ("event", "number"),
@@ -572,7 +579,7 @@ def isolated_composer_audit(c, root, lock, exe):
             raise ValueError("invalid lock")
         manifest_path = lock.parent / "composer.json"
         if manifest_path.exists():
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8").lstrip("\ufeff"))
             if not isinstance(manifest, dict):
                 raise ValueError("invalid manifest")
             if manifest.get("repositories"):
@@ -594,7 +601,7 @@ def isolated_composer_audit(c, root, lock, exe):
                         "COMPOSER_NO_DEV": "0"})
             return run([exe, "--no-plugins", "--no-scripts", "audit", "--format=json",
                         "--locked", "--no-interaction", "--abandoned=report"], work, env=env)
-    except (OSError, ValueError, UnicodeError):
+    except (OSError, ValueError, UnicodeError, RecursionError):
         incomplete(c, "composer audit", lock, "could not prepare isolated audit input")
         return None
 
@@ -672,7 +679,7 @@ def npm_floating(spec):
 def npm_local_path(c, manifest, spec):
     """A relative file:/link: or ./ path that stays inside this checkout is first-party code."""
     m = re.match(r"(file:|link:)?(.*)$", spec, re.S)
-    if not (m[2] and not re.match(r"[/\\~]|[A-Za-z][\w+.-]*:", m[2]) if m[1] else re.match(r"\.{1,2}/", m[2])):
+    if "\0" in spec or not (m[2] and not re.match(r"[/\\~]|[A-Za-z][\w+.-]*:", m[2]) if m[1] else re.match(r"\.{1,2}/", m[2])):
         return False
     # realpath follows in-checkout symlinks to their targets, as npm does.
     target, root = os.path.realpath(os.path.join(Path(manifest).parent, m[2])), os.path.realpath(c.root)
@@ -747,8 +754,10 @@ def check_npm_lock(c, p):
     for opener in re.finditer(r"\bresolution:\s*\{", text):
         if opener.end() <= region_end:
             continue  # Same {...} region as a failed opener: its suffix cannot match either.
-        stops = [i for i in (text.find("}", opener.end()), text.find("\n", opener.end())) if i >= 0]
-        region_end = min(stops) if stops else len(text)
+        newline = text.find("\n", opener.end())
+        newline = len(text) if newline < 0 else newline
+        brace = text.find("}", opener.end(), newline)  # bounded: no rescan to a distant brace
+        region_end = newline if brace < 0 else brace
         if typed is not None and typed.start() < opener.end():
             typed = None
         typed = typed or re.compile(r"\btype:\s*git\b").search(text, opener.end())
@@ -792,7 +801,7 @@ def check_npmrc(c, p):
             c.add("Info", f"{p.name} points {target} at {m.group(2)}", p, i,
                   impact="Confirm the registry is trusted and scoped names cannot be claimed publicly",
                   fix="Scope private registries to your own @scope", category=CAT_BUILD)
-        if (re.search(r"(_authToken|_auth|_password)\s*=\s*[^$\s]", ln)
+        if (re.search(r"""(_authToken|_auth|_password)\s*=\s*["']?[^$\s"']""", ln)
                 or re.match(r"""\s*["']?(npmAuthToken|npmAuthIdent)["']?\s*:\s*["']?[^$\s"']""", ln)):
             c.add("High", f"{p.name} contains a literal registry credential", p, i,
                   impact="Anyone with repository access can publish or read private packages",
@@ -929,13 +938,79 @@ def check_gomod(c, p):
                   impact="Builds depend on code outside module verification", category=CAT_BUILD)
 
 
-PRIVILEGED_TRIGGERS = ("pull_request_target", "workflow_run")
-UNTRUSTED_REF = re.compile(r"\$\{\{\s*github\.(?:head_ref|event\.pull_request\.(?:head\.(?:sha|ref|repo\.full_name)|merge_commit_sha)"
-                           r"|event\.workflow_run\.head_(?:sha|branch|repository\.full_name))\b"
-                           r"|refs/pull/\$\{\{\s*github\.event\.(?:pull_request\.)?number\s*\}\}/(?:merge|head)\b")
+# Outsider events that run with secrets; issue_comment can be posted on any PR.
+PRIVILEGED_TRIGGERS = ("pull_request_target", "workflow_run", "issue_comment")
+# A checkout ref/repository naming the PR head anywhere in its value, e.g.
+# ${{ (github.event.pull_request.head.sha) }} or format('refs/pull/{0}/merge', github.event.number).
+HEAD_REF = re.compile(r"\bgithub\.(?:head_ref|event\.pull_request\.(?:head\.(?:sha|ref|repo\.full_name)|merge_commit_sha)"
+                      r"|event\.workflow_run\.(?:head_(?:sha|branch|repository\.full_name|commit\.id)"
+                      r"|pull_requests\[\d+\]\.head\.(?:sha|ref)))\b", re.I)
+PR_NUMBER = re.compile(r"\bgithub\.event\.(?:(?:pull_request|issue)\.)?number\b", re.I)
 # Any expression naming the PR head (or its number, for refs/pull/N fetches).
-UNTRUSTED_HEAD = re.compile(r"\$\{\{\s*github\.(?:head_ref|event\.(?:number|pull_request\.(?:head\.[\w.]+|merge_commit_sha|number)"
-                            r"|workflow_run\.head_[\w.]+))")
+UNTRUSTED_HEAD = re.compile(r"\bgithub\.(?:head_ref|event\.(?:number|issue\.number|pull_request\.(?:head\.[\w.]+|merge_commit_sha|number)"
+                            r"|workflow_run\.(?:head_[\w.]+|pull_requests\b)))", re.I)
+ENV_USE = re.compile(r"\$\{?([A-Za-z_]\w*)|\$\{\{\s*env\.([A-Za-z_]\w*)")
+OUTPUT_USE = re.compile(r"\bsteps\.([\w-]+)\.outputs\.([\w-]+)")
+INPUT_USE = re.compile(r"(?<![\w.])inputs\.([\w-]+)")
+
+
+def head_value(value):
+    """True when a checkout input names the PR head (or refs/pull/<number>)."""
+    return bool(HEAD_REF.search(value) or "pull/" in value and PR_NUMBER.search(value))
+
+
+def flow_pairs(value):
+    """{key: value} of a one-line flow mapping such as `{ ref: "x", path: y }` (no nesting)."""
+    exprs, cursor, text = [], 0, ""
+    while True:  # Hide ${{ }} so their braces and commas do not end a value (linear find loop).
+        start = value.find("${{", cursor)
+        end = value.find("}}", start + 3) if start >= 0 else -1
+        if end < 0:
+            text += value[cursor:]
+            break
+        text += value[cursor:start] + "\0%d\0" % len(exprs)
+        exprs.append(value[start:end + 2])
+        cursor = end + 2
+    return {m[1]: re.sub(r"\0(\d+)\0", lambda e: exprs[int(e[1])], m[2]).strip() for m in re.finditer(
+        r"""["']?([\w-]+)["']?\s*:\s*("(?:[^"\\]|\\.)*(?:"|$)|'(?:[^']|'')*(?:'|$)|[^,}]*)""", text.strip()[1:])}
+
+
+def mapping_values(lines, index, value, end):
+    """{key: value} of the block (or one-line flow) mapping under the key on lines[index]."""
+    if value.lstrip().startswith("{"):
+        return flow_pairs(value)
+    key = re.match(r" *(?:- +)?", lines[index])
+    entries = yaml_children(lines, index + 1, end)
+    if not entries or len(lines[entries[0][1]]) - len(lines[entries[0][1]].lstrip(" ")) <= key.end():
+        return {}
+    return {k: "\n".join(lines[i + 1:stop]) if re.match(r"[|>][0-9+-]*\s*(#.*)?$", v) else v
+            for k, i, v, stop in entries if k is not None}
+
+
+def local_calls(files, root, privileged):
+    """callee -> [(caller, {input: value}, caller is privileged)] of local `uses: ./x` jobs and steps."""
+    root, calls = Path(root).resolve(), {}
+    for p in files:
+        if not (is_workflow(p) or p.name in ("action.yml", "action.yaml")):
+            continue
+        lines = read(p).splitlines()
+        sites = [(x["keys"]["uses"][1], x["keys"].get("with"), x["end"]) for x in yaml_items(lines) if "uses" in x["keys"]]
+        jobs = child(yaml_children(lines), "jobs")
+        for job in yaml_children(lines, jobs[1] + 1, jobs[3]) if jobs else []:
+            props = yaml_children(lines, job[1] + 1, job[3])
+            uses, given = child(props, "uses"), child(props, "with")
+            if uses:
+                sites.append((uses[2], given and given[1:3], job[3]))
+        for uses, given, end in sites:
+            m = re.match(r"""["']?\./([^\s"'#@]*)""", uses)
+            if not m:
+                continue
+            target = (root / m[1]).resolve()
+            values = mapping_values(lines, given[0], given[1], end) if given else {}
+            for cand in (target, target / "action.yml", target / "action.yaml"):
+                if (cand == root or root in cand.parents) and cand.is_file():
+                    calls.setdefault(cand, []).append((p, values, p.resolve() in privileged))
+    return calls
 
 
 def flow_depth(code):
@@ -955,8 +1030,8 @@ def on_section(text):
         if depth > 0:
             depth += flow_depth(ln.split("#")[0])
             out.append((number, ln, True))
-        elif ln.strip() and not ln[:1].isspace() and not ln.lstrip().startswith("#"):
-            break
+        elif ln.strip() and not ln[:1].isspace() and not ln.startswith(("#", "- ")) and ln != "-":
+            break  # (An indentationless `- name` list still belongs to `on:`.)
         else:
             out.append((number, ln, False))
     return out
@@ -964,13 +1039,13 @@ def on_section(text):
 
 def workflow_triggers(text):
     """Trigger names, from `on: x`, flow `on: [x, y]` (also multi-line) and block `on:` keys (conservative)."""
-    found, in_on = set(), 0
+    found, in_on = set(), None
     for n, (_, ln, flow) in enumerate(on_section(text)):
         if flow:
             found |= set(re.findall(r"[a-z_]+", (ln.split(":", 1)[1] if n == 0 else ln).split("#")[0]))
             continue
-        k = re.match(r"""^(\s+)(?:-\s+)?["']?([a-z_]+)["']?\s*(:|$)""", ln)
-        if k and (not in_on or len(k.group(1)) <= in_on):
+        k = re.match(r"""^(\s*)(?:-\s+)?["']?([a-z_]+)["']?\s*(:|$)""", ln)
+        if k and (in_on is None or len(k.group(1)) <= in_on):
             in_on = len(k.group(1))
             found.add(k.group(2))
     return found
@@ -997,23 +1072,29 @@ def trigger_line(text, name):
     return section[0][0] if section else None
 
 
+def is_workflow(p):
+    """GitHub runs only the files directly in a .github/workflows directory."""
+    p = Path(p)
+    return p.suffix in (".yml", ".yaml") and p.parent.name == "workflows" and p.parent.parent.name == ".github"
+
+
 def privileged_workflows(files, root):
     """Workflows that run with secrets on outsider events, plus local reusable
     workflows and actions they call (which inherit that context)."""
     root = Path(root).resolve()
     priv = {}
     for p in files:
-        if ".github/workflows" in str(p).replace(os.sep, "/") and p.suffix in (".yml", ".yaml"):
+        if is_workflow(p):
             text = read(p)
-            t = workflow_triggers(text) & set(PRIVILEGED_TRIGGERS)
+            t = [x for x in PRIVILEGED_TRIGGERS if x in workflow_triggers(text)]
             if t or escaped_triggers(text):
-                priv[p.resolve()] = sorted(t)[0] if t else "pull_request_target"
+                priv[p.resolve()] = t[0] if t else "pull_request_target"
     # Follow local calls to a fixed point: a callee's own callees run in the
     # same privileged context (a -> b.yml -> c.yml). `./` is the checkout root.
     pending = list(priv)
     while pending:
         p = pending.pop()
-        for m in re.finditer(r"""uses[ \t]*:[ \t]*["']?(?:\.|\$)/([^\s"'#@]+)""", read(p)):
+        for m in re.finditer(r"""\buses["']?[ \t]*:[ \t]*["']?(?:\.|\$)/([^\s"'#@]*)""", read(p)):
             target = (root / m.group(1)).resolve()
             for cand in (target, target / "action.yml", target / "action.yaml"):
                 # Only files of this checkout; scan() visits nothing else anyway.
@@ -1059,8 +1140,10 @@ def check_source_transport(c, p):
             # String contents are blanked (same length) so their braces do not count;
             # spans are the parts of the line inside a repositories block.
             code = re.sub(r"(?<!:)//.*", "", ln)
-            bare = re.sub(r""""(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'""",
-                          lambda m: m[0][0] + " " * (len(m[0]) - 2) + m[0][-1], code)
+            # An unterminated string runs to the end of the line (linear, no rescans).
+            bare = re.sub(r""""(?:\\.|[^"\\])*(?:"|$)|'(?:\\.|[^'\\])*(?:'|$)""",
+                          lambda m: m[0][0] + " " * (len(m[0]) - 1) if len(m[0]) < 2 or m[0][-1] != m[0][0]
+                          else m[0][0] + " " * (len(m[0]) - 2) + m[0][-1], code)
             if pending and bare.strip() and not bare.lstrip().startswith("{"):
                 pending = False
             spans, start = [], 0 if repo_depth is not None else None
@@ -1111,21 +1194,23 @@ def check_extra_sources(c, p):
                       fix="Use a single index that proxies PyPI, or pin hashes")
     elif p.name.lower() == "nuget.config":
         text = xml_code(text)
-        adds = []  # (line, key) of <add> inside <packageSources>
+        adds, cursor = [], [0, 1]  # (line, key) of <add> inside <packageSources>; offsets only increase
         for block in re.finditer(r"<packageSources\b[^<>]*>(.*?)(?:</packageSources>|\Z)", text, re.S | re.I):
             for m in re.finditer(r"""<add\s[^<>]*?\bkey\s*=\s*["']([^"']*)""", block[1], re.I):
-                adds.append((text.count("\n", 0, block.start(1) + m.start()) + 1, m[1].lower()))
+                pos = block.start(1) + m.start()
+                cursor[1] += text.count("\n", cursor[0], pos); cursor[0] = pos
+                adds.append((cursor[1], m[1].lower()))
         mapped = {}
         for block in re.finditer(r"<packageSourceMapping\b[^<>]*>(.*?)(?:</packageSourceMapping>|\Z)", text, re.S | re.I):
             for src in re.finditer(r"""<packageSource\s[^<>]*?\bkey\s*=\s*["']([^"']*)["'][^<>]*>(.*?)(?:</packageSource>|\Z)""",
                                    block[1], re.S | re.I):
                 mapped.setdefault(src[1].lower(), set()).update(
                     re.findall(r"""<package\s[^<>]*?\bpattern\s*=\s*["']([^"']*)""", src[2], re.I))
-        # Mapping mitigates only when every source is assigned prefixes and at most
-        # one catch-all `*` source remains; otherwise sources still race.
-        catch_all = [k for _, k in adds if not mapped.get(k, set()) - {"*"}]
-        mitigated = mapped and all(mapped.get(k) for _, k in adds) and len(catch_all) <= 1 and sum(
-            "*" in v for v in mapped.values()) <= 1
+        # NuGet takes the most specific matching pattern and considers every source
+        # that maps it, so mapping mitigates only when every source is mapped and no
+        # pattern (`*` included) is mapped to two sources.
+        owners = [x.lower() for _, k in adds for x in mapped.get(k, ())]
+        mitigated = all(mapped.get(k) for _, k in adds) and len(owners) == len(set(owners))
         # <clear/> only drops inherited sources; two declared sources still race
         # for every package id unless packageSourceMapping assigns them.
         if len(adds) > 1 and not mitigated:
@@ -1143,7 +1228,7 @@ def check_extra_sources(c, p):
 def yaml_items(lines):
     """Block-sequence items (conservative): {start, end, parent, keys}; keys maps the
     item's own keys to (index, value). Block scalar contents are skipped."""
-    items, stack, scalar, last = [], [], None, {}
+    items, stack, scalar, last = [], [], None, []  # last: (indent, index, dash), indents increasing
     for i, ln in enumerate(lines):
         s = ln.strip()
         if not s or s.startswith("#"):
@@ -1156,12 +1241,18 @@ def yaml_items(lines):
         while stack and indent <= stack[-1][0]:
             stack.pop()[1]["end"] = i
         dash = re.match(r" *- +", ln)
+        while last and last[-1][0] > indent:
+            last.pop()  # A shallower later line is always the nearer parent candidate.
         if dash:
-            parent = max((j for d, (j, item) in last.items() if d < indent or d == indent and not item), default=-1)
+            # The nearest shallower line, or a same-indent key (indentationless sequence).
+            k = len(last) - 2 if last and last[-1][0] == indent and last[-1][2] else len(last) - 1
+            parent = last[k][1] if k >= 0 else -1
             stack.append((indent, {"start": i, "end": len(lines), "level": len(dash[0]), "parent": parent, "keys": {}}))
             items.append(stack[-1][1])
-        if not (dash and indent in last and not last[indent][1]):
-            last[indent] = (i, bool(dash))
+        if not (dash and last and last[-1][0] == indent and not last[-1][2]):
+            if last and last[-1][0] == indent:
+                last.pop()
+            last.append((indent, i, bool(dash)))
         m = re.match(r"""( *)(- +)?["']?([\w.-]+)["']?\s*:(?:\s+(.*))?$""", ln)
         if m:
             level, value = len(m[1]) + len(m[2] or ""), (m[4] or "").strip()
@@ -1226,21 +1317,60 @@ EXECUTES_CHECKOUT = re.compile(
     r"|(?:bash|sh)\s+[\w./-]+\.sh\b|mvn\b|\./mvnw\b|gradle\b|\./gradlew\b)", re.M)
 
 
-GIT_MOVES = {"checkout", "switch", "reset", "worktree", "pull", "merge", "rebase", "cherry-pick"}
+GIT_MOVES = {"checkout", "switch", "reset", "worktree", "pull", "merge", "rebase", "cherry-pick", "clone"}
 
 
 def git_commands(line):
-    """(subcommand, args) of each git command in a shell line; linear, no regex backtracking."""
+    """(subcommand, args) of every git command in a shell line; linear, no regex backtracking."""
     out = []
+    # Shell separators inside ${{ }} belong to the expression, e.g. format('pull/{0}/head', …).
+    parts, at = [], 0
+    while True:
+        start = line.find("${{", at)
+        end = line.find("}}", start + 3) if start >= 0 else -1
+        if end < 0:
+            break
+        parts += [line[at:start], re.sub(r"[;&|()`,]", " ", line[start:end + 2])]
+        at = end + 2
+    line = "".join(parts) + line[at:]
     for seg in re.split(r"[;&|()`]", line):
         words = [w.strip("'\"") for w in seg.split()]  # "a:b" and a:b name the same refspec
-        i = next((k for k, w in enumerate(words) if w == "git" or w.endswith("/git")), None)
-        rest = words[i + 1:] if i is not None else []
-        while rest and rest[0].startswith("-"):
-            rest = rest[2:] if rest[0] in ("-C", "-c") else rest[1:]
-        if rest:
-            out.append((rest[0], rest[1:]))
+        starts = [k for k, w in enumerate(words) if w == "git" or w.endswith("/git")]
+        for start, stop in zip(starts, starts[1:] + [len(words)]):
+            i = start + 1
+            while i < stop and words[i].startswith("-"):
+                i += 2 if words[i] in ("-C", "-c") else 1
+            if i < stop:
+                out.append((words[i], words[i + 1:stop]))
     return out
+
+
+def github_writes(line):
+    """(GITHUB_ENV|GITHUB_OUTPUT, name, value) of each `NAME=value >> $GITHUB_ENV` write in a shell line."""
+    out = []
+    for seg in re.split(r"[;&|]", line):
+        m = re.search(r""">>\s*["']?\$\{?(GITHUB_ENV|GITHUB_OUTPUT)\b""", seg)
+        if m:
+            before, eq, value = seg[:m.start()].partition("=")
+            name = re.search(r"(?<![\w-])([A-Za-z_][\w-]*)$", before)
+            if eq and name:
+                out.append((m[1], name[1], value))
+    return out
+
+
+def scalar_rows(lines):
+    """Flags for rows inside `key: |` / `key: >` block scalars, whose text is data, not YAML."""
+    inside, level = bytearray(len(lines)), None
+    for i, ln in enumerate(lines):
+        if level is not None:
+            if not ln.strip() or len(ln) - len(ln.lstrip(" ")) > level:
+                inside[i] = 1
+                continue
+            level = None
+        m = re.match(r"""( *)(- +)?["']?[\w.-]+["']?[ \t]*:[ \t]+[|>][0-9+-]*[ \t]*(#.*)?$""", ln)
+        if m:
+            level = len(m[1]) + len(m[2] or "")
+    return inside
 
 
 def branch(ref):
@@ -1249,10 +1379,11 @@ def branch(ref):
     return ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref[6:] if ref.startswith("heads/") else ref
 
 
-def check_workflow(c, p, privileged=None):
+def check_workflow(c, p, privileged=None, calls=None):
     text = read(p)
     lines = text.splitlines()
     triggers = workflow_triggers(text)
+    callers = (calls or {}).get(Path(p).resolve(), [])
     if escaped_triggers(text):
         incomplete(c, "workflow scan", p, "escaped trigger names require manual review")
     if "workflow_run" in triggers:
@@ -1261,61 +1392,191 @@ def check_workflow(c, p, privileged=None):
               impact="Runs with repository secrets after fork PR workflows; dangerous if it uses their artifacts or code",
               fix="Treat artifacts and head refs of the triggering run as untrusted data; never execute them")
     items = yaml_items(lines)
+    by_start, owned = {x["start"]: x for x in items}, {}
+
+    def own(st):
+        """Row indices of a sequence item, without the items nested inside it."""
+        if id(st) not in owned:
+            rows, i = [], st["start"]
+            while i < st["end"]:
+                nested = by_start.get(i)
+                if nested is not None and nested is not st:
+                    i = max(nested["end"], i + 1)
+                else:
+                    rows.append(i)
+                    i += 1
+            owned[id(st)] = rows
+        return owned[id(st)]
+
+    import bisect
     steps = [x for x in items if "uses" in x["keys"] or "run" in x["keys"]]
+    top = yaml_children(lines)
+    jobs_entry = child(top, "jobs")
+    jobs = [(e, yaml_children(lines, e[1] + 1, e[3]))
+            for e in (yaml_children(lines, jobs_entry[1] + 1, jobs_entry[3]) if jobs_entry else [])]
+    job_starts = [e[1] for e, _ in jobs]
+
+    def job_of(row):
+        k = bisect.bisect_right(job_starts, row) - 1
+        return (jobs[k][0][1], jobs[k][0][3]) if k >= 0 and row < jobs[k][0][3] else None
+
+    def run_rows(st):
+        """(line number, text) of a run step; double-quoted YAML escapes decoded into lines."""
+        rows = [(i + 1, lines[i]) for i in own(st) if i >= st["keys"]["run"][0]]
+        if not st["keys"]["run"][1].startswith('"'):
+            return rows
+        decode = {"n": "\n", "t": "\t"}
+        return [(n, part) for n, x in rows
+                for part in re.sub(r"\\(.)", lambda m: decode.get(m[1], m[1]), x).split("\n")]
+
     head_checkout = False
     if privileged:
-        jobs_entry = child(yaml_children(lines), "jobs")
-        job_spans = [(e[1], e[3]) for e in yaml_children(lines, jobs_entry[1] + 1, jobs_entry[3])] if jobs_entry else []
-        top = range(0, jobs_entry[1] if jobs_entry else len(lines))
-        in_step = {i for st in steps for i in range(st["start"], st["end"])}
+        top_rows = range(0, jobs_entry[1] if jobs_entry else len(lines))
+        depth, in_step = [0] * (len(lines) + 1), bytearray(len(lines))
+        for st in steps:
+            depth[st["start"]] += 1
+            depth[st["end"]] -= 1
+        running = 0
+        for i in range(len(lines)):
+            running += depth[i]
+            in_step[i] = running > 0
 
         def assigned(rows):
-            out = {}
+            out, until = {}, 0
             for i in rows:
-                m = re.match(r"""[ \t]*(?:-[ \t]+)?([A-Za-z_]\w*)[ \t]*:[ \t]*["']?(.*)$""", lines[i])
+                if i < until:
+                    continue  # inside a block scalar already read as a value
+                m = re.match(r"""([ \t]*)(?:-[ \t]+)?([A-Za-z_]\w*)[ \t]*:[ \t]*["']?(.*)$""", lines[i])
                 if m:
-                    out[m[1]] = out.get(m[1], False) or bool(UNTRUSTED_HEAD.search(m[2]))
+                    value = m[3]
+                    if re.match(r"[|>][-+0-9]*[ \t]*(?:#.*)?$", value):  # block scalar: its lines are the value
+                        k, body = i + 1, []
+                        while k < len(lines) and (not lines[k].strip() or
+                                                  len(lines[k]) - len(lines[k].lstrip()) > len(m[1])):
+                            body.append(lines[k])
+                            k += 1
+                        value, until = "\n".join(body), k
+                    out[m[2]] = out.get(m[2], False) or bool(UNTRUSTED_HEAD.search(value))
             return out
 
-        workflow_env, job_env, patterns = assigned(top), {}, {}
+        workflow_env, job_env, job_names, written, outputs = assigned(top_rows), {}, {}, {}, {}
 
-        def step_env(st, job):
-            # GitHub resolves env names step first, then job, then workflow.
+        def step_env(st, job, writes=True):
+            """Env names holding the PR head for this step: step, then job, then workflow, then $GITHUB_ENV."""
+            # One generic pattern plus set membership: no per-step regex compile or set copies.
             if job not in job_env:
-                job_env[job] = {k for k, v in dict(workflow_env, **(
-                    assigned(i for i in range(*job) if i not in in_step) if job else {})).items() if v}
-            step = assigned(range(st["start"], st["end"]))
-            names = frozenset({"GITHUB_HEAD_REF"} | job_env[job] - set(step) | {k for k, v in step.items() if v})
-            if names not in patterns:
-                alt = "|".join(sorted(names))
-                patterns[names] = re.compile(r"\$\{?(?:" + alt + r")\b|\$\{\{\s*env\.(?:" + alt + r")\b")
-            return patterns[names]
+                job_env[job] = dict(workflow_env, **(assigned(i for i in range(*job) if not in_step[i]) if job else {}))
+            if (job, writes) not in job_names:
+                job_names[job, writes] = {k for k, v in list(job_env[job].items())
+                                          + list(written.get(job, {}).items() if writes else ()) if v}
+            step, names = assigned(own(st)), job_names[job, writes]
+            matcher = lambda x: any(n == "GITHUB_HEAD_REF" or (step[n] if n in step else n in names)
+                                    for n in (m[1] or m[2] for m in ENV_USE.finditer(x)))
+            matcher.defined = lambda n: n in step or n in job_env[job]
+            return matcher
+
+        for st in steps:  # $GITHUB_ENV / $GITHUB_OUTPUT writes of PR-head values, per job
+            if "run" in st["keys"]:
+                job, env_ref = job_of(st["start"]), None
+                for _, x in run_rows(st):
+                    for kind, name, value in github_writes(x) if "GITHUB_" in x else ():
+                        env_ref = env_ref or step_env(st, job, writes=False)
+                        bad = bool(UNTRUSTED_HEAD.search(value) or head_value(value) or env_ref(value))
+                        if kind == "GITHUB_ENV":
+                            written.setdefault(job, {})[name] = written.get(job, {}).get(name, False) or bad
+                        elif step_value(st, "id"):
+                            outputs.setdefault(job, {})[(step_value(st, "id"), name)] = bad
+
+        def ref_source(value, job, env_ref):
+            """'head' when a checkout input is the PR head; else the unresolved sources it names."""
+            if head_value(value) or env_ref(value):
+                return "head"
+            kinds = set()
+            for sid, name in OUTPUT_USE.findall(value):
+                if outputs.get(job, {}).get((sid, name)):
+                    return "head"
+                kinds.add("a step output")
+            for name in INPUT_USE.findall(value):
+                for _, given, caller_privileged in callers:
+                    v = given.get(name, "")
+                    if caller_privileged and head_value(v):
+                        return "head"
+                    if caller_privileged and "${{" in v and not HEAD_REF.search(v):
+                        kinds.add("a caller's input")
+            if re.search(r"\bneeds\.[\w-]+\.outputs\.", value):
+                kinds.add("a job output")
+            if re.search(r"\bmatrix\.", value):
+                kinds.add("a matrix value")
+            for name in re.findall(r"\benv\.([A-Za-z_]\w*)", value):
+                if name in written.get(job, {}) or not env_ref.defined(name):
+                    kinds.add("an environment variable")
+            return kinds
+
+        # Steps that execute their checkout: computed once, not per head checkout.
+        executing, last_exec = {}, {}
+        for n, x in enumerate(steps):
+            if "run" in x["keys"]:
+                script = "\n".join(lines[i] for i in own(x) if i >= x["keys"]["run"][0]).split(":", 1)[1]
+                if EXECUTES_CHECKOUT.search(script):
+                    executing.setdefault(x["parent"], []).append((n, "\n".join(lines[i] for i in own(x))))
+
+        def executed_later(n, parent, path):
+            if (parent, path) not in last_exec:
+                last_exec[parent, path] = max((k for k, t in executing.get(parent, []) if not path or path in t),
+                                              default=-1)
+            return last_exec[parent, path] > n
 
         job_fetched = {}  # refs an earlier step of the job fetched from the PR head
         for n, st in enumerate(steps):
-            job = next((s for s in job_spans if s[0] <= st["start"] < s[1]), None)
+            job = job_of(st["start"])
             env_ref = step_env(st, job)
             uses = step_value(st, "uses")
-            body = lines[st["start"]:st["end"]]
+            rows = own(st)
+            body = [lines[i] for i in rows]
             hits = []
             # The PR head is only executed when a checkout step fetches it; the same
             # value passed to another action's ref/repository input is data.
             if re.match(r"actions/checkout@", uses, re.I):
-                hits = [st["start"] + k + 1 for k, x in enumerate(body)
-                        if re.match(r"\s*(?:-\s+)?(?:ref|repository)\s*:", x)
-                        and (UNTRUSTED_REF.search(x) or env_ref.search(x))]
+                j = 0
+                for k, i in enumerate(rows):
+                    if k < j:
+                        continue  # already read as part of a multi-line value
+                    m = re.match(r"""\s*(?:-\s+)?(?:["']?with["']?\s*:\s*(\{.*)|["']?(?:ref|repository)["']?\s*:(.*))""", lines[i])
+                    if not m:
+                        continue
+                    if m[1] is not None:  # flow mapping, possibly over several lines
+                        flow, j = m[1], k + 1
+                        while flow_depth(flow) > 0 and j < len(rows):
+                            flow, j = flow + " " + lines[rows[j]].strip(), j + 1
+                        values = [v for key, v in flow_pairs(flow).items() if key in ("ref", "repository")]
+                    else:  # plain, quoted or block scalar value, possibly continued on later lines
+                        value, level, j = m[2], len(lines[i]) - len(lines[i].lstrip()), k + 1
+                        while j < len(rows) and (not lines[rows[j]].strip()
+                                                 or len(lines[rows[j]]) - len(lines[rows[j]].lstrip()) > level):
+                            value, j = value + "\n" + lines[rows[j]], j + 1
+                        values = [value]
+                    for value in values:
+                        source = ref_source(value, job, env_ref)
+                        if source == "head":
+                            hits.append(i + 1)
+                            continue
+                        for kind in sorted(source):
+                            incomplete(c, "workflow scan", p, f"checkout ref from {kind} requires manual review")
+                hits = list(dict.fromkeys(hits))
                 title = f"{privileged} workflow checks out the pull request's code"
             elif "run" in st["keys"]:
-                run = [(st["start"] + k + 1, x) for k, x in enumerate(body) if k >= st["keys"]["run"][0] - st["start"]]
-                untrusted = lambda x: (UNTRUSTED_HEAD.search(x) or env_ref.search(x)
-                                       or re.search(r"\bpull/[^\s/]*/(?:head|merge)\b", x))
+                run = run_rows(st)
+                untrusted = lambda x: (UNTRUSTED_HEAD.search(x) or env_ref(x)
+                                       or re.search(r"\bpull/[^\s/]*/(?:head|merge)\b", x)
+                                       or any(outputs.get(job, {}).get(o) for o in OUTPUT_USE.findall(x)))
                 # Fetching the PR head is data until this step checks it out, resets or
                 # merges onto it: FETCH_HEAD, the fetched ref or a local refspec target.
                 fetches = [a for _, x in run for sub, a in git_commands(x) if sub == "fetch" and untrusted(" ".join(a))]
                 fetched = job_fetched.setdefault(job, set())
                 if fetches:
                     fetched |= {"FETCH_HEAD"} | {branch(a.split(":", 1)[1]) for f in fetches for a in f if ":" in a}
-                hits = [k for k, x in run if re.search(r"\bgh\s+pr\s+checkout\b", x) or any(
+                hits = [k for k, x in run if re.search(r"\bgh\s+pr\s+checkout\b", x)
+                        or re.search(r"\bgh\s+repo\s+clone\b", x) and untrusted(x) or any(
                     sub in GIT_MOVES and (untrusted(" ".join(args)) or fetched & {branch(a) for a in args})
                     for sub, args in git_commands(x))][:1]
                 title = f"{privileged} workflow checks out the pull request's code in a run step"
@@ -1323,26 +1584,33 @@ def check_workflow(c, p, privileged=None):
                 head_checkout = True
                 path = next((re.sub(r"\s+#.*", "", x.split(":", 1)[1]).strip().strip("'\"")
                              for x in body if re.match(r"\s*path\s*:", x)), "")
-                later = [x for x in steps[n + 1:] if x["parent"] == st["parent"] and "run" in x["keys"]]
-                runs = any(EXECUTES_CHECKOUT.search("\n".join(lines[x["keys"]["run"][0]:x["end"]]).split(":", 1)[1])
-                           and (not path or path in "\n".join(lines[x["start"]:x["end"]])) for x in later)
+                runs = executed_later(n, st["parent"], path)
                 c.add("High", title, p, line, category=CAT_BUILD, confidence="Confirmed" if runs else "Suspected",
                       impact="Fork authors' code runs with repository secrets and a write token (pwn request)"
                              + ("; a later step executes the checkout" if runs else ""),
                       fix="Use pull_request for building PR code, or never run anything from the checkout")
-            if (re.match(r"[\w.-]+/[\w.-]*download-artifact@", uses, re.I) and privileged == "workflow_run"
+            # Artifacts of the triggering run: download actions with run-id, gh run download, github-script.
+            if "workflow_run" in (privileged, *triggers) and (
+                    re.match(r"[\w.-]+/[\w.-]*download-artifact@", uses, re.I)
                     and not (re.match(r"actions/download-artifact@", uses, re.I)
-                             and not any(re.match(r"\s*run-id\s*:", x) for x in body))):
+                             and not any(re.match(r"\s*run-id\s*:", x) for x in body))
+                    or re.match(r"actions/github-script@", uses, re.I) and "downloadArtifact" in "\n".join(body)
+                    or "run" in st["keys"] and any(re.search(r"\bgh\s+run\s+download\b", x) for _, x in run_rows(st))):
                 c.add("Medium", "workflow_run workflow downloads artifacts from the triggering run", p,
-                      st["keys"]["uses"][0] + 1, category=CAT_BUILD, confidence="Suspected",
+                      (st["keys"].get("uses") or st["keys"]["run"])[0] + 1, category=CAT_BUILD, confidence="Suspected",
                       impact="A fork PR controls the artifact; executing or interpolating it runs with secrets",
                       fix="Extract to a temp dir, validate as data, never execute it or write it to GITHUB_ENV")
-        for i, ln in enumerate(lines, 1):
-            if re.match(r"""\s*runs-on\s*:.*\bself-hosted\b""", ln):
-                c.add("Medium", f"{privileged} job runs on a self-hosted runner", p, i, category=CAT_BUILD,
-                      confidence="Suspected",
-                      impact="Outsider-triggered jobs can persist on the runner host and its network",
-                      fix="Use GitHub-hosted or ephemeral, isolated runners for outsider-triggered events")
+        hosted = {i for i, ln in enumerate(lines, 1) if re.match(r"""\s*runs-on\s*:.*\bself-hosted\b""", ln)}
+        for _, props in jobs:  # also block lists and `labels:` under runs-on
+            runs_on = child(props, "runs-on")
+            if runs_on and any(re.search(r"\bself-hosted\b", re.sub(r"(?:^|\s)#.*", "", x))
+                               for x in lines[runs_on[1]:runs_on[3]]):
+                hosted.add(runs_on[1] + 1)
+        for i in sorted(hosted):
+            c.add("Medium", f"{privileged} job runs on a self-hosted runner", p, i, category=CAT_BUILD,
+                  confidence="Suspected",
+                  impact="Outsider-triggered jobs can persist on the runner host and its network",
+                  fix="Use GitHub-hosted or ephemeral, isolated runners for outsider-triggered events")
     if "pull_request_target" in triggers and not head_checkout:
         c.add("Medium", "workflow triggers on pull_request_target", p, trigger_line(text, "pull_request_target"),
               category=CAT_BUILD, confidence="Suspected",
@@ -1353,15 +1621,18 @@ def check_workflow(c, p, privileged=None):
             c.add("Medium" if privileged else "Low", "workflow grants permissions: write-all", p, i,
                   category=CAT_BUILD, impact="Any compromised step can push code, releases and packages",
                   fix="Grant only the scopes each job needs, read-only by default")
-        m = re.match(r"""\s*(?:-\s+)?uses\s*:\s*["']?([\w.-]+/[\w.-]+/\.github/workflows/[^\s"'#]+)""", ln)
-        if m and any(re.match(r"\s*secrets\s*:\s*inherit\b", x) for x in lines[i:i + 8]):
-            c.add("Medium", f"every secret is passed to external reusable workflow {m.group(1)}", p, i,
+    for _, props in jobs:  # `secrets: inherit` anywhere in the same job as the external `uses:`
+        uses, secrets = child(props, "uses"), child(props, "secrets")
+        m = uses and re.match(r"""["']?([\w.-]+/[\w.-]+/\.github/workflows/[^\s"'#]+)""", uses[2])
+        if m and secrets and re.match(r"""["']?inherit\b""", secrets[2]):
+            c.add("Medium", f"every secret is passed to external reusable workflow {m.group(1)}", p, uses[1] + 1,
                   category=CAT_BUILD, impact="A change in that repository can read all of this repository's secrets",
                   fix="Pass only the named secrets it needs and pin it to a commit SHA")
     images = []  # (line, image) of docker:// actions, job containers and service containers
+    data = scalar_rows(lines)
     for i, ln in enumerate(lines, 1):
-        # Only a YAML `uses:` key; comments and shell text mentioning it are not steps.
-        m = re.match(r"""^\s*(?:-\s+)?(?:\{\s*)?["']?uses["']?\s*:\s*([^\s#,}]+)""", ln)
+        # Only a YAML `uses:` key; comments, shell text and other block scalar text are not steps.
+        m = not data[i - 1] and re.match(r"""^\s*(?:-\s+)?(?:\{\s*)?["']?uses["']?\s*:\s*([^\s#,}]+)""", ln)
         if m:
             ref = m.group(1).strip("'\"")
             if ref.startswith("docker://"):
@@ -1378,9 +1649,7 @@ def check_workflow(c, p, privileged=None):
                 c.add(sev, f"action {ref} is pinned to a mutable tag, not a commit SHA", p, i, category=CAT_BUILD,
                       impact="A moved or compromised tag changes the code that runs with your secrets",
                       fix="Pin to the full commit SHA and note the version in a comment")
-    jobs = child(yaml_children(lines), "jobs")
-    for job in yaml_children(lines, jobs[1] + 1, jobs[3]) if jobs else []:
-        props = yaml_children(lines, job[1] + 1, job[3])
+    for job, props in jobs:
         container = child(props, "container")
         if container and container[2]:
             images.append((container[1] + 1, image_ref(container[2])))
@@ -1398,6 +1667,45 @@ def check_workflow(c, p, privileged=None):
             c.add("Low", f"workflow container image {img} is not pinned to a digest", p, i, category=CAT_BUILD,
                   impact="A moved or replaced tag changes the container that runs with your secrets",
                   fix="Pin the image to its @sha256: digest")
+    owner, envs = {}, {}  # row -> innermost item; scope -> env {name: value}
+    for st in items:
+        owner.update((i, st) for i in own(st))
+    job_props = {(e[1], e[3]): props for e, props in jobs}
+
+    def env_of(scope, entry, end):
+        if scope not in envs:
+            envs[scope] = mapping_values(lines, entry[0], entry[1], end) if entry else {}
+        return envs[scope]
+
+    def tainted(path, value):
+        return any(untrusted_workflow_expression(c, path, e) for _, e in workflow_expressions(c, path, value))
+
+    on = child(top, "on")
+    call = on and child(yaml_children(lines, on[1] + 1, on[3]), "workflow_call")
+    declared = child(yaml_children(lines, call[1] + 1, call[3]), "inputs") if call else child(top, "inputs")
+    # A boolean or number input is coerced by GitHub, so caller text cannot reach the script.
+    typed = {e[0] for e in (yaml_children(lines, declared[1] + 1, declared[3]) if declared else [])
+             if re.match(r"""["']?(boolean|number)\b""", (child(yaml_children(lines, e[1] + 1, e[3]), "type")
+                                                         or [None, 0, ""])[2])}
+
+    def indirect(expression, row):
+        """env.X resolved through step, job and workflow env maps; inputs.X through local callers."""
+        for kind, name in re.findall(r"(?<![\w.])(env|inputs)\s*\.\s*([A-Za-z_][\w-]*)", expression):
+            if kind == "inputs":
+                if name not in typed and any(name in given and tainted(caller, given[name]) for caller, given, _ in callers):
+                    return True
+                continue
+            st, job = owner.get(row), job_of(row)
+            job_entry, top_entry = child(job_props.get(job, []), "env"), child(top, "env")
+            for scope in ([env_of(("step", id(st)), st["keys"].get("env"), st["end"])] if st else []) + [
+                    env_of(("job", job), job_entry and job_entry[1:3], job_entry and job_entry[3]),
+                    env_of("workflow", top_entry and top_entry[1:3], len(lines))]:
+                if name in scope:  # The innermost definition wins.
+                    if tainted(p, scope[name]):
+                        return True
+                    break
+        return False
+
     for block in workflow_run_blocks(c, p, text):
         script = "\n".join(line for _, line in block)
         scalar_start = next((line.lstrip() for _, line in block
@@ -1416,8 +1724,9 @@ def check_workflow(c, p, privileged=None):
         reported = set()
         seen_pos, seen_nl = 0, 0
         for start, expression in workflow_expressions(c, p, script):
-            if untrusted_workflow_expression(c, p, expression):
-                seen_nl += script.count("\n", seen_pos, start); seen_pos = start
+            if untrusted_workflow_expression(c, p, expression) or indirect(expression, block[0][0] - 1):
+                seen_nl += script.count("\n", seen_pos, start)
+                seen_pos = start
                 line = block[seen_nl][0]
                 if line in reported:
                     continue
@@ -1453,7 +1762,7 @@ def check_dockerfile(c, p):
                 c.add("Low", f"base image {img} is not pinned", p, i, category=CAT_BUILD,
                       impact="Rebuilds pull a different image", fix="Pin a version tag, ideally a digest")
         segments = ln.split("|")
-        if any(re.match(r"\s*(sh|bash)", seg) and re.search(r"curl|wget", prev)
+        if any(re.match(r"\s*(sh|bash)\b", seg) and re.search(r"curl|wget", prev)
                for prev, seg in zip(segments, segments[1:])):
             c.add("Low", "remote script piped into a shell during build", p, i, category=CAT_BUILD,
                   impact="Build executes whatever the URL serves at that moment",
@@ -1522,7 +1831,8 @@ SEV_MAP = {"critical": "High", "high": "High", "moderate": "Medium", "medium": "
 
 def run(cmd, cwd, timeout=600, env=None):
     try:
-        r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, env=env)
+        r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, env=env,
+                           encoding="utf-8", errors="replace")
         return r.returncode, r.stdout, r.stderr
     except (OSError, subprocess.TimeoutExpired) as e:
         return None, "", str(e)
@@ -1803,9 +2113,9 @@ def audit_npm(c, root, lock):
     # disabling workspaces would silently omit members of a shared lock. Keep
     # this fallback single-project only instead of claiming partial coverage.
     try:
-        data = json.loads(lock.read_text(encoding="utf-8"))
+        data = json.loads(lock.read_text(encoding="utf-8").lstrip("\ufeff"))
         manifest = lock.parent / "package.json"
-        project = json.loads(manifest.read_text(encoding="utf-8")) if manifest.exists() else {}
+        project = json.loads(manifest.read_text(encoding="utf-8").lstrip("\ufeff")) if manifest.exists() else {}
         if not isinstance(data, dict) or not isinstance(project, dict):
             raise ValueError("invalid npm input")
         packages = data.get("packages", {})
@@ -1832,7 +2142,7 @@ def audit_npm(c, root, lock):
                        "workspace or linked-package lock requires osv-scanner; "
                        "npm fallback cannot guarantee whole-lock coverage")
             return
-    except (OSError, ValueError, UnicodeError):
+    except (OSError, ValueError, UnicodeError, RecursionError):
         incomplete(c, "npm audit", lock, "could not validate single-project audit input")
         return
     exe = shutil.which("npm")
@@ -2233,6 +2543,10 @@ def scan(root, audit):
     _OVERSIZED.clear()
     files = sorted(walk(root, c.not_run))
     privileged = privileged_workflows(files, root)
+    # A privileged workflow's local action under a pruned directory (build/, dist/)
+    # still runs with its secrets, so it is scanned too.
+    files += sorted(set(privileged) - set(files))
+    calls = local_calls(files, root, privileged)
     for p in files:
         n = p.name
         if n in LOCKS:
@@ -2253,9 +2567,8 @@ def scan(root, audit):
             check_gomod(c, p)
         elif n.startswith("Dockerfile") or n.endswith(".Dockerfile"):
             check_dockerfile(c, p)
-        elif p.suffix in (".yml", ".yaml") and (".github/workflows" in str(p).replace(os.sep, "/")
-                                                or n in ("action.yml", "action.yaml")):
-            check_workflow(c, p, privileged.get(p.resolve()))
+        elif is_workflow(p) or n in ("action.yml", "action.yaml"):
+            check_workflow(c, p, privileged.get(p.resolve()), calls)
         elif COMPOSE_FILE.fullmatch(n):
             check_compose(c, p)
         if n in SOURCE_CONFIGS or p.parent.name == ".cargo" and n in ("config", "config.toml"):
@@ -2300,15 +2613,22 @@ def finding_key(f):
 def merge_into(path, result, audit=None):
     """Replace D-* findings in path under the shared writer lock, atomically."""
     original = Path(path).read_bytes()
-    data = json.loads(original.decode("utf-8"))
+    try:
+        data = json.loads(original.decode("utf-8"))
+    except RecursionError:
+        raise ValueError("findings file is nested too deeply") from None
     if not isinstance(data, dict):
         raise ValueError("findings file must hold a JSON object")
+    if not isinstance(data.get("findings", []), list) or not all(isinstance(f, dict) for f in data.get("findings", [])):
+        raise ValueError("findings must be a list of objects")
+    if not isinstance(data.get("limitations", []), list):
+        raise ValueError("limitations must be a list")
     old = [f for f in data.get("findings", []) if str(f.get("id", "")).startswith("D-")]
     # Never silently reuse a reachability decision after code/config changes.
     # Keep a matching review as history, requiring revalidation on every scan.
     kept = {}
     for f in old:
-        val = f.get("validation") or {}
+        val = f.get("validation") if isinstance(f.get("validation"), dict) else {}
         previous = val if val and val.get("method") != "auto" else f.get("previous_validation")
         if previous:
             kept[finding_key(f)] = previous
@@ -2363,6 +2683,9 @@ def main(argv=None):
             return 2
         try:
             merge_into(a.into, result, audit=a.audit)
+        except RecursionError:
+            print(f"deps_scan.py: {a.into}: findings file is nested too deeply", file=sys.stderr)
+            return 2
         except (OSError, ValueError, MergeConflict) as exc:
             print(f"deps_scan.py: {a.into}: {exc}", file=sys.stderr)
             return 2
