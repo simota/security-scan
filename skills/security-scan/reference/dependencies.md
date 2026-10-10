@@ -68,9 +68,13 @@ needs rerunning outside the sandbox with the requester's agreement.
 ## 2. Judge what the scanner cannot
 
 - **Platform end of life** — read the runtime and framework versions from the
-  inventory (`platform`, `notable`) and compare with the vendor's support
-  schedule. Check the current schedule rather than recalling it; an unsupported
-  runtime or framework is High when it is internet-facing
+  manifests, lockfiles, Dockerfiles and CI files (the inventory's `platform` and
+  `notable` fields are filled only for Composer) and compare with the vendor's
+  support schedule. Check the current schedule rather than recalling it; an
+  unsupported runtime or framework is High when it is internet-facing. When the
+  schedule cannot be fetched (no network), do not decide from memory: add the
+  limitation "platform end of life not checked: vendor schedule unavailable
+  (<runtime and framework versions>)" instead of a finding
 - **Lockfile drift** — a lockfile older than the manifest, or a CI install that
   ignores it (`npm install` instead of `npm ci`, `composer update` in deploy)
 - **Direct dependencies worth a second look** — names one character away from a
