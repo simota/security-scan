@@ -201,6 +201,37 @@ class DepsScanRound5Tests(Temp):
         self.assertEqual(self.deps.pnpm_packages(path), ["packages/*"])
 
 
+    def high(self):
+        return [t for s, _, t in self.found() if s == "High"]
+
+    def test_a_ref_fetched_in_one_step_and_checked_out_in_a_later_one(self):
+        self.workflow(PRT + "      - run: git fetch origin pull/${{ github.event.number }}/head:pr\n"
+                            "      - run: git checkout pr\n")
+        self.assertTrue(any("in a run step" in t for t in self.high()))
+        # Another job has its own checkout state.
+        self.workflow(PRT + "      - run: git fetch origin pull/${{ github.event.number }}/head:pr\n"
+                            "  k:\n    runs-on: x\n    steps:\n      - run: git checkout pr\n")
+        self.assertFalse(self.high())
+
+    def test_environment_names_are_scoped_to_their_job(self):
+        self.workflow(PRT + "      - run: echo \"$BRANCH\"\n        env:\n          BRANCH: ${{ github.head_ref }}\n"
+                            "  k:\n    runs-on: x\n    env:\n      BRANCH: main\n    steps:\n"
+                            "      - run: git checkout \"$BRANCH\"\n")
+        self.assertFalse(self.high())
+        self.workflow("on: pull_request_target\nenv:\n  BRANCH: ${{ github.head_ref }}\njobs:\n  k:\n"
+                      "    runs-on: x\n    steps:\n      - run: git checkout \"$BRANCH\"\n")
+        self.assertTrue(self.high())
+        self.workflow("on: pull_request_target\nenv:\n  BRANCH: ${{ github.head_ref }}\njobs:\n  k:\n"
+                      "    runs-on: x\n    env:\n      BRANCH: main\n    steps:\n      - run: git checkout \"$BRANCH\"\n")
+        self.assertFalse(self.high())
+
+    def test_npm_link_through_an_in_checkout_symlink_to_outside(self):
+        outside = Path(tempfile.mkdtemp(prefix="security-scan-outside-"))
+        self.addCleanup(shutil.rmtree, outside, True)
+        (self.tmp / "vendored").symlink_to(outside, target_is_directory=True)
+        self.write("package.json", {"dependencies": {"a": "file:./vendored", "b": "file:./packages/b"}})
+        self.assertEqual([t.split()[2] for t in self.titles("fetched outside the registry")], ["a"])
+
 class MergeIdTests(Temp):
     @classmethod
     def setUpClass(cls):
@@ -238,6 +269,12 @@ class NoPdfLimitationTests(Temp):
         contradictory = self.limits(True)
         self.assertEqual(len(contradictory), 1, contradictory)
         self.assertIn("assessment.pdf exists", contradictory[0])
+
+
+class UrlUserTests(unittest.TestCase):
+    def test_user_name_only_credentials_count(self):
+        self.assertTrue(render.secret_in_source("ci/clone.txt", "git clone https://deploy-token@example.com/repo\n"))
+        self.assertFalse(render.secret_in_source("README.md", "git clone ssh://git@example.com/repo\n"))
 
 
 if __name__ == "__main__":

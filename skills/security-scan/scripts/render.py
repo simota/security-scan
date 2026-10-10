@@ -1406,7 +1406,9 @@ def secret_in_source(rel, text):
                 return True
         for m in URL_RE.finditer(line):
             try:
-                if urlsplit(m.group("url").replace("\\/", "/")).password:
+                parts = urlsplit(m.group("url").replace("\\/", "/"))
+                # https://TOKEN@host carries a credential as the user name alone.
+                if parts.password or parts.username and parts.scheme.lower() in ("http", "https"):
                     return True
             except ValueError:
                 return True

@@ -674,7 +674,8 @@ def npm_local_path(c, manifest, spec):
     m = re.match(r"(file:|link:)?(.*)$", spec, re.S)
     if not (m[2] and not re.match(r"[/\\~]|[A-Za-z][\w+.-]*:", m[2]) if m[1] else re.match(r"\.{1,2}/", m[2])):
         return False
-    target, root = os.path.abspath(os.path.join(Path(manifest).parent, m[2])), os.path.abspath(c.root)
+    # realpath follows in-checkout symlinks to their targets, as npm does.
+    target, root = os.path.realpath(os.path.join(Path(manifest).parent, m[2])), os.path.realpath(c.root)
     return os.path.commonpath([target, root]) == root
 
 
@@ -1257,11 +1258,37 @@ def check_workflow(c, p, privileged=None):
     steps = [x for x in items if "uses" in x["keys"] or "run" in x["keys"]]
     head_checkout = False
     if privileged:
-        untrusted_env = {"GITHUB_HEAD_REF"} | {
-            m[1] for m in re.finditer(r"""^[ \t]*([A-Za-z_]\w*)[ \t]*:[ \t]*["']?(.*)$""", text, re.M) if UNTRUSTED_HEAD.search(m[2])}
-        names = "|".join(sorted(untrusted_env))
-        env_ref = re.compile(r"\$\{?(?:" + names + r")\b|\$\{\{\s*env\.(?:" + names + r")\b")
+        jobs_entry = child(yaml_children(lines), "jobs")
+        job_spans = [(e[1], e[3]) for e in yaml_children(lines, jobs_entry[1] + 1, jobs_entry[3])] if jobs_entry else []
+        top = range(0, jobs_entry[1] if jobs_entry else len(lines))
+        in_step = {i for st in steps for i in range(st["start"], st["end"])}
+
+        def assigned(rows):
+            out = {}
+            for i in rows:
+                m = re.match(r"""[ \t]*(?:-[ \t]+)?([A-Za-z_]\w*)[ \t]*:[ \t]*["']?(.*)$""", lines[i])
+                if m:
+                    out[m[1]] = out.get(m[1], False) or bool(UNTRUSTED_HEAD.search(m[2]))
+            return out
+
+        workflow_env, job_env, patterns = assigned(top), {}, {}
+
+        def step_env(st, job):
+            # GitHub resolves env names step first, then job, then workflow.
+            if job not in job_env:
+                job_env[job] = {k for k, v in dict(workflow_env, **(
+                    assigned(i for i in range(*job) if i not in in_step) if job else {})).items() if v}
+            step = assigned(range(st["start"], st["end"]))
+            names = frozenset({"GITHUB_HEAD_REF"} | job_env[job] - set(step) | {k for k, v in step.items() if v})
+            if names not in patterns:
+                alt = "|".join(sorted(names))
+                patterns[names] = re.compile(r"\$\{?(?:" + alt + r")\b|\$\{\{\s*env\.(?:" + alt + r")\b")
+            return patterns[names]
+
+        job_fetched = {}  # refs an earlier step of the job fetched from the PR head
         for n, st in enumerate(steps):
+            job = next((s for s in job_spans if s[0] <= st["start"] < s[1]), None)
+            env_ref = step_env(st, job)
             uses = step_value(st, "uses")
             body = lines[st["start"]:st["end"]]
             hits = []
@@ -1278,9 +1305,11 @@ def check_workflow(c, p, privileged=None):
                 # Fetching the PR head is data until this step checks it out, resets or
                 # merges onto it: FETCH_HEAD, the fetched ref or a local refspec target.
                 fetches = [a for _, x in run for sub, a in git_commands(x) if sub == "fetch" and untrusted(" ".join(a))]
-                fetched = {"FETCH_HEAD"} | {a.split(":", 1)[1].lstrip("+") for f in fetches for a in f if ":" in a}
+                fetched = job_fetched.setdefault(job, set())
+                if fetches:
+                    fetched |= {"FETCH_HEAD"} | {a.split(":", 1)[1].lstrip("+") for f in fetches for a in f if ":" in a}
                 hits = [k for k, x in run if re.search(r"\bgh\s+pr\s+checkout\b", x) or any(
-                    sub in GIT_MOVES and (untrusted(" ".join(args)) or fetches and fetched & set(args))
+                    sub in GIT_MOVES and (untrusted(" ".join(args)) or fetched & set(args))
                     for sub, args in git_commands(x))][:1]
                 title = f"{privileged} workflow checks out the pull request's code in a run step"
             for line in hits:
