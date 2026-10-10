@@ -13,8 +13,9 @@ URL_RE = re.compile(r"(?<![A-Za-z0-9+.-])(?P<prefix>[0-9+.-]*)"
                     r"(?P<url>[A-Za-z][A-Za-z0-9+.-]*:(?://|\\/\\/)[^\s\"<>]+)")
 # A quote or angle bracket inside the userinfo ends URL_RE's match before the
 # '@' (https://user:p"ss@host): redact through the rest of the token.
+# A JSON-escaped quote (https://user:p\\"ss@host) is the same: its backslash is not a '\\/'.
 QUOTED_USERINFO_RE = re.compile(r"(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*:(?://|\\/\\/)"
-                                r"[^\s/\\@\"<>]*[\"<>][^\s/\\@<>]*@[^\s\"'<>]*")
+                                r"(?:[^\s/\\@\"<>]|\\(?!/))*[\"<>][^\s/\\@<>]*@[^\s\"'<>]*")
 # Scheme-relative URLs (//user:pw@host/path) carry userinfo without a scheme; a
 # colon is required so XPath ('//input[@value]') and paths ('//todo@txt') are not.
 SCHEMELESS_USERINFO_RE = re.compile(r"(?<![\w:/\\.-])//[^\s/?#\"'<>@:\[\]()]+:[^\s/?#\"'<>@\[\]()]*@(?=[\w\[])")
@@ -22,6 +23,9 @@ SCHEMELESS_USERINFO_RE = re.compile(r"(?<![\w:/\\.-])//[^\s/?#\"'<>@:\[\]()]+:[^
 VERSION_RE = re.compile(r"v?\d+(?:\.\d+){0,2}(?:[-+][\w.]+)?(?=[/?#]|$)")
 # A percent-encoded URL (https%3A%2F%2Fuser%3Apw%40host): its userinfo hides in %40.
 ENCODED_URL_RE = re.compile(r"(?i)(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*%3A%2F%2F[^\s\"'<>&]*")
+# Database and service URLs, whose paths (a database, vhost or bucket name) never carry an '@'.
+SERVICE_SCHEME_RE = re.compile(r"(?i)(?:postgres(?:ql)?|mysql|mariadb|rediss?|mongodb|amqps?|mssql|sqlserver|oracle"
+                               r"|ldaps?|smtps?|imaps?|s?ftp|nats|mqtts?|kafka|clickhouse|neo4j|bolt|couchdb)(?:\+|$)")
 
 
 def hidden_userinfo(token):
@@ -31,7 +35,7 @@ def hidden_userinfo(token):
     redis://default:1234#Abcd@cache) makes urlsplit end the authority early, so
     part of the credential would be kept as host, port or path.
     """
-    rest = token.partition("://")[2]
+    scheme, _, rest = token.partition("://")
     end = min([i for i in (rest.find(c) for c in "/?#") if i >= 0] or [len(rest)])
     netloc, after = rest[:end], rest[end:]
     at = after.find("@")
@@ -43,14 +47,25 @@ def hidden_userinfo(token):
     if not segment:
         return False  # '/@scope' (npm) and '/@vite/client' paths.
     name, colon, port = netloc.rpartition(":")
-    # NAME:digits or NAME:non-port before '/', '?' or '#' is userinfo, not a host and port
-    # (postgres://app:5432/Secret@db, https://user:/s3cr3t@host); a dotted host or localhost
-    # with a port (api.example.com:8443/users/alice@example.com) is judged like a portless one.
-    if colon and "]" not in port and (not port.isdigit() or "." not in name and "[" not in name
-                                      and name.lower() != "localhost"):
+    # A dotted host, localhost or [IPv6] with a numeric port is host:port, not user:password.
+    host_port = port.isdigit() and ("." in name or "[" in name or name.lower() == "localhost")
+    # A later '@' of a database or service URL ends a password with '/', '?' or '#' in it
+    # (postgres://app:5432/PW/SECRET@db, redis://default:1234#Abcd@cache) when a ':' in the
+    # authority starts that password; ftp://files.example.com/pub/icon@2x.png is a path. A
+    # dotted name before the ':' is a host:port (postgres://db.example.com:5432/analytics@2024),
+    # so postgres://app.svc:1234/PW/SECRET@h.com/x reads as a path too (accepted trade-off).
+    if SERVICE_SCHEME_RE.match(scheme) and colon and not host_port:
+        return True
+    nested = re.search(r"[/?#]", segment)
+    # NAME:non-port is userinfo (https://user:/s3cr3t@host). NAME:digits is too when the '@' ends
+    # the first segment (https://svc:2024/Qx9+abc=@db.internal); a deeper '@' is a path of a
+    # single-label service (http://web:3000/images/icon@2x.png, minio:9000/bucket/a@b.com).
+    # A dotted host or localhost with a port (api.example.com:8443/users/alice@example.com)
+    # is judged like a portless one.
+    if colon and "]" not in port and (not port.isdigit() or not host_port and not nested):
         return True
     # user/name@host: '@' inside the first path segment and not before a package version.
-    return not re.search(r"[/?#]", segment) and not VERSION_RE.match(after, at + 1)
+    return not nested and not VERSION_RE.match(after, at + 1)
 
 
 def _encoded_secret(token):
@@ -95,11 +110,13 @@ def redact_urls(text):
         if escaped:
             token = token.replace("\\/", "/")
         # Adjacent quoted URLs can be one token: urlsplit would sanitize only
-        # the first authority and leave later credentials in its path. Quotes
+        # the first authority and leave later credentials in its path (a nested
+        # URL without '@', web.archive.org/web/2020/https://x/, is a path). Quotes
         # can also be secret data, so redact the ambiguous token as a whole.
         # A password with '/', '?' or '#' hides the userinfo's '@' past the
         # parsed authority: the whole URL is redacted (over-redaction is safe).
-        if "://" in token.partition("://")[2] or hidden_userinfo(token):
+        rest = token.partition("://")[2]
+        if "://" in rest and "@" in rest or hidden_userinfo(token):
             return prefix + "[redacted URL]" + suffix
         try:
             u = urlsplit(token)

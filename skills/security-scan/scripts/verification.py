@@ -57,6 +57,21 @@ GAPS = (
     "evidence_integrity_unchecked", "evidence_integrity_failed",
 )
 DEFINITIVE = ("Valid", "FalsePositive", "NotApplicable")
+_LINE_SUFFIX = re.compile(r":\d+(?:-\d+)?$")
+
+
+def _source_path(value):
+    """A repository path without a trailing :line or :start-end range."""
+    path = _LINE_SUFFIX.sub("", str(value or "").strip()).replace("\\", "/")
+    while path.startswith("./"):
+        path = path[2:]
+    return path
+
+
+def location_paths(location):
+    """The path a finding's `path:line` location names (contract_check allows one)."""
+    path = _source_path(location)
+    return {path} if path else set()
 
 
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
@@ -321,7 +336,24 @@ class _Validator:
             statuses.append(status)
             static_claims = static_claims and any(self.evidence[ref]["kind"] == "source" for ref in refs)
         all_refs.update(claim_refs)
+        # A Secrets finding is supported only by evidence about its own file:
+        # one cited source record must cover a path the location names.
+        # evidence_capture.py refuses to copy a file holding a secret, so source
+        # captured from another file cannot stand in for the uncaptured one and
+        # such a finding never reaches Valid or static support.
+        paths = location_paths(finding.get("location"))
+        tied = str(finding.get("category", "")).strip().lower() == "secrets"
+        located = not tied or any(
+            self.evidence[ref]["kind"] == "source"
+            and _source_path(self.evidence[ref].get("source_path") or self.evidence[ref].get("location")) in paths
+            for ref in claim_refs)
+        static_claims = static_claims and located
         verdict = finding.get("validation", {}).get("verdict", "Unverified")
+        if verdict == "Valid" and not located:
+            self.error(at + ".claims", "a Secrets finding is Valid only with cited source evidence for its location path; "
+                       "source captured from another file does not support it, and a committed secret cannot "
+                       "be captured, so record it as Likely, cite its location and add a limitation saying "
+                       "the value was not captured")
         if verdict == "Valid" and any(status != "supported" for status in statuses):
             # evidence_capture.py refuses to copy a file holding a secret, so such a
             # finding has no source evidence to support every claim with.

@@ -35,6 +35,8 @@ findings.json (keeping prior manual reviews as history) and records not_run
 entries as limitations. Standard library only.
 """
 import argparse
+import bisect
+import itertools
 import json
 import os
 import re
@@ -522,6 +524,16 @@ def untrusted_workflow_expression(c, path, expression):
         ("event", "workflow_run", "id"), ("event", "workflow_run", "head_sha"),
         ("event", "workflow_run", "run_attempt"), ("event", "workflow_run", "run_number"),
     }
+    # contains(github.event.pull_request.title, 'WIP') as the whole expression yields only true/false.
+    k = next((k for k, tok in enumerate(tokens) if tok != "!"), len(tokens))
+    if tokens[k + 1:k + 2] == ["("] and tokens[k].lower() in ("contains", "startswith", "endswith"):
+        depth = 0
+        for i, tok in enumerate(tokens[k + 1:], k + 1):
+            depth += (tok == "(") - (tok == ")")
+            if not depth:
+                if i == len(tokens) - 1:
+                    return False
+                break
     untrusted = False
     close, stack = {}, []
     for i, tok in enumerate(tokens):
@@ -952,11 +964,63 @@ UNTRUSTED_HEAD = re.compile(r"\bgithub\.(?:head_ref|event\.(?:number|issue\.numb
 ENV_USE = re.compile(r"\$\{?([A-Za-z_]\w*)|\$\{\{\s*env\.([A-Za-z_]\w*)")
 OUTPUT_USE = re.compile(r"\bsteps\.([\w-]+)\.outputs\.([\w-]+)")
 INPUT_USE = re.compile(r"(?<![\w.])inputs\.([\w-]+)")
+# A run key with its block-scalar indicator; shell separators, with pipes and `&` but not redirections (2>&1, &>).
+RUN_KEY = re.compile(r"""^\s*(?:-\s+)?["']?run["']?\s*:\s*(?:[|>][-+0-9]*\s*(?:#.*)?$)?""")
+SHELL_SEP = re.compile(r"(;|&&|\|\||(?<![<>])\|&?|(?<![<>])&(?!>))")
+# A shell function header and its opening brace: `f() {`, `function f {`, `function f() {`;
+# FUNCTION_DECL is a header whose `{` opens the next non-blank row.
+_FUNCTION = r"\s*(?:function\s+[^\s(){}]+\s*(?:\(\s*\))?|[^\s(){}=]+\s*\(\s*\))\s*"
+FUNCTION_HEADER, FUNCTION_DECL = re.compile(_FUNCTION + r"\{(?:\s+|$)"), re.compile(_FUNCTION + "$")
+
+
+BRACKET = re.compile(r"\[\s*'([\w-]+)'\s*\]")
+# A shell word: quoted parts, $(…) and `…` kept whole (linear: each failed quote has no closing one).
+SHELL_WORD = re.compile(r"""(?:"[^"]*"|'[^']*'|\$\([^()]*\)|`[^`]*`|[^\s'"`])+""")
+
+
+def shell_assignments(x):
+    """([(name, value)], a command follows) of the leading `A=1 B="x y"` words of a command,
+    also `export A=1 B=2` (local/declare/readonly/typeset); ${{ }} expressions are one word."""
+    words = [x[m.start():m.end()] for m in SHELL_WORD.finditer(shell_text(x, r"[\s'\"`()]", "_"))]
+    declare = words[:1] in (["export"], ["local"], ["declare"], ["readonly"], ["typeset"])
+    out = []
+    for w in words[declare:]:
+        m = re.match(r"[A-Za-z_]\w*=", w)
+        if m:
+            out.append((m[0][:-1], w[m.end():]))
+        elif not declare:
+            return out, True
+    return out, False
+
+
+def dotted(value):
+    """github['head_ref'] and github.event['pull_request']['head'] as the dotted paths they read."""
+    return BRACKET.sub(r".\1", value) if "[" in value else value
+
+
+# A real pull ref, refs/pull/<n>/head or pull/<n>/merge: a bare PR number elsewhere
+# (backport-<n>, feature/pull/<n>/docs) is a name, not the head. Bounded per anchor.
+PULL_REF = re.compile(r"\bpull/[^/\n]{1,200}/(?:head|merge)\b")
+
+
+def pull_ref(value):
+    return bool(PULL_REF.search(value))
 
 
 def head_expr(value):
-    """UNTRUSTED_HEAD, where a bare PR or issue number counts only inside a pull/<n>/ ref."""
-    return any(not PR_NUMBER.fullmatch(m[0]) or "pull/" in value for m in UNTRUSTED_HEAD.finditer(value))
+    """UNTRUSTED_HEAD, where a bare PR or issue number counts only inside a pull/<n>/(head|merge) ref."""
+    value = dotted(value)
+    return any(not PR_NUMBER.fullmatch(m[0]) or pull_ref(value) for m in UNTRUSTED_HEAD.finditer(value))
+
+
+def head_level(value):
+    """2 when value names the PR head; 1 for a bare PR number, which is the head only in a ref (counts)."""
+    return 2 if head_expr(value) else 1 if PR_NUMBER.search(dotted(value)) else 0
+
+
+def counts(value, level):
+    """A use site of a source at `level` checks out the head: always at 2, at 1 inside a pull/<n> ref."""
+    return level == 2 or level == 1 and pull_ref(value)
 
 
 def strip_comment(line):
@@ -974,7 +1038,8 @@ def strip_comment(line):
 
 def head_value(value):
     """True when a checkout input names the PR head (or refs/pull/<number>)."""
-    return bool(HEAD_REF.search(value) or "pull/" in value and PR_NUMBER.search(value))
+    value = dotted(value)
+    return bool(HEAD_REF.search(value) or pull_ref(value) and PR_NUMBER.search(value))
 
 
 FLOW_PAIR = re.compile(r"""\s*["']?([\w-]+)["']?\s*:\s*("(?:[^"\\]|\\.)*(?:"|$)|'(?:[^']|'')*(?:'|$)|[^,}]*)""")
@@ -1019,29 +1084,102 @@ def mapping_values(lines, index, value, end):
             for k, i, v, stop in entries if k is not None}
 
 
+def local_targets(root, rel, memo):
+    """Files of this checkout that `uses: ./rel` runs (a workflow or an action directory), once per string."""
+    if rel not in memo:
+        target = (root / rel).resolve()
+        memo[rel] = [cand for cand in (target, target / "action.yml", target / "action.yaml")
+                     if (cand == root or root in cand.parents) and cand.is_file()]
+    return memo[rel]
+
+
+ENV_NAME = re.compile(r"\benv\.([A-Za-z_]\w*)")
+
+
+def env_aliases(value, env):
+    """value plus what its env.X names hold, followed through aliases (REF: ${{ env.SHA }}) to a
+    fixed point: each name is expanded once, so cycles end and the result is bounded by env."""
+    out, seen, todo = [value], set(), ENV_NAME.findall(value)
+    while todo:
+        todo = [n for n in dict.fromkeys(todo) if n in env and n not in seen]
+        seen.update(todo)
+        out += [env[n] for n in todo]
+        todo = [x for n in todo for x in ENV_NAME.findall(env[n])]
+    return " ".join(out)
+
+
+class CallMap(dict):
+    """callee -> call entries; .incomplete holds callees whose caller inputs were not fully followed."""
+    incomplete = frozenset()
+
+
 def local_calls(files, root, privileged):
     """callee -> [(caller, {input: value}, caller is privileged)] of local `uses: ./x` jobs and steps."""
-    root, calls = Path(root).resolve(), {}
+    root, calls, memo, own = Path(root).resolve(), {}, {}, set()
     for p in files:
         if not (is_workflow(p) or p.name in ("action.yml", "action.yaml")):
             continue
-        lines = read(p).splitlines()
-        sites = [(x["keys"]["uses"][1], x["keys"].get("with"), x["end"]) for x in yaml_items(lines) if "uses" in x["keys"]]
-        jobs = child(yaml_children(lines), "jobs")
+        text = read(p)
+        lines = text.splitlines()
+        if is_workflow(p) and (escaped_triggers(text) or any(t in workflow_triggers(text) for t in PRIVILEGED_TRIGGERS)):
+            own.add(p.resolve())  # privileged by its own trigger, not only through its callers
+        top = yaml_children(lines)
+        env_of = lambda e, end: mapping_values(lines, e[0], e[1], end) if e else {}
+        env, jobs, sites, scopes = child(top, "env"), child(top, "jobs"), [], []
+        workflow_env = env_of(env and env[1:3], len(lines))
         for job in yaml_children(lines, jobs[1] + 1, jobs[3]) if jobs else []:
             props = yaml_children(lines, job[1] + 1, job[3])
-            uses, given = child(props, "uses"), child(props, "with")
+            uses, given, env = child(props, "uses"), child(props, "with"), child(props, "env")
+            scopes.append((job[1], job[3], dict(workflow_env, **env_of(env and env[1:3], job[3]))))
             if uses:
-                sites.append((uses[2], given and given[1:3], job[3]))
-        for uses, given, end in sites:
+                sites.append((uses[2], given and given[1:3], job[3], scopes[-1][2]))
+        starts = [a for a, _, _ in scopes]
+        for x in yaml_items(lines):
+            if "uses" in x["keys"]:
+                k = bisect.bisect_right(starts, x["start"]) - 1
+                outer = scopes[k][2] if k >= 0 and x["start"] < scopes[k][1] else workflow_env
+                sites.append((x["keys"]["uses"][1], x["keys"].get("with"), x["end"],
+                              dict(outer, **env_of(x["keys"].get("env"), x["end"]))))
+        for uses, given, end, env in sites:
             m = re.match(r"""["']?\./([^\s"'#@]*)""", uses)
             if not m:
                 continue
-            target = (root / m[1]).resolve()
             values = mapping_values(lines, given[0], given[1], end) if given else {}
-            for cand in (target, target / "action.yml", target / "action.yaml"):
-                if (cand == root or root in cand.parents) and cand.is_file():
-                    calls.setdefault(cand, []).append((p, values, p.resolve() in privileged))
+            # `ref: ${{ env.SHA }}` passes what the caller's workflow, job or step env holds.
+            values = {k: env_aliases(v, env) for k, v in values.items()}
+            for cand in local_targets(root, m[1], memo):
+                calls.setdefault(cand, []).append((p, values, p.resolve() in privileged))
+    # A -> B -> C: B's `inputs.x` forwarded to C carries what A passed for x, one entry per
+    # call path: a value from an unprivileged A never counts as passed by a privileged one,
+    # even when B is privileged through another caller. Past 64 paths per callee, or when
+    # the bounded fixed point is not reached, the callee is reported for manual review.
+    def grow(values, ups):
+        extra = {key: [g[x] for x in INPUT_USE.findall(dotted(value)) for g in ups if x in g and g[x] not in value]
+                 for key, value in values.items()}
+        return {key: (value + " " + " ".join(extra[key]))[:4000] if extra[key] else value for key, value in values.items()}
+    base, partial = calls, set()
+    for _ in range(min(len(base) + 1, 64)):
+        grown_calls = {}
+        for callee, entries in base.items():
+            out, budget = {}, 64
+            for caller, values, privileged_caller in entries:
+                ups = calls.get(caller.resolve(), []) if any("inputs" in v for v in values.values()) else ()
+                derived = list(itertools.islice(((caller, grown, caller.resolve() in own or u[2]) for u in ups
+                                                 for grown in [grow(values, [u[1]])] if grown != values), max(budget, 0) + 1))
+                if len(derived) > budget:  # keep the first paths, each with its own privilege
+                    derived = derived[:max(budget, 0)]
+                    partial.add(callee)
+                budget -= len(derived)
+                for e in derived or [(caller, values, privileged_caller)]:
+                    out.setdefault((e[0], tuple(sorted(e[1].items())), e[2]), e)
+            grown_calls[callee] = list(out.values())
+        if grown_calls == calls:
+            break
+        calls, changed = grown_calls, {k for k, v in grown_calls.items() if calls.get(k) != v}
+    else:
+        partial |= changed
+    calls = CallMap(calls)
+    calls.incomplete = partial
     return calls
 
 
@@ -1113,8 +1251,7 @@ def is_workflow(p):
 def privileged_workflows(files, root):
     """Workflows that run with secrets on outsider events, plus local reusable
     workflows and actions they call (which inherit that context)."""
-    root = Path(root).resolve()
-    priv = {}
+    root, priv, memo = Path(root).resolve(), {}, {}
     for p in files:
         if is_workflow(p):
             text = read(p)
@@ -1127,10 +1264,8 @@ def privileged_workflows(files, root):
     while pending:
         p = pending.pop()
         for m in re.finditer(r"""\buses["']?[ \t]*:[ \t]*["']?(?:\.|\$)/([^\s"'#@]*)""", read(p)):
-            target = (root / m.group(1)).resolve()
-            for cand in (target, target / "action.yml", target / "action.yaml"):
-                # Only files of this checkout; scan() visits nothing else anyway.
-                if (cand == root or root in cand.parents) and cand.is_file() and cand not in priv:
+            for cand in local_targets(root, m.group(1), memo):  # Only files of this checkout.
+                if cand not in priv:
                     priv[cand] = priv[p]
                     pending.append(cand)
     return priv
@@ -1257,9 +1392,22 @@ def check_extra_sources(c, p):
                       fix="Remove it, rotate the token, use trusted publishing or an environment variable")
 
 
+ITEM_DASH, ITEM_KEY = re.compile(r" *- +"), re.compile(r"""( *)(- +)?["']?([\w.-]+)["']?\s*:(?:\s+(.*))?$""")
+_items_memo = {}
+
+
 def yaml_items(lines):
     """Block-sequence items (conservative): {start, end, parent, keys}; keys maps the
-    item's own keys to (index, value). Block scalar contents are skipped."""
+    item's own keys to (index, value). Block scalar contents are skipped. One file is
+    parsed by several checks: the last result is reused (callers only read it)."""
+    key = "\n".join(lines)
+    if key not in _items_memo:
+        _items_memo.clear()
+        _items_memo[key] = parse_items(lines)
+    return _items_memo[key]
+
+
+def parse_items(lines):
     items, stack, scalar, last = [], [], None, []  # last: (indent, index, dash), indents increasing
     for i, ln in enumerate(lines):
         s = ln.strip()
@@ -1272,7 +1420,7 @@ def yaml_items(lines):
             scalar = None
         while stack and indent <= stack[-1][0]:
             stack.pop()[1]["end"] = i
-        dash = re.match(r" *- +", ln)
+        dash = ITEM_DASH.match(ln)
         while last and last[-1][0] > indent:
             last.pop()  # A shallower later line is always the nearer parent candidate.
         if dash:
@@ -1285,7 +1433,7 @@ def yaml_items(lines):
             if last and last[-1][0] == indent:
                 last.pop()
             last.append((indent, i, bool(dash)))
-        m = re.match(r"""( *)(- +)?["']?([\w.-]+)["']?\s*:(?:\s+(.*))?$""", ln)
+        m = ITEM_KEY.match(ln)
         if m:
             level, value = len(m[1]) + len(m[2] or ""), (m[4] or "").strip()
             if stack and stack[-1][1]["level"] == level:
@@ -1352,19 +1500,23 @@ EXECUTES_CHECKOUT = re.compile(
 GIT_MOVES = {"checkout", "switch", "reset", "worktree", "pull", "merge", "rebase", "cherry-pick", "clone"}
 
 
-def git_commands(line):
-    """(subcommand, args) of every git command in a shell line; linear, no regex backtracking."""
-    out = []
-    # Shell separators inside ${{ }} belong to the expression, e.g. format('pull/{0}/head', …).
+def shell_text(line, chars=r"[;&|()`,]", fill=" "):
+    """line with shell separators inside ${{ }} blanked: they belong to the expression,
+    e.g. format('pull/{0}/head', …) or `head_ref || 'main'`. Linear."""
     parts, at = [], 0
     while True:
         start = line.find("${{", at)
         end = line.find("}}", start + 3) if start >= 0 else -1
         if end < 0:
             break
-        parts += [line[at:start], re.sub(r"[;&|()`,]", " ", line[start:end + 2])]
+        parts += [line[at:start], re.sub(chars, fill, line[start:end + 2])]
         at = end + 2
-    line = "".join(parts) + line[at:]
+    return "".join(parts) + line[at:]
+
+
+def git_commands(line):
+    """(subcommand, args) of every git command in a shell line; linear, no regex backtracking."""
+    out, line = [], shell_text(line)
     for seg in re.split(r"[;&|()`]", line):
         words = [w.strip("'\"") for w in seg.split()]  # "a:b" and a:b name the same refspec
         starts = [k for k, w in enumerate(words) if w == "git" or w.endswith("/git")]
@@ -1422,9 +1574,11 @@ def moved_args(commands):
 
 
 def branch(ref):
-    """`pr`, `heads/pr` and `refs/heads/pr` name one local branch for checkout."""
+    """`pr`, `heads/pr` and `refs/heads/pr` name one local branch for checkout; `refs/remotes/origin/pr`
+    and `remotes/origin/pr` the remote-tracking branch `origin/pr`."""
     ref = ref.lstrip("+")
-    return ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref[6:] if ref.startswith("heads/") else ref
+    prefix = next((x for x in ("refs/heads/", "heads/", "refs/remotes/", "remotes/") if ref.startswith(x)), "")
+    return ref[len(prefix):]
 
 
 def check_workflow(c, p, privileged=None, calls=None):
@@ -1432,6 +1586,8 @@ def check_workflow(c, p, privileged=None, calls=None):
     lines = text.splitlines()
     triggers = workflow_triggers(text)
     callers = (calls or {}).get(Path(p).resolve(), [])
+    if Path(p).resolve() in getattr(calls, "incomplete", ()):
+        incomplete(c, "workflow scan", p, "too many local call paths; caller inputs require manual review")
     if escaped_triggers(text):
         incomplete(c, "workflow scan", p, "escaped trigger names require manual review")
     if "workflow_run" in triggers:
@@ -1471,11 +1627,18 @@ def check_workflow(c, p, privileged=None, calls=None):
     def run_rows(st):
         """(line number, text) of a run step; double-quoted YAML escapes decoded into lines."""
         rows = [(i + 1, lines[i]) for i in own(st) if i >= st["keys"]["run"][0]]
-        if not st["keys"]["run"][1].startswith('"'):
-            return rows
-        decode = {"n": "\n", "t": "\t"}
-        return [(n, part) for n, x in rows
-                for part in re.sub(r"\\(.)", lambda m: decode.get(m[1], m[1]), x).split("\n")]
+        if st["keys"]["run"][1].startswith('"'):
+            decode = {"n": "\n", "t": "\t"}
+            rows = [(n, part) for n, x in rows
+                    for part in re.sub(r"\\(.)", lambda m: decode.get(m[1], m[1]), x).split("\n")]
+        joined = []  # A shell line ending in `\` continues on the next row: one command, first row's number.
+        for n, x in rows:
+            if joined and joined[-1][1][-1].endswith("\\"):
+                joined[-1][1][-1] = joined[-1][1][-1][:-1]
+                joined[-1][1].append(x)
+            else:
+                joined.append((n, [x]))
+        return [(n, " ".join(parts)) for n, parts in joined]
 
     head_checkout = False
     if privileged:
@@ -1489,12 +1652,23 @@ def check_workflow(c, p, privileged=None, calls=None):
             running += depth[i]
             in_step[i] = running > 0
 
-        def assigned(rows):
-            out, until = {}, 0
+        def caller_level(value):
+            """head_level of what privileged local callers pass for each inputs.X in value."""
+            return max((head_level(given[name]) for name in (INPUT_USE.findall(dotted(value)) if "inputs" in value else ())
+                        for _, given, caller_privileged in callers if caller_privileged and name in given), default=0)
+
+        def taint(value):
+            return max(head_level(value), caller_level(value))
+
+        def assigned(rows, outer={}):
+            """{name: level} of `name: value` rows, also quoted keys and one-line flow maps (env: {A: x});
+            REF: ${{ env.SHA }} takes SHA's level from this map or the outer one, through any chain of aliases
+            (a fixed point, cycle-safe)."""
+            out, until, raw = {}, 0, {}
             for i in rows:
                 if i < until:
                     continue  # inside a block scalar already read as a value
-                m = re.match(r"""([ \t]*)(?:-[ \t]+)?([A-Za-z_]\w*)[ \t]*:[ \t]*["']?(.*)$""", lines[i])
+                m = re.match(r"""([ \t]*)(?:-[ \t]+)?["']?([A-Za-z_]\w*)["']?[ \t]*:[ \t]*["']?(.*)$""", lines[i])
                 if m:
                     value = m[3]
                     if re.match(r"[|>][-+0-9]*[ \t]*(?:#.*)?$", value):  # block scalar: its lines are the value
@@ -1504,7 +1678,23 @@ def check_workflow(c, p, privileged=None, calls=None):
                             body.append(lines[k])
                             k += 1
                         value, until = "\n".join(body), k
-                    out[m[2]] = out.get(m[2], False) or head_expr(value)
+                    pairs = flow_pairs(value).items() if value.lstrip().startswith("{") else ()
+                    for name, v in [(m[2], value), *pairs]:
+                        out[name] = max(out.get(name, 0), taint(v))
+                        if "env." in v:
+                            raw[name] = raw.get(name, "") + " " + v
+            users = {}  # name -> names whose value reads it; a rise is pushed to them (levels only rise: linear)
+            for k, v in raw.items():
+                for n in ENV_NAME.findall(v):
+                    users.setdefault(n, []).append(k)
+                    out[k] = max(out[k], out.get(n, 0), outer.get(n, 0))
+            todo = list(raw)
+            while todo:
+                n = todo.pop()
+                for k in users.get(n, ()):
+                    if out[n] > out[k]:
+                        out[k] = out[n]
+                        todo.append(k)
             return out
 
         workflow_env, job_env, job_names, written, outputs = assigned(top_rows), {}, {}, {}, {}
@@ -1513,14 +1703,28 @@ def check_workflow(c, p, privileged=None, calls=None):
             """Env names holding the PR head for this step: step, then job, then workflow, then $GITHUB_ENV."""
             # One generic pattern plus set membership: no per-step regex compile or set copies.
             if job not in job_env:
-                job_env[job] = dict(workflow_env, **(assigned(i for i in range(*job) if not in_step[i]) if job else {}))
+                job_env[job] = dict(workflow_env, **(assigned((i for i in range(*job) if not in_step[i]), workflow_env)
+                                                     if job else {}))
             if (job, writes) not in job_names:
-                job_names[job, writes] = {k for k, v in list(job_env[job].items())
-                                          + list(written.get(job, {}).items() if writes else ()) if v}
-            step, names = assigned(own(st)), job_names[job, writes]
-            matcher = lambda x: any(n == "GITHUB_HEAD_REF" or (step[n] if n in step else n in names)
-                                    for n in (m[1] or m[2] for m in ENV_USE.finditer(x)))
+                names = job_names[job, writes] = dict(job_env[job])
+                for k, v in written.get(job, {}).items() if writes else ():
+                    names[k] = max(names.get(k, 0), v)
+            names, shell = job_names[job, writes], {}
+            step = assigned(own(st), names)
+
+            def env_level(x):
+                out = 0
+                for m in ENV_USE.finditer(x):
+                    n = m[1] or m[2]
+                    # A shell assignment that already ran shadows the inherited env value.
+                    out = max(out, shell[n] if n in shell else 2 if n == "GITHUB_HEAD_REF"
+                              else step[n] if n in step else names.get(n, 0))
+                    if out == 2:
+                        break
+                return out
+            matcher = lambda x: counts(x, env_level(x))
             matcher.defined = lambda n: n in step or n in job_env[job]
+            matcher.level, matcher.shell = env_level, shell
             return matcher
 
         for st in steps:  # $GITHUB_ENV / $GITHUB_OUTPUT writes of PR-head values, per job
@@ -1529,26 +1733,25 @@ def check_workflow(c, p, privileged=None, calls=None):
                 for _, x in run_rows(st):
                     for kind, name, value in github_writes(x) if "GITHUB_" in x else ():
                         env_ref = env_ref or step_env(st, job, writes=False)
-                        bad = bool(head_expr(value) or head_value(value) or env_ref(value))
+                        bad = max(taint(value), env_ref.level(value))
+                        bad = 2 if counts(value, bad) or head_value(value) else bad
                         if kind == "GITHUB_ENV":
-                            written.setdefault(job, {})[name] = written.get(job, {}).get(name, False) or bad
+                            written.setdefault(job, {})[name] = max(written.get(job, {}).get(name, 0), bad)
                         elif step_value(st, "id"):
                             outputs.setdefault(job, {})[(step_value(st, "id"), name)] = bad
 
         def ref_source(value, job, env_ref):
             """'head' when a checkout input is the PR head; else the unresolved sources it names."""
-            if head_value(value) or env_ref(value):
+            if head_value(value) or env_ref(value) or counts(value, caller_level(value)):
                 return "head"
             kinds = set()
             for sid, name in OUTPUT_USE.findall(value):
-                if outputs.get(job, {}).get((sid, name)):
+                if counts(value, outputs.get(job, {}).get((sid, name), 0)):
                     return "head"
                 kinds.add("a step output")
-            for name in INPUT_USE.findall(value):
+            for name in INPUT_USE.findall(dotted(value)):
                 for _, given, caller_privileged in callers:
                     v = given.get(name, "")
-                    if caller_privileged and head_value(v):
-                        return "head"
                     if caller_privileged and "${{" in v and not HEAD_REF.search(v):
                         kinds.add("a caller's input")
             if re.search(r"\bneeds\.[\w-]+\.outputs\.", value):
@@ -1593,10 +1796,12 @@ def check_workflow(c, p, privileged=None, calls=None):
                     if not m:
                         continue
                     if m[1] is not None:  # flow mapping, possibly over several lines
-                        flow, j = strip_comment(m[1]), k + 1
-                        while flow_depth(flow) > 0 and j < len(rows):
-                            flow, j = flow + " " + strip_comment(lines[rows[j]]).strip(), j + 1
-                        values = [v for key, v in flow_pairs(flow).items() if key in ("ref", "repository")]
+                        parts, j = [strip_comment(m[1])], k + 1
+                        depth = flow_depth(parts[0])  # running depth: each row is scanned once
+                        while depth > 0 and j < len(rows):
+                            parts.append(strip_comment(lines[rows[j]]).strip())
+                            depth, j = depth + flow_depth(parts[-1]), j + 1
+                        values = [v for key, v in flow_pairs(" ".join(parts)).items() if key in ("ref", "repository")]
                     else:  # plain, quoted or block scalar value, possibly continued on later lines
                         value, level, j = strip_comment(m[2]), len(lines[i]) - len(lines[i].lstrip()), k + 1
                         while j < len(rows) and (not lines[rows[j]].strip()
@@ -1614,19 +1819,70 @@ def check_workflow(c, p, privileged=None, calls=None):
                 title = f"{privileged} workflow checks out the pull request's code"
             elif "run" in st["keys"]:
                 run = run_rows(st)
-                untrusted = lambda x: (head_expr(x) or env_ref(x)
+                untrusted = lambda x: (counts(x, taint(x)) or env_ref(x)
                                        or re.search(r"\bpull/[^\s/]*/(?:head|merge)\b", x)
-                                       or any(outputs.get(job, {}).get(o) for o in OUTPUT_USE.findall(x)))
-                # Fetching the PR head is data until this step checks it out, resets or
-                # merges onto it: FETCH_HEAD, the fetched ref or a local refspec target.
-                fetches = [a for _, x in run for sub, a in git_commands(x) if sub == "fetch" and untrusted(" ".join(a))]
-                fetched = job_fetched.setdefault(job, set())
-                if fetches:
-                    fetched |= {"FETCH_HEAD"} | {branch(a.split(":", 1)[1]) for f in fetches for a in f if ":" in a}
-                hits = [k for k, x in run if re.search(r"\bgh\s+pr\s+checkout\b", x)
-                        or re.search(r"\bgh\s+repo\s+clone\b", x) and untrusted(x) or any(
-                    sub in GIT_MOVES and (untrusted(" ".join(args)) or fetched & {branch(a) for a in args})
-                    for sub, args in moved_args(git_commands(x)))][:1]
+                                       or any(counts(x, outputs.get(job, {}).get(o, 0)) for o in OUTPUT_USE.findall(x)))
+                # Rows run in order: SHA=${{ …head.sha }} taints a later "$SHA" until SHA is
+                # reassigned; fetching the PR head is data until a later row checks out,
+                # resets or merges onto FETCH_HEAD, the fetched ref or a refspec target.
+                fetched, hits = job_fetched.setdefault(job, set()), []
+                # One row may hold several commands (`SHA=…; git checkout "$SHA"`, or an
+                # inline `run: …`): each runs after the ones before it on the row.
+                # An assignment after `&&`/`||`, inside an if/case/loop block or in a function
+                # body (which may never be called) may not run: it can raise a variable's taint
+                # but never clear it. Braces are counted from a function header to its `}`.
+                # So is one in a subshell: inside `( … )`, a pipeline stage, a backgrounded
+                # command, or a `{ …; }` group that is piped or backgrounded.
+                segments, depth, braces, sep, paren, groups, closed, spans, pending = [], 0, 0, ";", 0, [], None, [], False
+                for k, row in run:
+                    parts = SHELL_SEP.split(shell_text(RUN_KEY.sub("", row)))
+                    for j in range(0, len(parts), 2):
+                        sep = parts[j - 1] if j else sep  # a row ending in `&&` continues on the next
+                        if sep in ("|", "|&", "&") and segments:  # the command (or group) before runs in a subshell
+                            spans.append((len(segments) - 1 if closed is None else closed, len(segments)))
+                        word, in_fn, closed = parts[j].split(None, 1)[:1], braces > 0, None
+                        depth = max(0, depth + (word in (["if"], ["case"], ["for"], ["while"], ["until"], ["select"]))
+                                    - (word in (["fi"], ["esac"], ["done"])))
+                        header = FUNCTION_HEADER.match(parts[j]) or pending and word == ["{"] and re.match(r"\s*\{", parts[j])
+                        pending = bool(FUNCTION_DECL.match(parts[j])) or pending and not parts[j].strip()
+                        braces = max(0, braces + (bool(header) or braces > 0 and word == ["{"]) - (braces > 0 and word == ["}"]))
+                        cond = (depth > 0 or braces > 0 or sep in ("&&", "||", "|", "|&") or paren > 0
+                                or parts[j].lstrip().startswith("("))
+                        if not in_fn and not header and word == ["{"]:
+                            groups.append((len(segments), sep in ("|", "|&")))
+                        elif not in_fn and word == ["}"] and groups:
+                            closed, piped = groups.pop()
+                            if piped:
+                                spans.append((closed, len(segments)))
+                                cond = True
+                        segments.append([k, parts[j][header.end():] if header else parts[j], cond])
+                        paren = max(0, paren + parts[j].count("(") - parts[j].count(")"))
+                    sep = parts[-2] if len(parts) > 1 and not parts[-1].strip() else ";"
+                marks = [0] * (len(segments) + 1)  # spans applied in one sweep: nested groups stay linear
+                for a, b in spans:
+                    marks[a], marks[b] = marks[a] + 1, marks[b] - 1
+                for e, m in zip(segments, itertools.accumulate(marks)):
+                    e[2] = e[2] or m > 0
+                for k, x, conditional in segments:
+                    if not hits and (re.search(r"\bgh\s+pr\s+checkout\b", x)
+                                     or re.search(r"\bgh\s+repo\s+clone\b", x) and untrusted(x)):
+                        hits = [k]
+                    commands = git_commands(x)
+                    for (sub, args), (_, kept) in zip(commands, moved_args(commands)):
+                        # A ref under a glob refspec target (refs/pull/*/head:refs/remotes/origin/pr/*)
+                        # named with the PR number is that PR's head.
+                        globbed = any(f[:-1] and branch(a).startswith(f[:-1]) for f in fetched if f.endswith("*")
+                                      for a in kept) and max(taint(" ".join(kept)), env_ref.level(" ".join(kept)))
+                        if not hits and sub in GIT_MOVES and (untrusted(" ".join(kept)) or globbed
+                                                              or fetched & {branch(a) for a in kept}):
+                            hits = [k]
+                        if sub == "fetch" and untrusted(" ".join(args)):
+                            fetched |= {"FETCH_HEAD"} | {branch(a.split(":", 1)[1]) for a in args if ":" in a}
+                    x = re.sub(r"^\s*(?:then|do|else|\{)\s+", "", x)
+                    pairs, prefix = shell_assignments(x) if "=" in x else ((), False)
+                    for name, v in pairs:  # `A=1 cmd` sets A for cmd only: it can raise, never clear
+                        level = 2 if untrusted(v) else max(taint(v), env_ref.level(v))
+                        env_ref.shell[name] = max(level, env_ref.level("$" + name)) if conditional or prefix else level
                 title = f"{privileged} workflow checks out the pull request's code in a run step"
             for line in hits:
                 head_checkout = True

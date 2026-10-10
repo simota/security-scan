@@ -1394,10 +1394,14 @@ _KEY_RUN = re.compile(r"[\w.-]+")
 _KEY = re.compile(r"(?i)password|passwd|secret|token|api[_-]?key|private[_-]?key|access[_-]?key|credential")
 # Short names count only as a whole name segment: `pass=`, `db_pwd:` but not `bypass` or `passed`.
 _KEY_END = re.compile(r"(?i)(?:^|[_.-])(?:pass|pwd|passphrase)$")
-_SECRET_TAIL = re.compile(r"""(?i)(['"]?\s*(?:=>|:=|[:=])\s*['"]?)"""
+# Every tail allows the key's closing quote, and after it a closing subscript
+# bracket, before the operator: app.config["SECRET_KEY"] = "...", [ "SECRET_KEY" ] = ...,
+# os.environ['TOKEN'] = ...; an unquoted subscript (errors[CONF_PASSWORD] =
+# "invalid_auth") names a constant, not the secret.
+_SECRET_TAIL = re.compile(r"""(?i)((?:['"](?:[ \t]*\])?)?\s*(?:=>|:=|[:=])\s*['"]?)"""
                           r"""(?!\$|[A-Za-z_][\w.]*\(|process\.env|os\.environ|null\b|None\b|true\b|false\b)([^'"\s,;)]{4,})""")
 # Python/JS string prefixes (b"...", r'...', f"...") still delimit a literal.
-_QUOTED_TAIL = re.compile(r"""(?i)(['"]?\s*(?:=>|:=|[:=])\s*(?:[rbfu]{1,2}(?=['"]))?)(['"])(?:\\.|(?!\2)[^\\\n])*\2""")
+_QUOTED_TAIL = re.compile(r"""(?i)((?:['"](?:[ \t]*\])?)?\s*(?:=>|:=|[:=])\s*(?:[rbfu]{1,2}(?=['"]))?)(['"])(?:\\.|(?!\2)[^\\\n])*\2""")
 # A literal fallback default after an environment lookup is a hardcoded secret
 # too: os.environ.get("X", "lit"), getenv('X', 'lit'), ENV['X'] || 'lit',
 # value or "lit", value ?? "lit". Masked on lines that name a secret key.
@@ -1431,11 +1435,22 @@ def redact(line):
     line = redact_urls(line)
     # Recognizable credentials are masked wherever they appear, keyed or not.
     line = JWT_RE.sub("********", TOKEN_RE.sub("********", line))
+    line = JWT_KEY_LITERAL.sub(_mask_jwt_key, line)
     line = _sub_keyed(line, _QUOTED_TAIL, lambda key, m: key + m.group(1) + m.group(2) + "********" + m.group(2))
     line = _sub_keyed(line, _SECRET_TAIL, lambda key, m: key + m.group(1) + "********")
     if _KEY.search(line) or any(_KEY_END.search(run.group()) for run in _KEY_RUN.finditer(line)):
         line = _FALLBACK_LITERAL.sub(lambda m: m.group(1) + m.group(2) + "********" + m.group(2), line)
     return line
+
+
+def _mask_jwt_key(m):
+    return m.group(1) + m.group(2) + "********" + m.group(2)
+
+
+def mask_multiline(text):
+    """A literal JWT key or Authorization value whose call or key is on an earlier line,
+    masked in place: no line break is touched, so line numbers hold."""
+    return _AUTH_VALUE.sub(lambda m: m.group(1) + "********", JWT_KEY_LITERAL.sub(_mask_jwt_key, text))
 
 
 MAX_SOURCE_BYTES = 16 * 1024 * 1024
@@ -1445,13 +1460,45 @@ MAX_SOURCE_BYTES = 16 * 1024 * 1024
 # costs at most 1 KiB per key.
 _SECRET_NAME = re.compile(r"(?i)(?:^|[_.-])(?:token|secret|password|passwd|api[_-]?key|access[_-]?key"
                           r"|private[_-]?key|secret[_-]?key|client[_-]?secret|auth|credentials?)$")
-_LITERAL_TAIL = re.compile(r"""['"]?[ \t]*(?::[ \t]*[A-Za-z_][\w.\[\], |]{0,40}?[ \t]*(?==))?(?:=>|:=|[:=])[ \t]*"""
+_LITERAL_TAIL = re.compile(r"""(?:['"](?:[ \t]*\])?)?[ \t]*(?::[ \t]*[A-Za-z_][\w.\[\], |]{0,40}?[ \t]*(?==))?(?:=>|:=|[:=])[ \t]*"""
                            r"""(?:(['"])((?:\\.|(?!\1)[^\\\n]){0,1024})\1|([^'"\s,;)#]{1,1024}))""")
 _NOT_SECRET = re.compile(r"[$<{%]|process\.env|os\.environ|[A-Za-z_][\w.]*\(")
 _PLAIN_VALUE = re.compile(r"[\^~<>=].*|v?\d+(?:\.\d+)+[\w.+-]*|(?:~|\.{1,2})?(?:/[a-z0-9_.{}:-]*)+"
                           r"|[a-z][a-z0-9+.-]*://[^?#@\s]*|[A-Za-z][A-Za-z ]*[.!?:]?")
-TOKEN_RE = re.compile(r"\b(?:gh[opsu]_[A-Za-z0-9]{36,}|github_pat_\w{22,}|AKIA[0-9A-Z]{16}"
-                      r"|xox[abprs]-[A-Za-z0-9-]{10,}|sk_live_[A-Za-z0-9]{16,}|glpat-[\w-]{20,})")
+# Recognizable credentials, keyed or not: provider token prefixes, webhook and
+# bot URLs whose path is the credential, and an HTTP Authorization value
+# (Bearer/Basic followed by a token holding a digit, or any token right after an
+# Authorization key, also on the next line or after a YAML block-scalar indicator, so `Bearer ${token}`, `"Bearer " + token` and prose stay readable).
+_AUTH_CTX = r"(?i:authorization)[\"']?[ \t]*\]?[ \t]*[:=,](?:[ \t]*[|>][-+0-9]{0,2}[ \t]*(?=[\r\n]))?\s{0,40}[\"'`]?(?i:bearer|basic)[ \t]+"
+# After an Authorization key any whole token counts, but not a placeholder (one repeated
+# character, YOUR_TOKEN, token), prose (`Bearer flows; …`) nor an expression (`abc" + x`, `abc${x}`).
+_AUTH_END = r"""(?:[ \t]*(?:[\r\n]|$)|["'`,)}\]\\])"""
+_AUTH_TOKEN = (r"(?!(?:(?P<c>[\w.~+/-])(?P=c)*|[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+|(?i:(?:your|my)?[_-]?token))=*" + _AUTH_END
+               + r")[\w.~+/-]{4,}=*(?=" + _AUTH_END + ")")
+TOKEN_RE = re.compile(r"\b(?:gh[opsu]_[A-Za-z0-9]{36,}|github_pat_\w{22,}|A(?:KIA|SIA)[0-9A-Z]{16}"
+                      r"|xox[abprse]-[A-Za-z0-9-]{10,}|[sr]k_(?:live|test)_[A-Za-z0-9]{16,}|glpat-[\w-]{20,}"
+                      r"|AIza[\w-]{35}|sk-(?:proj|ant|svcacct|admin)-[\w-]{20,}|sk-[A-Za-z0-9]{32,}"
+                      r"|npm_[A-Za-z0-9]{36}|hf_[A-Za-z0-9]{30,}|SG\.[\w-]{16,}\.[\w-]{16,}"
+                      r"|hooks\.slack\.com/(?:services|workflows|triggers)/[\w/-]{20,}"
+                      r"|discord(?:app)?\.com/api/webhooks/\d+/[\w-]{20,}"
+                      r"|(?:api\.telegram\.org/bot)?\d{6,12}:AA[\w-]{30,}"
+                      r"|(?i:bearer)[ \t]+(?=[A-Za-z._~+/-]*\d)[\w.~+/-]{16,}=*"
+                      r"|(?i:basic)[ \t]+(?=[A-Za-z+/]*\d)[A-Za-z0-9+/]{16,}={0,2}(?![\w.~+/-])"
+                      r"|" + _AUTH_CTX + _AUTH_TOKEN + ")")
+_AUTH_VALUE = re.compile("(" + _AUTH_CTX + ")" + _AUTH_TOKEN)
+# A literal signing key passed positionally or by keyword: jwt.sign(payload, "key"),
+# jwt.encode(claims, 'key', ...), jwt.decode(token, "key"), jwt.encode(payload,
+# algorithm="HS256", key="key") (also secret=, signing_key=), the keyword form also first:
+# jwt.encode(key="key", payload=p). The first argument is a simple expression, call or
+# object literal; the call may span lines.
+# A bracketed group nested at most two deep, each level bounded: makePayload(user), {id: f(x)}.
+_GROUP = r"[({](?:[^(){}\n]|[({][^(){}\n]{0,200}[)}]){0,200}[)}]"
+# Keyword arguments skipped before key= are bounded too, a [list] kept whole: algorithms=["HS256", "RS256"].
+_KWARG = r"[a-z_]\w{0,40}\s{0,40}=(?!=)(?:[^,(){}\[\]\n]|\[[^\[\](){}\n]{0,200}\]|%s){0,199},\s{0,40}" % _GROUP
+_JWT_KW = r"(?:key|secret|signing_key)\s{0,40}=\s{0,40}"
+JWT_KEY_LITERAL = re.compile(r"""(?i)(\b(?:jwt|jsonwebtoken|jose|jws)\.(?:sign|encode|verify|decode)\s{0,40}\(\s{0,40}"""
+                             r"""(?:(?:[^\s,(){}]|%s)(?:[^,(){}\n]|%s){0,199},\s{0,40}(?:(?:%s){0,4}%s)?|%s)(?:[rbfu]{1,2}(?=['"]))?)"""
+                             r"""(['"])((?:\\.|(?!\2)[^\\\n]){1,1024})\2""" % (_GROUP, _GROUP, _KWARG, _JWT_KW, _JWT_KW))
 # A private key block: the header followed by a base64 body line (raw or \n-escaped).
 PEM_BODY_RE = re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[ \t]*(?:\r?\n|\\r?\\n)"
                          r"(?:[\w-]+:[^\n\\]*(?:\r?\n|\\r?\\n))*[ \t]*[A-Za-z0-9+/]{16,}")
@@ -1472,6 +1519,9 @@ def secret_value(value):
 def secret_in_source(rel, text):
     """True when a file would put a secret-looking value into shareable output."""
     if sensitive_path(rel) or PEM_BODY_RE.search(text) or TOKEN_RE.search(text) or JWT_RE.search(text):
+        return True
+    # A literal signing key is a secret even when it reads like a word ("supersecret").
+    if any(m.group(3) and not _NOT_SECRET.match(m.group(3)) for m in JWT_KEY_LITERAL.finditer(text)):
         return True
     config = config_source(rel)
     for line in text.split("\n"):
@@ -1553,12 +1603,78 @@ def public_reference(ref):
             "title": redact(title) if title else title}
 
 
-def attach_sources(data, repo, context=3):
-    """Attach safe links and best-effort redacted excerpts; omit sensitive sources."""
+_FULL_OID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
+
+
+def _captured_source(data, evidence_dir, commit, rel):
+    """The evidence/source copy of REL captured at COMMIT, when its bytes still
+    match the recorded SHA-256; None when there is none or it does not match."""
+    if evidence_dir is None:
+        return None
+    base = Path(evidence_dir).resolve()
+    for record in data.get("evidence") or []:
+        if (not isinstance(record, dict) or record.get("kind") != "source" or record.get("source_path") != rel
+                or str(record.get("commit", "")).lower() != commit or record.get("diff_sha256")
+                or not isinstance(record.get("location"), str) or not isinstance(record.get("sha256"), str)):
+            continue
+        location = PurePosixPath(record["location"])
+        if location.is_absolute() or ".." in location.parts or location.parts[:2] != ("evidence", "source"):
+            continue
+        path = base.joinpath(*location.parts)
+        try:
+            if (path.is_symlink() or not path.is_file() or base not in path.resolve().parents
+                    or path.stat().st_size > MAX_SOURCE_BYTES):
+                continue
+            blob = path.read_bytes()
+        except OSError:
+            continue
+        if hashlib.sha256(blob).hexdigest() == record["sha256"].lower():
+            return blob
+    return None
+
+
+def _commit_source(root, commit, rel):
+    """REL's blob at COMMIT read with the same trusted Git invocation as
+    evidence_capture.py (fixed binary, scrubbed environment, no hooks or
+    fsmonitor, bounded output and time); None when it is not a regular file
+    there or Git cannot read it."""
+    import evidence_capture  # Imported late: evidence_capture imports this module.
+    try:
+        tree = evidence_capture.git(root, "ls-tree", "-z", commit, "--", rel, limit=8192)
+        metadata, separator, name = tree.partition(b"\t")
+        fields = metadata.split()
+        if (not separator or name != rel.encode("utf-8") + b"\0" or len(fields) != 3
+                or fields[:2] not in ([b"100644", b"blob"], [b"100755", b"blob"])
+                or not _FULL_OID.fullmatch(fields[2].decode("ascii", "replace"))):
+            return None
+        oid = fields[2].decode("ascii")
+        size = evidence_capture.git(root, "cat-file", "-s", oid, limit=32).strip()
+        if not size.isdigit() or int(size) > MAX_SOURCE_BYTES:
+            return None
+        blob = evidence_capture.git(root, "cat-file", "blob", oid, limit=int(size))
+        return blob if len(blob) == int(size) else None
+    except ValueError:  # CaptureError: unavailable object, timeout, output limit.
+        return None
+
+
+def attach_sources(data, repo, context=3, evidence_dir=None):
+    """Attach safe links and best-effort redacted excerpts; omit sensitive sources.
+
+    With a clean assessment pin (assessment.commit), excerpts show the assessed
+    revision, never later working-tree edits: the evidence/source copy captured
+    at that commit (EVIDENCE_DIR, the findings.json directory, when its SHA-256
+    still matches), else the blob at that commit when REPO is a Git checkout;
+    when neither can be read the excerpt is omitted. Only without a pin is the
+    working tree read."""
     base = data["meta"].get("source_url") or ""
     if base:
         base = source_base(http_url(base, "meta.source_url"))
     root = Path(repo).resolve() if repo else None
+    pin = data.get("assessment") if isinstance(data.get("assessment"), dict) else {}
+    commit = str(pin.get("commit") or "").lower()
+    if not _FULL_OID.fullmatch(commit) or pin.get("worktree") != "clean" or pin.get("diff_sha256"):
+        commit = ""
+    pinned_git = bool(commit and root and os.path.lexists(root / ".git"))
     for f in data["findings"]:
         f.pop("source_link", None)
         f.pop("snippet", None)
@@ -1574,19 +1690,28 @@ def attach_sources(data, repo, context=3):
             f["source_link"] = http_url(link, "source_link")
         if not root or sensitive_path(rel):
             continue
-        path = (root / rel).resolve()
-        if root not in path.parents or not path.is_file() or sensitive_path(path.relative_to(root)):
-            continue
-        try:
-            # An excerpt is best-effort: a huge file is skipped, not read into memory.
-            if path.stat().st_size > MAX_SOURCE_BYTES:
+        blob = _captured_source(data, evidence_dir, commit, rel) if commit else None
+        if commit and blob is None:
+            blob = _commit_source(root, commit, rel) if pinned_git else None
+            if blob is None:
+                continue  # The assessed revision cannot be shown: no excerpt.
+        if blob is not None:
+            text = blob.decode("utf-8", errors="replace")
+        else:
+            path = (root / rel).resolve()
+            if root not in path.parents or not path.is_file() or sensitive_path(path.relative_to(root)):
                 continue
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
+            try:
+                # An excerpt is best-effort: a huge file is skipped, not read into memory.
+                if path.stat().st_size > MAX_SOURCE_BYTES:
+                    continue
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
         # Do not show even a middle line of a multiline private key.
         if PRIVATE_KEY_RE.search(text):
             continue
+        text = mask_multiline(text)
         # Number lines as Git and editors do: str.splitlines() also breaks on
         # form feeds, U+2028 and other separators and would shift every line.
         lines = text.split("\n")
@@ -2641,7 +2766,7 @@ def main(argv=None):
             except (ValueError, OSError):
                 # Evidence setup errors can contain private filesystem paths.
                 raise SchemaError("evidence integrity: unable to check the explicitly supplied local inputs") from None
-        attach_sources(data, a.repo)
+        attach_sources(data, a.repo, evidence_dir=Path(a.findings).resolve().parent)
         L = LABELS[a.lang]
         # Render before creating any output: nested extension data can fit the
         # input decoder but exceed the encoder limit inside the report payload.

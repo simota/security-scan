@@ -15,7 +15,10 @@ objects and lazy fetches disabled; no application code or filter runs. A path
 whose checked-out bytes differ from the commit is refused: assess a clean tree.
 Symlinks, hardlinks and non-regular children are refused, and so is a file
 holding a secret-looking value (a credential file, a private-key block, a known
-token format, a literal assigned to a secret-named key, or URL credentials),
+token format such as provider key prefixes, Slack/Discord/Telegram webhook and
+bot URLs or a Bearer/Basic Authorization value, a literal assigned to a
+secret-named key including subscripts such as cfg["SECRET_KEY"] = "...", a
+literal key passed to jwt.sign/encode/verify/decode, or URL credentials),
 since evidence/ is shareable output; reads, Git output and elapsed time are
 bounded. Repeated captures recheck their existing artifacts (without the secret check).
 

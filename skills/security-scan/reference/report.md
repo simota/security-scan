@@ -3,6 +3,20 @@
 **Read when:** CHECKLIST, to deliver a checklist; REPORT, to deliver findings.
 Write in the requester's language.
 
+A second-language copy of the same assessment is a re-render of its own
+`findings.json` into a subdirectory named for the language, never a new run and
+never over the primary pages:
+
+```
+python3 scripts/render.py <out>/findings.json --out <out>/<lang> --lang <lang> --repo <repo> [--no-pdf]
+python3 scripts/contract_check.py <out> --allow <lang>
+```
+
+`--allow <lang>` admits the subdirectory and checks that each `dashboard.html`
+and `assessment.html` in it carries the stamp of the current
+`<out>/findings.json`, so a copy rendered before the last merge is reported as
+stale like the primary pages.
+
 ## Checklist deliverable
 
 - First line: how many invariants were derived, how many perspectives apply,
