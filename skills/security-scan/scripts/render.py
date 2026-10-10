@@ -1468,8 +1468,8 @@ _PLAIN_VALUE = re.compile(r"[\^~<>=].*|v?\d+(?:\.\d+)+[\w.+-]*|(?:~|\.{1,2})?(?:
 # Recognizable credentials, keyed or not: provider token prefixes, webhook and
 # bot URLs whose path is the credential, and an HTTP Authorization value
 # (Bearer/Basic followed by a token holding a digit, or any token right after an
-# Authorization key, also on the next line, so `Bearer ${token}`, `"Bearer " + token` and prose stay readable).
-_AUTH_CTX = r"(?i:authorization)[\"']?[ \t]*[:=,]\s{0,40}[\"'`]?(?:[Bb]earer|[Bb]asic)[ \t]+"
+# Authorization key, also on the next line or after a YAML block-scalar indicator, so `Bearer ${token}`, `"Bearer " + token` and prose stay readable).
+_AUTH_CTX = r"(?i:authorization)[\"']?[ \t]*[:=,](?:[ \t]*[|>][-+0-9]{0,2}[ \t]*(?=[\r\n]))?\s{0,40}[\"'`]?(?:[Bb]earer|[Bb]asic)[ \t]+"
 # After an Authorization key any whole token counts, but not a placeholder (one repeated
 # character, YOUR_TOKEN, token), prose (`Bearer flows; …`) nor an expression (`abc" + x`, `abc${x}`).
 _AUTH_END = r"""(?:[ \t]*(?:[\r\n]|$)|["'`,)}\]\\])"""

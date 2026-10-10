@@ -288,5 +288,74 @@ class CodexRound8dScanTests(Base):
         self.assertTrue(any("action.yml" in x for x in self.high(files)))
 
 
+class CodexRound8eScanTests(Base):
+    HEAD = "${{ github.event.pull_request.head.sha }}"
+    ACTION = COMPOSITE + "    - run: git checkout ${{ inputs.sha }}\n      shell: bash\n"
+
+    def fresh(self):
+        shutil.rmtree(self.tmp)
+        self.tmp.mkdir()
+
+    def not_run(self):
+        return [x["reason"] for x in deps_scan.scan(self.tmp, False)["not_run"]]
+
+    def test_subshell_pipeline_and_background_assignments_do_not_clear_taint(self):
+        head = "          SHA=" + self.HEAD + "\n"
+        for line in ("{ SHA=main; } &", "{ SHA=main; } | cat", "{\n            SHA=main\n          } &",
+                     "SHA=main | cat", "SHA=main &", "echo x | SHA=main", "( SHA=main )", "(cd x; SHA=main)",
+                     "(\n            SHA=main\n          )"):
+            with self.subTest(line=line):
+                self.assertTrue(self.high(PRT + "    steps:\n      - run: |\n" + head + "          " + line
+                                          + '\n          git checkout "$SHA"\n'))
+        for line in ("{ SHA=main; }", "{ echo; } | cat; SHA=main", "echo x | cat; SHA=main",
+                     "git log 2>&1 >/dev/null; SHA=main", "(cd x); SHA=main", "X=$(git rev-parse HEAD); SHA=main"):
+            with self.subTest(line=line):
+                self.assertFalse(self.high(PRT + "    steps:\n      - run: |\n" + head + "          " + line
+                                           + '\n          git checkout "$SHA"\n'))
+        started = time.monotonic()
+        for text in ("|" * 200000, "&" * 200000, "<|>&" * 50000, "run: |" + " " * 200000 + "x"):
+            deps_scan.SHELL_SEP.split(text)
+            deps_scan.RUN_KEY.sub("", text)
+        self.assertLess(time.monotonic() - started, 1.0)
+        self.timed(PRT + "    steps:\n      - run: |\n          " + "{ " * 20000 + "x" + "; } |" * 20000 + "\n")
+
+    def test_chained_env_aliases_resolve(self):
+        for env in ("    env:\n      SHA: %s\n      REF: ${{ env.SHA }}\n" % self.HEAD,
+                    "    env: { SHA: %s, REF: ${{ env.SHA }} }\n" % self.HEAD):
+            with self.subTest(env=env):
+                self.assertTrue(self.high(PRT + env + "    steps:\n" + CHECKOUT + "          ref: ${{ env.REF }}\n"))
+                self.fresh()
+                self.assertTrue(self.high({W + "a.yml": PRT + env + "    steps:\n      - uses: ./.github/actions/co\n"
+                                           "        with:\n          sha: ${{ env.REF }}\n",
+                                           ".github/actions/co/action.yml": self.ACTION}))
+                self.fresh()
+        workflow = "env:\n  SHA: %s\n" % self.HEAD
+        self.assertTrue(self.high(workflow + PRT + "    env:\n      REF: ${{ env.SHA }}\n    steps:\n"
+                                  + CHECKOUT + "          ref: ${{ env.REF }}\n"))
+        self.fresh()
+        cycle = "    env:\n      A: ${{ env.B }}\n      B: ${{ env.A }}\n"
+        self.assertFalse(self.high({W + "a.yml": PRT + cycle + "    steps:\n" + CHECKOUT + "          ref: ${{ env.A }}\n"
+                                    "      - uses: ./.github/actions/co\n        with:\n          sha: ${{ env.A }}\n",
+                                    ".github/actions/co/action.yml": self.ACTION}))
+
+    def test_a_long_local_call_chain_reaches_the_last_callee(self):
+        files = {W + "a.yml": PRT + "    steps:\n      - uses: ./.github/actions/c1\n        with:\n"
+                 "          sha: %s\n" % self.HEAD, ".github/actions/c10/action.yml": self.ACTION}
+        for i in range(1, 10):
+            files[".github/actions/c%d/action.yml" % i] = (COMPOSITE + "    - uses: ./.github/actions/c%d\n"
+                                                           "      with:\n        sha: ${{ inputs.sha }}\n" % (i + 1))
+        self.assertTrue(any("c10/action.yml" in x for x in self.high(files)))
+
+    def test_too_many_call_paths_are_not_merged_but_reported(self):
+        step = "    steps:\n      - uses: ./.github/actions/m\n        with:\n          sha: %s\n"
+        files = {W + "w%02d.yml" % i: PRT + step % ("main-%d" % i) for i in range(70)}
+        files[W + "pr.yml"] = PRT.replace("pull_request_target", "pull_request") + step % self.HEAD
+        files[".github/actions/m/action.yml"] = (COMPOSITE + "    - uses: ./.github/actions/x\n"
+                                                 "      with:\n        sha: ${{ inputs.sha }}\n")
+        files[".github/actions/x/action.yml"] = self.ACTION
+        self.assertFalse(any("x/action.yml" in x for x in self.high(files)))
+        self.assertTrue(any("x/action.yml: too many local call paths" in x for x in self.not_run()))
+
+
 if __name__ == "__main__":
     unittest.main()

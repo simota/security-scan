@@ -964,6 +964,9 @@ UNTRUSTED_HEAD = re.compile(r"\bgithub\.(?:head_ref|event\.(?:number|issue\.numb
 ENV_USE = re.compile(r"\$\{?([A-Za-z_]\w*)|\$\{\{\s*env\.([A-Za-z_]\w*)")
 OUTPUT_USE = re.compile(r"\bsteps\.([\w-]+)\.outputs\.([\w-]+)")
 INPUT_USE = re.compile(r"(?<![\w.])inputs\.([\w-]+)")
+# A run key with its block-scalar indicator; shell separators, with pipes and `&` but not redirections (2>&1, &>).
+RUN_KEY = re.compile(r"""^\s*(?:-\s+)?["']?run["']?\s*:\s*(?:[|>][-+0-9]*\s*(?:#.*)?$)?""")
+SHELL_SEP = re.compile(r"(;|&&|\|\||(?<![<>])\|&?|(?<![<>])&(?!>))")
 # A shell function header and its opening brace: `f() {`, `function f {`, `function f() {`.
 FUNCTION_HEADER = re.compile(r"\s*(?:function\s+[^\s(){}]+\s*(?:\(\s*\))?|[^\s(){}=]+\s*\(\s*\))\s*\{(?:\s+|$)")
 
@@ -1088,6 +1091,25 @@ def local_targets(root, rel, memo):
     return memo[rel]
 
 
+ENV_NAME = re.compile(r"\benv\.([A-Za-z_]\w*)")
+
+
+def env_aliases(value, env, hops=8):
+    """value plus what its env.X names hold, followed through aliases (REF: ${{ env.SHA }}), bounded and cycle-safe."""
+    out, seen, todo = [value], set(), ENV_NAME.findall(value)
+    for _ in range(hops):
+        todo = [n for n in dict.fromkeys(todo) if n in env and n not in seen]
+        seen.update(todo)
+        out += [env[n] for n in todo]
+        todo = [x for n in todo for x in ENV_NAME.findall(env[n])]
+    return " ".join(out)
+
+
+class CallMap(dict):
+    """callee -> call entries; .incomplete holds callees whose caller inputs were not fully followed."""
+    incomplete = frozenset()
+
+
 def local_calls(files, root, privileged):
     """callee -> [(caller, {input: value}, caller is privileged)] of local `uses: ./x` jobs and steps."""
     root, calls, memo, own = Path(root).resolve(), {}, {}, set()
@@ -1121,20 +1143,19 @@ def local_calls(files, root, privileged):
                 continue
             values = mapping_values(lines, given[0], given[1], end) if given else {}
             # `ref: ${{ env.SHA }}` passes what the caller's workflow, job or step env holds.
-            values = {k: " ".join([v, *(env[n] for n in re.findall(r"\benv\.([A-Za-z_]\w*)", v) if n in env)])
-                      for k, v in values.items()}
+            values = {k: env_aliases(v, env) for k, v in values.items()}
             for cand in local_targets(root, m[1], memo):
                 calls.setdefault(cand, []).append((p, values, p.resolve() in privileged))
     # A -> B -> C: B's `inputs.x` forwarded to C carries what A passed for x, one entry per
     # call path: a value from an unprivileged A never counts as passed by a privileged one,
-    # even when B is privileged through another caller. Past 64 paths per callee, the
-    # remaining callers' values are merged into one entry (raise-only, as one path).
+    # even when B is privileged through another caller. Past 64 paths per callee, or when
+    # the bounded fixed point is not reached, the callee is reported for manual review.
     def grow(values, ups):
         extra = {key: [g[x] for x in INPUT_USE.findall(value) for g in ups if x in g and g[x] not in value]
                  for key, value in values.items()}
         return {key: (value + " " + " ".join(extra[key]))[:4000] if extra[key] else value for key, value in values.items()}
-    base = calls
-    for _ in range(8):
+    base, partial = calls, set()
+    for _ in range(min(len(base) + 1, 64)):
         grown_calls = {}
         for callee, entries in base.items():
             out, budget = {}, 64
@@ -1142,15 +1163,20 @@ def local_calls(files, root, privileged):
                 ups = calls.get(caller.resolve(), []) if any("inputs" in v for v in values.values()) else ()
                 derived = list(itertools.islice(((caller, grown, caller.resolve() in own or u[2]) for u in ups
                                                  for grown in [grow(values, [u[1]])] if grown != values), max(budget, 0) + 1))
-                if len(derived) > budget:
-                    derived = [(caller, grow(values, [u[1] for u in ups]), privileged_caller or any(u[2] for u in ups))]
+                if len(derived) > budget:  # keep the first paths, each with its own privilege
+                    derived = derived[:max(budget, 0)]
+                    partial.add(callee)
                 budget -= len(derived)
                 for e in derived or [(caller, values, privileged_caller)]:
                     out.setdefault((e[0], tuple(sorted(e[1].items())), e[2]), e)
             grown_calls[callee] = list(out.values())
         if grown_calls == calls:
             break
-        calls = grown_calls
+        calls, changed = grown_calls, {k for k, v in grown_calls.items() if calls.get(k) != v}
+    else:
+        partial |= changed
+    calls = CallMap(calls)
+    calls.incomplete = partial
     return calls
 
 
@@ -1557,6 +1583,8 @@ def check_workflow(c, p, privileged=None, calls=None):
     lines = text.splitlines()
     triggers = workflow_triggers(text)
     callers = (calls or {}).get(Path(p).resolve(), [])
+    if Path(p).resolve() in getattr(calls, "incomplete", ()):
+        incomplete(c, "workflow scan", p, "too many local call paths; caller inputs require manual review")
     if escaped_triggers(text):
         incomplete(c, "workflow scan", p, "escaped trigger names require manual review")
     if "workflow_run" in triggers:
@@ -1629,9 +1657,10 @@ def check_workflow(c, p, privileged=None, calls=None):
         def taint(value):
             return max(head_level(value), caller_level(value))
 
-        def assigned(rows):
-            """{name: level} of `name: value` rows, also quoted keys and one-line flow maps (env: {A: x})."""
-            out, until = {}, 0
+        def assigned(rows, outer={}):
+            """{name: level} of `name: value` rows, also quoted keys and one-line flow maps (env: {A: x});
+            REF: ${{ env.SHA }} takes SHA's level from this map or the outer one, through up to 8 aliases."""
+            out, until, raw = {}, 0, {}
             for i in rows:
                 if i < until:
                     continue  # inside a block scalar already read as a value
@@ -1648,6 +1677,15 @@ def check_workflow(c, p, privileged=None, calls=None):
                     pairs = flow_pairs(value).items() if value.lstrip().startswith("{") else ()
                     for name, v in [(m[2], value), *pairs]:
                         out[name] = max(out.get(name, 0), taint(v))
+                        if "env." in v:
+                            raw[name] = raw.get(name, "") + " " + v
+            aliases = {k: ENV_NAME.findall(v) for k, v in raw.items()}
+            for _ in range(8 if aliases else 0):
+                grown = {k: max([out[k]] + [max(out.get(n, 0), outer.get(n, 0)) for n in names])
+                         for k, names in aliases.items()}
+                if all(out[k] == v for k, v in grown.items()):
+                    break
+                out.update(grown)
             return out
 
         workflow_env, job_env, job_names, written, outputs = assigned(top_rows), {}, {}, {}, {}
@@ -1656,12 +1694,14 @@ def check_workflow(c, p, privileged=None, calls=None):
             """Env names holding the PR head for this step: step, then job, then workflow, then $GITHUB_ENV."""
             # One generic pattern plus set membership: no per-step regex compile or set copies.
             if job not in job_env:
-                job_env[job] = dict(workflow_env, **(assigned(i for i in range(*job) if not in_step[i]) if job else {}))
+                job_env[job] = dict(workflow_env, **(assigned((i for i in range(*job) if not in_step[i]), workflow_env)
+                                                     if job else {}))
             if (job, writes) not in job_names:
                 names = job_names[job, writes] = dict(job_env[job])
                 for k, v in written.get(job, {}).items() if writes else ():
                     names[k] = max(names.get(k, 0), v)
-            step, names, shell = assigned(own(st)), job_names[job, writes], {}
+            names, shell = job_names[job, writes], {}
+            step = assigned(own(st), names)
 
             def env_level(x):
                 out = 0
@@ -1782,19 +1822,37 @@ def check_workflow(c, p, privileged=None, calls=None):
                 # An assignment after `&&`/`||`, inside an if/case/loop block or in a function
                 # body (which may never be called) may not run: it can raise a variable's taint
                 # but never clear it. Braces are counted from a function header to its `}`.
-                segments, depth, braces, sep = [], 0, 0, ";"
+                # So is one in a subshell: inside `( … )`, a pipeline stage, a backgrounded
+                # command, or a `{ …; }` group that is piped or backgrounded.
+                segments, depth, braces, sep, paren, groups, closed, spans = [], 0, 0, ";", 0, [], None, []
                 for k, row in run:
-                    parts = re.split(r"(;|&&|\|\|)", shell_text(re.sub(r"""^\s*(?:-\s+)?["']?run["']?\s*:\s*""", "", row)))
+                    parts = SHELL_SEP.split(shell_text(RUN_KEY.sub("", row)))
                     for j in range(0, len(parts), 2):
                         sep = parts[j - 1] if j else sep  # a row ending in `&&` continues on the next
-                        word = parts[j].split(None, 1)[:1]
+                        if sep in ("|", "|&", "&") and segments:  # the command (or group) before runs in a subshell
+                            spans.append((len(segments) - 1 if closed is None else closed, len(segments)))
+                        word, in_fn, closed = parts[j].split(None, 1)[:1], braces > 0, None
                         depth = max(0, depth + (word in (["if"], ["case"], ["for"], ["while"], ["until"], ["select"]))
                                     - (word in (["fi"], ["esac"], ["done"])))
                         header = FUNCTION_HEADER.match(parts[j])
                         braces = max(0, braces + (bool(header) or braces > 0 and word == ["{"]) - (braces > 0 and word == ["}"]))
-                        segments.append((k, parts[j][header.end():] if header else parts[j],
-                                         depth > 0 or braces > 0 or sep in ("&&", "||")))
+                        cond = (depth > 0 or braces > 0 or sep in ("&&", "||", "|", "|&") or paren > 0
+                                or parts[j].lstrip().startswith("("))
+                        if not in_fn and not header and word == ["{"]:
+                            groups.append((len(segments), sep in ("|", "|&")))
+                        elif not in_fn and word == ["}"] and groups:
+                            closed, piped = groups.pop()
+                            if piped:
+                                spans.append((closed, len(segments)))
+                                cond = True
+                        segments.append([k, parts[j][header.end():] if header else parts[j], cond])
+                        paren = max(0, paren + parts[j].count("(") - parts[j].count(")"))
                     sep = parts[-2] if len(parts) > 1 and not parts[-1].strip() else ";"
+                marks = [0] * (len(segments) + 1)  # spans applied in one sweep: nested groups stay linear
+                for a, b in spans:
+                    marks[a], marks[b] = marks[a] + 1, marks[b] - 1
+                for e, m in zip(segments, itertools.accumulate(marks)):
+                    e[2] = e[2] or m > 0
                 for k, x, conditional in segments:
                     if not hits and (re.search(r"\bgh\s+pr\s+checkout\b", x)
                                      or re.search(r"\bgh\s+repo\s+clone\b", x) and untrusted(x)):

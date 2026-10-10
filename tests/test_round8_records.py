@@ -460,5 +460,23 @@ class CodexRound8dRecordTests(unittest.TestCase):
             self.assertLess(time.monotonic() - started, 1.0, text[:20])
 
 
+class CodexRound8eRecordTests(unittest.TestCase):
+    def test_authorization_after_a_yaml_block_scalar_indicator(self):
+        for indicator in (">-", "|", "|-", ">", "|+", ">2"):
+            text = "headers:\n  Authorization: %s\n    Bearer supersecret\n" % indicator
+            with self.subTest(indicator=indicator):
+                self.assertTrue(render.secret_in_source("ci/config.yml", text))
+                masked = render.mask_multiline(text)
+                self.assertNotIn("supersecret", masked)
+                self.assertEqual(masked.count("\n"), text.count("\n"))
+        self.assertFalse(render.secret_in_source("ci/config.yml", "headers:\n  Authorization: |\n    Bearer ${TOKEN}\n"))
+        started = time.monotonic()
+        for text in ("Authorization:" + " |" * 100000, "Authorization: |" + " " * 200000,
+                     "Authorization: >-" + "\n" * 200000 + "x"):
+            render.secret_in_source("a.yml", text)
+            render.mask_multiline(text)
+        self.assertLess(time.monotonic() - started, 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()
