@@ -1243,6 +1243,12 @@ def git_commands(line):
     return out
 
 
+def branch(ref):
+    """`pr`, `heads/pr` and `refs/heads/pr` name one local branch for checkout."""
+    ref = ref.lstrip("+")
+    return ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref[6:] if ref.startswith("heads/") else ref
+
+
 def check_workflow(c, p, privileged=None):
     text = read(p)
     lines = text.splitlines()
@@ -1308,9 +1314,9 @@ def check_workflow(c, p, privileged=None):
                 fetches = [a for _, x in run for sub, a in git_commands(x) if sub == "fetch" and untrusted(" ".join(a))]
                 fetched = job_fetched.setdefault(job, set())
                 if fetches:
-                    fetched |= {"FETCH_HEAD"} | {a.split(":", 1)[1].lstrip("+") for f in fetches for a in f if ":" in a}
+                    fetched |= {"FETCH_HEAD"} | {branch(a.split(":", 1)[1]) for f in fetches for a in f if ":" in a}
                 hits = [k for k, x in run if re.search(r"\bgh\s+pr\s+checkout\b", x) or any(
-                    sub in GIT_MOVES and (untrusted(" ".join(args)) or fetched & set(args))
+                    sub in GIT_MOVES and (untrusted(" ".join(args)) or fetched & {branch(a) for a in args})
                     for sub, args in git_commands(x))][:1]
                 title = f"{privileged} workflow checks out the pull request's code in a run step"
             for line in hits:

@@ -236,6 +236,9 @@ class DepsScanRound5Tests(Temp):
         self.workflow(PRT + "      - run: git fetch origin \"pull/${{ github.event.number }}/head:pr\"\n"
                             "      - run: git checkout 'pr'\n")
         self.assertTrue(any("in a run step" in t for t in self.high()))
+        self.workflow(PRT + "      - run: git fetch origin pull/${{ github.event.number }}/head:refs/heads/pr\n"
+                            "      - run: git checkout pr\n")
+        self.assertTrue(any("in a run step" in t for t in self.high()))
         checkout = "      - uses: actions/checkout@" + SHA + "\n        with:\n          ref: ${{ env.PR_SHA }}\n"
         self.workflow("on: pull_request_target\nenv:\n  PR_SHA: ${{ github.event.pull_request.head.sha }}\n"
                       "jobs:\n  j:\n    runs-on: x\n    steps:\n" + checkout)
@@ -280,6 +283,9 @@ class NoPdfLimitationTests(Temp):
         contradictory = self.limits(True)
         self.assertEqual(len(contradictory), 1, contradictory)
         self.assertIn("assessment.pdf exists", contradictory[0])
+        stale = self.limits(False)  # --no-pdf with a PDF left from an earlier render
+        self.assertEqual(len(stale), 1, stale)
+        self.assertIn("assessment.pdf exists", stale[0])
 
 
 class UrlUserTests(unittest.TestCase):
