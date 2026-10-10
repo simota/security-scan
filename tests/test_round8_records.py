@@ -218,9 +218,10 @@ class PinnedExcerptTests(Pipeline):
         (plain / "src/orders.py").write_text("x = 1  # WORKTREE\n")
         data = {"meta": {}, "findings": []}
         self.assertIn("WORKTREE", self.excerpt(data, "src/orders.py:1", repo=plain))
+        # A valid pin never falls back to the working tree: without a readable copy or blob, no excerpt.
         pinned = {"meta": {}, "findings": [],
                   "assessment": {"repository": "p", "commit": "1" * 40, "worktree": "clean"}}
-        self.assertIn("WORKTREE", self.excerpt(pinned, "src/orders.py:1", repo=plain))
+        self.assertIsNone(self.excerpt(pinned, "src/orders.py:1", repo=plain))
 
 
 class SecretsLocationTests(Pipeline):
@@ -334,6 +335,52 @@ class CodexRound8RecordTests(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertFalse(render.secret_in_source("src/client.py", line + "\n"))
                 self.assertEqual(render.redact(line), line)
+
+
+class CodexRound8bRecordTests(Pipeline):
+    JWT = 'const t = jwt.sign(\n  payload,\n  "supersecret"\n);\n'
+    AUTH = 'headers = {\n    "Authorization":\n        "Bearer abcdefghijklmnopqrstuvwxyz",\n}\n'
+
+    def snippet(self, data, location, repo, evidence_dir=None):
+        data = copy.deepcopy(data)
+        data["findings"] = [self.finding("F-001", location)]
+        render.attach_sources(data, repo, evidence_dir=evidence_dir)
+        return data["findings"][0].get("snippet")
+
+    def test_multiline_jwt_key_and_authorization_value_are_refused_and_masked(self):
+        for text, secret in ((self.JWT, "supersecret"), (self.AUTH, "abcdefghijklmnopqrstuvwxyz")):
+            with self.subTest(text=text):
+                self.assertTrue(render.secret_in_source("src/client.js", text))
+                masked = render.mask_multiline(text)
+                self.assertNotIn(secret, masked)
+                self.assertEqual(masked.count("\n"), text.count("\n"))
+                plain = self.tmp / "plain"
+                (plain / "src").mkdir(parents=True, exist_ok=True)
+                (plain / "src/client.js").write_text(text)
+                snippet = self.snippet({"meta": {}, "findings": []}, "src/client.js:3", plain)
+                self.assertEqual(len(snippet["lines"]), len(text.splitlines()))
+                self.assertNotIn(secret, "\n".join(snippet["lines"]))
+        for text in ('jwt.sign(\n  payload,\n  process.env.JWT_SECRET\n)\n',
+                     '"Authorization":\n  "Bearer " + token\n'):
+            self.assertFalse(render.secret_in_source("src/client.js", text))
+            self.assertEqual(render.mask_multiline(text), text)
+
+    def test_multiline_patterns_stay_linear(self):
+        for text in ("jwt.sign(" + " " * 200000, ("jwt.sign(" + " " * 39) * 5000, "jwt.sign(a," + " \n" * 100000,
+                     ("Authorization:" + "\n" * 39) * 4000, "Authorization:" + " " * 200000 + "Bearer"):
+            started = time.monotonic()
+            render.mask_multiline(text)
+            render.secret_in_source("a.js", text)
+            self.assertLess(time.monotonic() - started, 1.0, text[:20])
+
+    def test_valid_pin_without_checkout_or_matching_copy_omits_the_excerpt(self):
+        data, _ = self.capture([self.finding("F-001", "src/orders.py:2")], ["src/orders.py"])
+        shutil.rmtree(self.repo / ".git")
+        (self.repo / "src/orders.py").write_text("def show(order_id):\n    return 1  # LATER\n")
+        self.assertIsNotNone(self.snippet(data, "src/orders.py:2", self.repo, evidence_dir=self.out))
+        (self.out / "evidence/source/src/orders.py").write_text("def show():\n    TAMPERED\n")
+        self.assertIsNone(self.snippet(data, "src/orders.py:2", self.repo, evidence_dir=self.out))
+        self.assertIsNone(self.snippet(data, "src/config.py:1", self.repo, evidence_dir=self.out))
 
 
 if __name__ == "__main__":

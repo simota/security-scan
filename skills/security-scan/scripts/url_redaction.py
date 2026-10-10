@@ -46,20 +46,23 @@ def hidden_userinfo(token):
         return True
     if not segment:
         return False  # '/@scope' (npm) and '/@vite/client' paths.
-    # A later '@' of a database or service URL ends a password with '/', '?' or '#' in it
-    # (postgres://app.svc:1234/PW/SECRET@h.com) when a ':' in the authority starts that
-    # password; ftp://files.example.com/pub/icon@2x.png is a path.
-    if SERVICE_SCHEME_RE.match(scheme) and ":" in netloc:
-        return True
     name, colon, port = netloc.rpartition(":")
+    # A dotted host, localhost or [IPv6] with a numeric port is host:port, not user:password.
+    host_port = port.isdigit() and ("." in name or "[" in name or name.lower() == "localhost")
+    # A later '@' of a database or service URL ends a password with '/', '?' or '#' in it
+    # (postgres://app:5432/PW/SECRET@db, redis://default:1234#Abcd@cache) when a ':' in the
+    # authority starts that password; ftp://files.example.com/pub/icon@2x.png is a path. A
+    # dotted name before the ':' is a host:port (postgres://db.example.com:5432/analytics@2024),
+    # so postgres://app.svc:1234/PW/SECRET@h.com/x reads as a path too (accepted trade-off).
+    if SERVICE_SCHEME_RE.match(scheme) and colon and not host_port:
+        return True
     nested = re.search(r"[/?#]", segment)
     # NAME:non-port is userinfo (https://user:/s3cr3t@host). NAME:digits is too when the '@' ends
     # the first segment (https://svc:2024/Qx9+abc=@db.internal); a deeper '@' is a path of a
     # single-label service (http://web:3000/images/icon@2x.png, minio:9000/bucket/a@b.com).
     # A dotted host or localhost with a port (api.example.com:8443/users/alice@example.com)
     # is judged like a portless one.
-    if colon and "]" not in port and (not port.isdigit() or "." not in name and "[" not in name
-                                      and name.lower() != "localhost" and not nested):
+    if colon and "]" not in port and (not port.isdigit() or not host_port and not nested):
         return True
     # user/name@host: '@' inside the first path segment and not before a package version.
     return not nested and not VERSION_RE.match(after, at + 1)

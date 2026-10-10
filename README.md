@@ -184,8 +184,9 @@ secret assignments (also subscripts such as `cfg["SECRET_KEY"] = "…"`), litera
 `jwt.sign`/`encode` keys and literal fallback defaults are masked in other
 excerpts, but redaction is heuristic, not a guarantee. With a clean
 `assessment.commit` pin, excerpts come from the `evidence/source/` copy or the
-blob at that commit, never from later working-tree edits. Inspect reports before
-sharing them; without `--repo`, source is not embedded. `source_link` and
+blob at that commit (else none is shown), never from later working-tree
+edits. Inspect reports before sharing them; without `--repo`, source is not
+embedded. `source_link` and
 `snippet` are derived fields and cannot be injected through input JSON. All
 report links must be absolute HTTP(S) URLs without credentials or controls;
 token-like query and fragment parameters are dropped from displayed reference

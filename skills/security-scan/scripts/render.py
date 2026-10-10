@@ -1435,12 +1435,22 @@ def redact(line):
     line = redact_urls(line)
     # Recognizable credentials are masked wherever they appear, keyed or not.
     line = JWT_RE.sub("********", TOKEN_RE.sub("********", line))
-    line = JWT_KEY_LITERAL.sub(lambda m: m.group(1) + m.group(2) + "********" + m.group(2), line)
+    line = JWT_KEY_LITERAL.sub(_mask_jwt_key, line)
     line = _sub_keyed(line, _QUOTED_TAIL, lambda key, m: key + m.group(1) + m.group(2) + "********" + m.group(2))
     line = _sub_keyed(line, _SECRET_TAIL, lambda key, m: key + m.group(1) + "********")
     if _KEY.search(line) or any(_KEY_END.search(run.group()) for run in _KEY_RUN.finditer(line)):
         line = _FALLBACK_LITERAL.sub(lambda m: m.group(1) + m.group(2) + "********" + m.group(2), line)
     return line
+
+
+def _mask_jwt_key(m):
+    return m.group(1) + m.group(2) + "********" + m.group(2)
+
+
+def mask_multiline(text):
+    """A literal JWT key or Authorization value whose call or key is on an earlier line,
+    masked in place: no line break is touched, so line numbers hold."""
+    return _AUTH_VALUE.sub(lambda m: m.group(1) + "********", JWT_KEY_LITERAL.sub(_mask_jwt_key, text))
 
 
 MAX_SOURCE_BYTES = 16 * 1024 * 1024
@@ -1458,7 +1468,8 @@ _PLAIN_VALUE = re.compile(r"[\^~<>=].*|v?\d+(?:\.\d+)+[\w.+-]*|(?:~|\.{1,2})?(?:
 # Recognizable credentials, keyed or not: provider token prefixes, webhook and
 # bot URLs whose path is the credential, and an HTTP Authorization value
 # (Bearer/Basic followed by a token holding a digit, or any token right after an
-# Authorization key, so `Bearer ${token}`, `"Bearer " + token` and prose stay readable).
+# Authorization key, also on the next line, so `Bearer ${token}`, `"Bearer " + token` and prose stay readable).
+_AUTH_CTX = r"(?i:authorization)[\"']?[ \t]*[:=,]\s{0,40}[\"'`]?(?:[Bb]earer|[Bb]asic)[ \t]+"
 TOKEN_RE = re.compile(r"\b(?:gh[opsu]_[A-Za-z0-9]{36,}|github_pat_\w{22,}|A(?:KIA|SIA)[0-9A-Z]{16}"
                       r"|xox[abprse]-[A-Za-z0-9-]{10,}|[sr]k_(?:live|test)_[A-Za-z0-9]{16,}|glpat-[\w-]{20,}"
                       r"|AIza[\w-]{35}|sk-(?:proj|ant|svcacct|admin)-[\w-]{20,}|sk-[A-Za-z0-9]{32,}"
@@ -1468,12 +1479,13 @@ TOKEN_RE = re.compile(r"\b(?:gh[opsu]_[A-Za-z0-9]{36,}|github_pat_\w{22,}|A(?:KI
                       r"|(?:api\.telegram\.org/bot)?\d{6,12}:AA[\w-]{30,}"
                       r"|[Bb]earer[ \t]+(?=[A-Za-z._~+/-]*\d)[\w.~+/-]{16,}=*"
                       r"|[Bb]asic[ \t]+(?=[A-Za-z+/]*\d)[A-Za-z0-9+/]{16,}={0,2}(?![\w.~+/-])"
-                      r"|(?i:authorization)[\"']?[ \t]*[:=,][ \t]*[\"'`]?(?:[Bb]earer|[Bb]asic)[ \t]+[\w.~+/-]{16,}=*)")
+                      r"|" + _AUTH_CTX + r"[\w.~+/-]{16,}=*)")
+_AUTH_VALUE = re.compile("(" + _AUTH_CTX + r")[\w.~+/-]{16,}=*")
 # A literal signing key passed positionally: jwt.sign(payload, "key"),
 # jwt.encode(claims, 'key', ...), jwt.decode(token, "key"). The first argument
-# is a simple expression or a flat {...} object literal.
-JWT_KEY_LITERAL = re.compile(r"""(?i)(\b(?:jwt|jsonwebtoken|jose|jws)\.(?:sign|encode|verify|decode)\s*\(\s*"""
-                             r"""(?:\{[^{}()\n]{0,200}\}|[^,(){}\n]{1,200}),\s*(?:[rbfu]{1,2}(?=['"]))?)"""
+# is a simple expression or a flat {...} object literal; the call may span lines.
+JWT_KEY_LITERAL = re.compile(r"""(?i)(\b(?:jwt|jsonwebtoken|jose|jws)\.(?:sign|encode|verify|decode)\s{0,40}\(\s{0,40}"""
+                             r"""(?:\{[^{}()\n]{0,200}\}|[^\s,(){}][^,(){}\n]{0,199}),\s{0,40}(?:[rbfu]{1,2}(?=['"]))?)"""
                              r"""(['"])((?:\\.|(?!\2)[^\\\n]){1,1024})\2""")
 # A private key block: the header followed by a base64 body line (raw or \n-escaped).
 PEM_BODY_RE = re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[ \t]*(?:\r?\n|\\r?\\n)"
@@ -1496,11 +1508,11 @@ def secret_in_source(rel, text):
     """True when a file would put a secret-looking value into shareable output."""
     if sensitive_path(rel) or PEM_BODY_RE.search(text) or TOKEN_RE.search(text) or JWT_RE.search(text):
         return True
+    # A literal signing key is a secret even when it reads like a word ("supersecret").
+    if any(m.group(3) and not _NOT_SECRET.match(m.group(3)) for m in JWT_KEY_LITERAL.finditer(text)):
+        return True
     config = config_source(rel)
     for line in text.split("\n"):
-        # A literal signing key is a secret even when it reads like a word ("supersecret").
-        if any(m.group(3) and not _NOT_SECRET.match(m.group(3)) for m in JWT_KEY_LITERAL.finditer(line)):
-            return True
         for run in _KEY_RUN.finditer(line):
             name = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", run.group())
             m = _SECRET_NAME.search(name) and _LITERAL_TAIL.match(line, run.end())
@@ -1640,8 +1652,8 @@ def attach_sources(data, repo, context=3, evidence_dir=None):
     revision, never later working-tree edits: the evidence/source copy captured
     at that commit (EVIDENCE_DIR, the findings.json directory, when its SHA-256
     still matches), else the blob at that commit when REPO is a Git checkout;
-    when neither can be read the excerpt is omitted. Without a pin, or when
-    REPO is not a Git checkout, the working tree is read as before."""
+    when neither can be read the excerpt is omitted. Only without a pin is the
+    working tree read."""
     base = data["meta"].get("source_url") or ""
     if base:
         base = source_base(http_url(base, "meta.source_url"))
@@ -1667,8 +1679,8 @@ def attach_sources(data, repo, context=3, evidence_dir=None):
         if not root or sensitive_path(rel):
             continue
         blob = _captured_source(data, evidence_dir, commit, rel) if commit else None
-        if blob is None and pinned_git:
-            blob = _commit_source(root, commit, rel)
+        if commit and blob is None:
+            blob = _commit_source(root, commit, rel) if pinned_git else None
             if blob is None:
                 continue  # The assessed revision cannot be shown: no excerpt.
         if blob is not None:
@@ -1687,6 +1699,7 @@ def attach_sources(data, repo, context=3, evidence_dir=None):
         # Do not show even a middle line of a multiline private key.
         if PRIVATE_KEY_RE.search(text):
             continue
+        text = mask_multiline(text)
         # Number lines as Git and editors do: str.splitlines() also breaks on
         # form feeds, U+2028 and other separators and would shift every line.
         lines = text.split("\n")

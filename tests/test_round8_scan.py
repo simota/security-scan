@@ -155,13 +155,15 @@ class ServiceUrlPathTests(unittest.TestCase):
                     "postgres://db.example.com/analytics/v@2"):
             with self.subTest(url=url):
                 self.assertFalse(has_url_credentials(url))
-        self.assertTrue(has_url_credentials("postgres://app.svc:1234/PW/SECRET@h.com/x"))
+        self.assertTrue(has_url_credentials("postgres://app:1234/PW/SECRET@h.com/x"))
 
 
 class UrlUserinfoTests(unittest.TestCase):
     def test_service_url_passwords_with_delimiters_are_redacted(self):
-        for text, secret in (("postgres://app.svc:1234/PW/SECRET@h.com/x", "SECRET"),
-                             ("postgres://app.svc:1234/PWSECRET?a(@h.com", "PWSECRET"),
+        # A dotted name with a numeric port is host:port (see CodexRound8bScanTests), so these
+        # passwords-with-delimiters use a single-label user name.
+        for text, secret in (("postgres://app:1234/PW/SECRET@h.com/x", "SECRET"),
+                             ("postgres://app:1234/PWSECRET?a(@h.com", "PWSECRET"),
                              ('https://user:p\\"ss@host', "ss@host")):
             with self.subTest(text=text):
                 self.assertTrue(has_url_credentials(text))
@@ -180,6 +182,40 @@ class UrlUserinfoTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertTrue(has_url_credentials(text))
                 self.assertEqual(redact_urls(text), "[redacted URL]")
+
+
+class CodexRound8bScanTests(Base):
+    def test_pr_number_in_a_branch_name_with_pull_is_not_the_head(self):
+        for value in ("feature/pull/${{ github.event.number }}/docs", "docs/pr/${{ github.event.number }}"):
+            with self.subTest(value=value):
+                self.assertFalse(self.high(PRT + "    steps:\n" + CHECKOUT + "          ref: " + value + "\n"))
+                self.assertFalse(self.high(PRT + "    steps:\n      - run: git checkout " + value + "\n"))
+        self.assertTrue(self.high(PRT + "    steps:\n" + CHECKOUT + "          ref: refs/pull/${{ github.event.number }}/head\n"))
+
+    def test_conditional_shell_assignment_does_not_clear_taint(self):
+        head = "          SHA=${{ github.event.pull_request.head.sha }}\n"
+        for script in (head + '          false && SHA=main; git checkout "$SHA"\n',
+                       head + '          true || SHA=main\n          git checkout "$SHA"\n',
+                       head + '          if [ -z "$X" ]; then SHA=main; fi\n          git checkout "$SHA"\n',
+                       head + '          if [ -z "$X" ]; then\n            SHA=main\n          fi\n          git checkout "$SHA"\n',
+                       head + '          for b in a; do\n            SHA=main\n          done\n          git checkout "$SHA"\n',
+                       '          if [ -n "$X" ]; then SHA=${{ github.head_ref }}; fi\n          git checkout "$SHA"\n'):
+            with self.subTest(script=script):
+                self.assertTrue(self.high(PRT + "    steps:\n      - run: |\n" + script))
+        # After the block closes, an unconditional assignment still replaces the value.
+        self.assertFalse(self.high(PRT + "    steps:\n      - run: |\n" + head
+                                   + '          if [ -z "$X" ]; then echo; fi\n          SHA=main\n          git checkout "$SHA"\n'))
+
+    def test_service_url_with_host_port_and_at_in_path_is_kept(self):
+        for url in ("postgres://db.example.com:5432/analytics@2024", "sftp://files.example.com:22/home/alice@example.com",
+                    "postgres://localhost:5432/db/v@2", "mysql://10.0.0.5:3306/a/b@c"):
+            with self.subTest(url=url):
+                self.assertFalse(has_url_credentials(url))
+                self.assertEqual(redact_urls(url), url)
+        for url in ("postgres://app:5432/Secret@db/app", "redis://default:1234#Abcd@10.0.0.5:6379",
+                    "postgres://u:pw@db.example.com:5432/x@y"):
+            with self.subTest(url=url):
+                self.assertTrue(has_url_credentials(url))
 
 
 if __name__ == "__main__":

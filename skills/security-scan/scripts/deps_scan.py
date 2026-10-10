@@ -974,12 +974,17 @@ def dotted(value):
     return BRACKET.sub(r".\1", value) if "[" in value else value
 
 
+# A real pull ref, refs/pull/<n>/head or pull/<n>/merge: a bare PR number elsewhere
+# (backport-<n>, feature/pull/<n>/docs) is a name, not the head. Bounded per anchor.
+PULL_REF = re.compile(r"\bpull/[^/\n]{1,200}/(?:head|merge)\b")
+
+
 def pull_ref(value):
-    return "pull/" in value or "/pr/" in value
+    return bool(PULL_REF.search(value))
 
 
 def head_expr(value):
-    """UNTRUSTED_HEAD, where a bare PR or issue number counts only inside a pull/<n>/ or /pr/<n> ref."""
+    """UNTRUSTED_HEAD, where a bare PR or issue number counts only inside a pull/<n>/(head|merge) ref."""
     value = dotted(value)
     return any(not PR_NUMBER.fullmatch(m[0]) or pull_ref(value) for m in UNTRUSTED_HEAD.finditer(value))
 
@@ -1010,7 +1015,7 @@ def strip_comment(line):
 def head_value(value):
     """True when a checkout input names the PR head (or refs/pull/<number>)."""
     value = dotted(value)
-    return bool(HEAD_REF.search(value) or "pull/" in value and PR_NUMBER.search(value))
+    return bool(HEAD_REF.search(value) or pull_ref(value) and PR_NUMBER.search(value))
 
 
 FLOW_PAIR = re.compile(r"""\s*["']?([\w-]+)["']?\s*:\s*("(?:[^"\\]|\\.)*(?:"|$)|'(?:[^']|'')*(?:'|$)|[^,}]*)""")
@@ -1728,22 +1733,38 @@ def check_workflow(c, p, privileged=None, calls=None):
                 fetched, hits = job_fetched.setdefault(job, set()), []
                 # One row may hold several commands (`SHA=…; git checkout "$SHA"`, or an
                 # inline `run: …`): each runs after the ones before it on the row.
-                segments = [(k, seg) for k, row in run
-                            for seg in re.split(r";|&&|\|\|", shell_text(re.sub(r"""^\s*(?:-\s+)?["']?run["']?\s*:\s*""", "", row)))]
-                for k, x in segments:
+                # An assignment after `&&`/`||` or inside an if/case/loop block may not run: it
+                # can raise a variable's taint but never clear it.
+                segments, depth, sep = [], 0, ";"
+                for k, row in run:
+                    parts = re.split(r"(;|&&|\|\|)", shell_text(re.sub(r"""^\s*(?:-\s+)?["']?run["']?\s*:\s*""", "", row)))
+                    for j in range(0, len(parts), 2):
+                        sep = parts[j - 1] if j else sep  # a row ending in `&&` continues on the next
+                        word = parts[j].split(None, 1)[:1]
+                        depth = max(0, depth + (word in (["if"], ["case"], ["for"], ["while"], ["until"], ["select"]))
+                                    - (word in (["fi"], ["esac"], ["done"])))
+                        segments.append((k, parts[j], depth > 0 or sep in ("&&", "||")))
+                    sep = parts[-2] if len(parts) > 1 and not parts[-1].strip() else ";"
+                for k, x, conditional in segments:
                     if not hits and (re.search(r"\bgh\s+pr\s+checkout\b", x)
                                      or re.search(r"\bgh\s+repo\s+clone\b", x) and untrusted(x)):
                         hits = [k]
                     commands = git_commands(x)
                     for (sub, args), (_, kept) in zip(commands, moved_args(commands)):
-                        if not hits and sub in GIT_MOVES and (untrusted(" ".join(kept))
+                        # A ref under a glob refspec target (refs/pull/*/head:refs/remotes/origin/pr/*)
+                        # named with the PR number is that PR's head.
+                        globbed = any(f[:-1] and branch(a).startswith(f[:-1]) for f in fetched if f.endswith("*")
+                                      for a in kept) and max(taint(" ".join(kept)), env_ref.level(" ".join(kept)))
+                        if not hits and sub in GIT_MOVES and (untrusted(" ".join(kept)) or globbed
                                                               or fetched & {branch(a) for a in kept}):
                             hits = [k]
                         if sub == "fetch" and untrusted(" ".join(args)):
                             fetched |= {"FETCH_HEAD"} | {branch(a.split(":", 1)[1]) for a in args if ":" in a}
+                    x = re.sub(r"^\s*(?:then|do|else|\{)\s+", "", x)
                     a = "=" in x and SHELL_ASSIGN.match(x)
                     if a:
-                        env_ref.shell[a[1]] = 2 if untrusted(a[2]) else max(taint(a[2]), env_ref.level(a[2]))
+                        level = 2 if untrusted(a[2]) else max(taint(a[2]), env_ref.level(a[2]))
+                        env_ref.shell[a[1]] = max(level, env_ref.level("$" + a[1])) if conditional else level
                 title = f"{privileged} workflow checks out the pull request's code in a run step"
             for line in hits:
                 head_checkout = True
