@@ -1233,7 +1233,7 @@ def git_commands(line):
     """(subcommand, args) of each git command in a shell line; linear, no regex backtracking."""
     out = []
     for seg in re.split(r"[;&|()`]", line):
-        words = seg.split()
+        words = [w.strip("'\"") for w in seg.split()]  # "a:b" and a:b name the same refspec
         i = next((k for k, w in enumerate(words) if w == "git" or w.endswith("/git")), None)
         rest = words[i + 1:] if i is not None else []
         while rest and rest[0].startswith("-"):
@@ -1296,7 +1296,8 @@ def check_workflow(c, p, privileged=None):
             # value passed to another action's ref/repository input is data.
             if re.match(r"actions/checkout@", uses, re.I):
                 hits = [st["start"] + k + 1 for k, x in enumerate(body)
-                        if re.match(r"\s*(?:-\s+)?(?:ref|repository)\s*:", x) and UNTRUSTED_REF.search(x)]
+                        if re.match(r"\s*(?:-\s+)?(?:ref|repository)\s*:", x)
+                        and (UNTRUSTED_REF.search(x) or env_ref.search(x))]
                 title = f"{privileged} workflow checks out the pull request's code"
             elif "run" in st["keys"]:
                 run = [(st["start"] + k + 1, x) for k, x in enumerate(body) if k >= st["keys"]["run"][0] - st["start"]]

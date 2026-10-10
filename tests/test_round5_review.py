@@ -232,6 +232,17 @@ class DepsScanRound5Tests(Temp):
         self.write("package.json", {"dependencies": {"a": "file:./vendored", "b": "file:./packages/b"}})
         self.assertEqual([t.split()[2] for t in self.titles("fetched outside the registry")], ["a"])
 
+    def test_quoted_refspecs_and_env_backed_checkout_refs(self):
+        self.workflow(PRT + "      - run: git fetch origin \"pull/${{ github.event.number }}/head:pr\"\n"
+                            "      - run: git checkout 'pr'\n")
+        self.assertTrue(any("in a run step" in t for t in self.high()))
+        checkout = "      - uses: actions/checkout@" + SHA + "\n        with:\n          ref: ${{ env.PR_SHA }}\n"
+        self.workflow("on: pull_request_target\nenv:\n  PR_SHA: ${{ github.event.pull_request.head.sha }}\n"
+                      "jobs:\n  j:\n    runs-on: x\n    steps:\n" + checkout)
+        self.assertTrue(any("checks out the pull request's code" in t for t in self.high()))
+        self.workflow("on: pull_request_target\nenv:\n  PR_SHA: main\njobs:\n  j:\n    runs-on: x\n    steps:\n" + checkout)
+        self.assertFalse(self.high())
+
 class MergeIdTests(Temp):
     @classmethod
     def setUpClass(cls):
