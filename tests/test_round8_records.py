@@ -315,6 +315,13 @@ class SecondLanguageTests(Pipeline):
         (self.out / "ja" / "assessment.html").unlink()
         problems = contract_check.check(data, self.out, pdf=False, allow=["ja"])
         self.assertTrue(any(p.startswith("ja/assessment.html: missing") for p in problems), problems)
+        # A language copy that is a symlink is not quietly skipped.
+        shutil.rmtree(self.out / "ja")
+        target = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, target, True)
+        (self.out / "ja").symlink_to(target, target_is_directory=True)
+        problems = contract_check.check(data, self.out, pdf=False, allow=["ja"])
+        self.assertTrue(any(p.startswith("ja: must be a directory") for p in problems), problems)
 
 
 class CodexRound8RecordTests(unittest.TestCase):
@@ -476,6 +483,15 @@ class CodexRound8eRecordTests(unittest.TestCase):
             render.secret_in_source("a.yml", text)
             render.mask_multiline(text)
         self.assertLess(time.monotonic() - started, 1.0)
+
+
+class CodexRound8fRecordTests(unittest.TestCase):
+    def test_subscripted_authorization_values_are_refused_and_masked(self):
+        for line in ('headers["Authorization"] = "Bearer supersecret"', "h['Authorization'] = 'Basic abcdefgh'"):
+            with self.subTest(line=line):
+                self.assertTrue(render.secret_in_source("src/client.py", line + "\n"))
+                self.assertNotIn(line.split()[-1].strip("'\""), render.redact(line))
+        self.assertFalse(render.secret_in_source("src/client.py", 'headers["Authorization"] = "Bearer " + token\n'))
 
 
 if __name__ == "__main__":

@@ -149,6 +149,12 @@ class CodexRound8Tests(Base):
         self.assertTrue(self.high(PRT + "    steps:\n      - run: git checkout ${{ github.head_ref || 'main' }}\n"))
 
 
+class CodexRound8fScanTests(Base):
+    def test_bracket_notation_caller_inputs(self):
+        files = {W + "a.yml": CALLER, W + "b.yml": CALLEE + "    steps:\n      - run: git checkout ${{ inputs['ref'] }}\n"}
+        self.assertTrue(any("b.yml" in x for x in self.high(files)))
+
+
 class ServiceUrlPathTests(unittest.TestCase):
     def test_at_sign_in_a_service_url_path_is_kept(self):
         for url in ("ftp://files.example.com/pub/icon@2x.png", "sftp://files.example.com/home/alice@example.com",

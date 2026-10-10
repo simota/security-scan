@@ -1151,7 +1151,7 @@ def local_calls(files, root, privileged):
     # even when B is privileged through another caller. Past 64 paths per callee, or when
     # the bounded fixed point is not reached, the callee is reported for manual review.
     def grow(values, ups):
-        extra = {key: [g[x] for x in INPUT_USE.findall(value) for g in ups if x in g and g[x] not in value]
+        extra = {key: [g[x] for x in INPUT_USE.findall(dotted(value)) for g in ups if x in g and g[x] not in value]
                  for key, value in values.items()}
         return {key: (value + " " + " ".join(extra[key]))[:4000] if extra[key] else value for key, value in values.items()}
     base, partial = calls, set()
@@ -1651,7 +1651,7 @@ def check_workflow(c, p, privileged=None, calls=None):
 
         def caller_level(value):
             """head_level of what privileged local callers pass for each inputs.X in value."""
-            return max((head_level(given[name]) for name in (INPUT_USE.findall(value) if "inputs" in value else ())
+            return max((head_level(given[name]) for name in (INPUT_USE.findall(dotted(value)) if "inputs" in value else ())
                         for _, given, caller_privileged in callers if caller_privileged and name in given), default=0)
 
         def taint(value):
@@ -1740,7 +1740,7 @@ def check_workflow(c, p, privileged=None, calls=None):
                 if counts(value, outputs.get(job, {}).get((sid, name), 0)):
                     return "head"
                 kinds.add("a step output")
-            for name in INPUT_USE.findall(value):
+            for name in INPUT_USE.findall(dotted(value)):
                 for _, given, caller_privileged in callers:
                     v = given.get(name, "")
                     if caller_privileged and "${{" in v and not HEAD_REF.search(v):
