@@ -72,6 +72,8 @@ def parse_json(raw):
         return json.loads(raw.decode("utf-8"), object_pairs_hook=unique, parse_constant=invalid)
     except (UnicodeError, json.JSONDecodeError):
         raise BundleError("Invalid UTF-8 JSON") from None
+    except RecursionError:
+        raise BundleError("JSON nesting is too deep") from None
 
 
 def load_json(path):

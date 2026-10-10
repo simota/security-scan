@@ -71,7 +71,9 @@ CAT_BUILD = "Build and delivery"
 def safe_output(value):
     """Sanitize all string fields, including inventory, references and history."""
     if isinstance(value, str):
-        return redact_urls(value)
+        # Undecodable file names arrive as surrogate escapes; keep them visible
+        # as \udcXX text so the output is always valid UTF-8 JSON.
+        return redact_urls(value.encode("utf-8", "backslashreplace").decode("utf-8"))
     if isinstance(value, list):
         return [safe_output(v) for v in value]
     if isinstance(value, dict):
@@ -1782,7 +1784,11 @@ def main(argv=None):
     result = safe_output(scan(root, a.audit))
     blob = json.dumps(result, ensure_ascii=False, indent=2)
     if a.out:
-        Path(a.out).write_text(blob + "\n", encoding="utf-8")
+        try:
+            Path(a.out).write_text(blob + "\n", encoding="utf-8")
+        except OSError as exc:
+            print(f"deps_scan.py: cannot write {a.out}: {exc.strerror or exc}", file=sys.stderr)
+            return 2
     elif not a.into:
         print(blob)
     if a.into:

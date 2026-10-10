@@ -304,6 +304,9 @@ def main(argv=None):
                          args.evidence_root, args.evidence_repository)
         print(json.dumps(result, ensure_ascii=True, indent=2))
         return 0 if result["status"] in ("not_run", "completed") else 3
+    except RecursionError:
+        print("reproduction error: input JSON nesting is too deep.", file=sys.stderr)
+        return 2
     except (BundleError, OSError, ValueError, KeyError, TypeError) as exc:
         # Errors can contain arbitrary findings strings. Never echo those values.
         print("reproduction error: {}. Check the documented input contract and unchanged owned files.".format(type(exc).__name__), file=sys.stderr)

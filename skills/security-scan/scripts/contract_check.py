@@ -59,7 +59,8 @@ def check(data, out_dir, pdf=True, allow=()):
     meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
     if not isinstance(data.get("findings"), list):
         add("findings: required list")
-    findings = [f for f in data.get("findings") or [] if isinstance(f, dict)]
+    raw_findings = data.get("findings")
+    findings = [f for f in raw_findings if isinstance(f, dict)] if isinstance(raw_findings, list) else []
     perspectives = data.get("perspectives") if isinstance(data.get("perspectives"), list) else []
 
     def commit(value):
