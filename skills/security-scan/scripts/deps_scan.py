@@ -1013,7 +1013,7 @@ def privileged_workflows(files, root):
     pending = list(priv)
     while pending:
         p = pending.pop()
-        for m in re.finditer(r"""uses[ \t]*:[ \t]*["']?(?:\.|\$)/([^\s"'#@]+)""", read(p)):
+        for m in re.finditer(r"""\buses["']?[ \t]*:[ \t]*["']?(?:\.|\$)/([^\s"'#@]+)""", read(p)):
             target = (root / m.group(1)).resolve()
             for cand in (target, target / "action.yml", target / "action.yaml"):
                 # Only files of this checkout; scan() visits nothing else anyway.
@@ -1121,11 +1121,11 @@ def check_extra_sources(c, p):
                                    block[1], re.S | re.I):
                 mapped.setdefault(src[1].lower(), set()).update(
                     re.findall(r"""<package\s[^<>]*?\bpattern\s*=\s*["']([^"']*)""", src[2], re.I))
-        # Mapping mitigates only when every source is assigned prefixes and at most
-        # one catch-all `*` source remains; otherwise sources still race.
-        catch_all = [k for _, k in adds if not mapped.get(k, set()) - {"*"}]
-        mitigated = mapped and all(mapped.get(k) for _, k in adds) and len(catch_all) <= 1 and sum(
-            "*" in v for v in mapped.values()) <= 1
+        # NuGet takes the most specific matching pattern and considers every source
+        # that maps it, so mapping mitigates only when every source is mapped and no
+        # pattern (`*` included) is mapped to two sources.
+        owners = [x.lower() for _, k in adds for x in mapped.get(k, ())]
+        mitigated = all(mapped.get(k) for _, k in adds) and len(owners) == len(set(owners))
         # <clear/> only drops inherited sources; two declared sources still race
         # for every package id unless packageSourceMapping assigns them.
         if len(adds) > 1 and not mitigated:
@@ -1270,11 +1270,21 @@ def check_workflow(c, p, privileged=None):
         in_step = {i for st in steps for i in range(st["start"], st["end"])}
 
         def assigned(rows):
-            out = {}
+            out, until = {}, 0
             for i in rows:
-                m = re.match(r"""[ \t]*(?:-[ \t]+)?([A-Za-z_]\w*)[ \t]*:[ \t]*["']?(.*)$""", lines[i])
+                if i < until:
+                    continue  # inside a block scalar already read as a value
+                m = re.match(r"""([ \t]*)(?:-[ \t]+)?([A-Za-z_]\w*)[ \t]*:[ \t]*["']?(.*)$""", lines[i])
                 if m:
-                    out[m[1]] = out.get(m[1], False) or bool(UNTRUSTED_HEAD.search(m[2]))
+                    value = m[3]
+                    if re.match(r"[|>][-+0-9]*[ \t]*(?:#.*)?$", value):  # block scalar: its lines are the value
+                        k, body = i + 1, []
+                        while k < len(lines) and (not lines[k].strip() or
+                                                  len(lines[k]) - len(lines[k].lstrip()) > len(m[1])):
+                            body.append(lines[k])
+                            k += 1
+                        value, until = "\n".join(body), k
+                    out[m[2]] = out.get(m[2], False) or bool(UNTRUSTED_HEAD.search(value))
             return out
 
         workflow_env, job_env, patterns = assigned(top), {}, {}
@@ -2233,6 +2243,9 @@ def scan(root, audit):
     _OVERSIZED.clear()
     files = sorted(walk(root, c.not_run))
     privileged = privileged_workflows(files, root)
+    # A privileged workflow's local action under a pruned directory (build/, dist/)
+    # still runs with its secrets, so it is scanned too.
+    files += sorted(set(privileged) - set(files))
     for p in files:
         n = p.name
         if n in LOCKS:
