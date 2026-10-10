@@ -77,8 +77,9 @@ they are told apart by the label text and by the entry's left rule weight
 - PDF: A4, margins 22mm top, 24mm bottom, 22mm sides (text measure ≈ 166mm ≈
   47 Japanese characters at 10pt — within the 35–50 range for comfortable
   CJK text; ground `derived` from that range and the body size). Running
-  footer: the fixed string `SECURITY ASSESSMENT` left, page `n / N` right; it
-  stays fixed so page furniture can be stripped mechanically from extracted text.
+  footer: a fixed string per language left (`SECURITY ASSESSMENT`, ja
+  `セキュリティ診断`), page `n / N` right; it stays fixed so page furniture can be
+  stripped mechanically from extracted text.
 - Case is never transformed by CSS: labels keep the recorded text, because
   `text-transform` changes what the browser and PDF extraction return.
 - Sections numbered by CSS counters (1, 1.1); tables captioned "Table n" and

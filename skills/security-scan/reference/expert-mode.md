@@ -132,8 +132,10 @@ levels. A failed rater is replaced, never coached on the key.
 
 Roles are `recon`, `discovery`, `variant`, `conditions`, `falsification`,
 `skeptic`, `rater`, `omission`, `persona` and `qa`. Engines named in spawns must
-be approved and preflighted. Actor identities are compared with surrounding
-whitespace removed and case folded, consistently with the sequential workflow.
+be approved and preflighted. Actor identities are compared after NFKC
+normalization, removal of invisible characters, collapsing whitespace runs to
+one space and case folding, consistently with the sequential workflow
+(`Ann Lee` and `AnnLee` stay two identities).
 Conditions and falsification actors in the effective workflow round, including
 its recorded reviewers, must have the corresponding registered spawn roles.
 QA must not appear in any other declared role or recorded workflow participation,

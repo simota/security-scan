@@ -63,10 +63,13 @@ silently omit members. Single-project invocations pin `--prefix` to the lock's
 directory and reset the workspace mode with `--workspaces=null`, avoiding the
 root-only dependency filter applied by `--workspaces=false`. An inherited
 workspace selection cannot match members in these validated single-project
-inputs and fails the audit rather than narrowing it. Registry/auth configuration
-is still used and never copied into diagnostic text. This is not a general
-sandbox for npm or a guarantee that a custom registry provides complete
-advisories. A version that rejects the required flags is a failed audit, not a
+inputs and fails the audit rather than narrowing it. The audit runs on an
+isolated copy of the lock (and `package.json`) against the public npm
+registry, with empty user and global npmrc files and every inherited
+`npm_config_*` variable removed, so project or user registry and auth
+configuration cannot redirect the advisory request. Private packages are
+therefore not matched against a private registry's advisories. This is not a
+general sandbox for npm. A version that rejects the required flags is a failed audit, not a
 clean result.
 
 Composer audits a temporary copy of `composer.lock` with an auditor-owned
