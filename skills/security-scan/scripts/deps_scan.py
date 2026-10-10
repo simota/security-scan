@@ -1085,6 +1085,21 @@ def local_calls(files, root, privileged):
             values = mapping_values(lines, given[0], given[1], end) if given else {}
             for cand in local_targets(root, m[1], memo):
                 calls.setdefault(cand, []).append((p, values, p.resolve() in privileged))
+    # A -> B -> C: B's `inputs.x` forwarded to C carries what A passed for x.
+    for _ in range(8):
+        changed = False
+        for entries in calls.values():
+            for n, (caller, values, privileged_caller) in enumerate(entries):
+                ups = calls.get(caller.resolve(), [])
+                grown = {}
+                for key, value in values.items():
+                    extra = [g[x] for x in INPUT_USE.findall(value) for _, g, _ in ups if x in g and g[x] not in value]
+                    grown[key] = (value + " " + " ".join(extra))[:4000] if extra else value
+                if grown != values:
+                    entries[n] = (caller, grown, privileged_caller or any(u[2] for u in ups))
+                    changed = True
+        if not changed:
+            break
     return calls
 
 
@@ -1702,21 +1717,24 @@ def check_workflow(c, p, privileged=None, calls=None):
                 untrusted = lambda x: (counts(x, taint(x)) or env_ref(x)
                                        or re.search(r"\bpull/[^\s/]*/(?:head|merge)\b", x)
                                        or any(counts(x, outputs.get(job, {}).get(o, 0)) for o in OUTPUT_USE.findall(x)))
-                for _, x in run:  # SHA=${{ …head.sha }} / export REF="$GITHUB_HEAD_REF" taint $SHA / $REF later
+                # Rows run in order: SHA=${{ …head.sha }} taints a later "$SHA" until SHA is
+                # reassigned; fetching the PR head is data until a later row checks out,
+                # resets or merges onto FETCH_HEAD, the fetched ref or a refspec target.
+                fetched, hits = job_fetched.setdefault(job, set()), []
+                for k, x in run:
+                    if not hits and (re.search(r"\bgh\s+pr\s+checkout\b", x)
+                                     or re.search(r"\bgh\s+repo\s+clone\b", x) and untrusted(x)):
+                        hits = [k]
+                    commands = git_commands(x)
+                    for (sub, args), (_, kept) in zip(commands, moved_args(commands)):
+                        if not hits and sub in GIT_MOVES and (untrusted(" ".join(kept))
+                                                              or fetched & {branch(a) for a in kept}):
+                            hits = [k]
+                        if sub == "fetch" and untrusted(" ".join(args)):
+                            fetched |= {"FETCH_HEAD"} | {branch(a.split(":", 1)[1]) for a in args if ":" in a}
                     a = "=" in x and SHELL_ASSIGN.match(x)
                     if a:
-                        env_ref.shell[a[1]] = max(env_ref.shell.get(a[1], 0), 2 if untrusted(a[2])
-                                                  else max(taint(a[2]), env_ref.level(a[2])))
-                # Fetching the PR head is data until this step checks it out, resets or
-                # merges onto it: FETCH_HEAD, the fetched ref or a local refspec target.
-                fetches = [a for _, x in run for sub, a in git_commands(x) if sub == "fetch" and untrusted(" ".join(a))]
-                fetched = job_fetched.setdefault(job, set())
-                if fetches:
-                    fetched |= {"FETCH_HEAD"} | {branch(a.split(":", 1)[1]) for f in fetches for a in f if ":" in a}
-                hits = [k for k, x in run if re.search(r"\bgh\s+pr\s+checkout\b", x)
-                        or re.search(r"\bgh\s+repo\s+clone\b", x) and untrusted(x) or any(
-                    sub in GIT_MOVES and (untrusted(" ".join(args)) or fetched & {branch(a) for a in args})
-                    for sub, args in moved_args(git_commands(x)))][:1]
+                        env_ref.shell[a[1]] = 2 if untrusted(a[2]) else max(taint(a[2]), env_ref.level(a[2]))
                 title = f"{privileged} workflow checks out the pull request's code in a run step"
             for line in hits:
                 head_checkout = True

@@ -124,6 +124,19 @@ class LinearParsingTests(Base):
         self.timed("on: pull_request_target\njobs:\n  b:\n    steps:\n" + "      - uses: ./x\n" * 12000)
 
 
+class CodexRound8Tests(Base):
+    def test_taint_flows_through_a_chain_of_local_callers(self):
+        middle = CALLEE + "    steps:\n      - uses: ./.github/actions/co\n        with:\n          sha: ${{ inputs.ref }}\n"
+        files = {W + "a.yml": CALLER, W + "b.yml": middle, ".github/actions/co/action.yml": COMPOSITE
+                 + "    - run: git checkout ${{ inputs.sha }}\n      shell: bash\n"}
+        self.assertTrue(any("action.yml" in x for x in self.high(files)))
+
+    def test_reassigned_shell_variable_is_no_longer_tainted(self):
+        run = PRT + "    steps:\n      - run: |\n          SHA=${{ github.event.pull_request.head.sha }}\n"
+        self.assertFalse(self.high(run + "          SHA=main\n          git checkout \"$SHA\"\n"))
+        self.assertTrue(self.high(run + "          git checkout \"$SHA\"\n          SHA=main\n"))
+
+
 class UrlUserinfoTests(unittest.TestCase):
     def test_service_url_passwords_with_delimiters_are_redacted(self):
         for text, secret in (("postgres://app.svc:1234/PW/SECRET@h.com/x", "SECRET"),
