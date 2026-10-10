@@ -78,6 +78,36 @@ def _actor_key(value):
     return identity(value) if isinstance(value, str) else None
 
 
+def _verification_actors(proof):
+    if not isinstance(proof, dict):
+        return
+    yield proof.get("reviewer")
+    for review in proof.get("reviews", []) if isinstance(proof.get("reviews"), list) else []:
+        if isinstance(review, dict):
+            yield review.get("reviewer")
+            if isinstance(review.get("resolution"), dict):
+                yield review["resolution"].get("reviewer")
+
+
+def _finding_actors(finding):
+    """Every declared actor recorded on a finding (any ID), as identity keys."""
+    actors = list(_verification_actors(finding.get("verification")))
+    workflow = finding.get("verification_workflow")
+    history = workflow.get("history") if isinstance(workflow, dict) else None
+    for event in history if isinstance(history, list) else []:
+        if not isinstance(event, dict):
+            continue
+        actors.append(event.get("actor"))
+        submission = event.get("submission")
+        if isinstance(submission, dict):
+            actors.append(submission.get("actor"))
+            actors.extend(_verification_actors({"reviews": submission.get("reviews")}))
+        previous = event.get("previous_fields")
+        if isinstance(previous, dict):
+            actors.extend(_verification_actors(previous.get("verification")))
+    return {key for key in map(_actor_key, actors) if key is not None}
+
+
 def calibrated(scores):
     """A rater is calibrated when every anchor is scored, at most one differs, and none by two levels."""
     if not isinstance(scores, dict) or set(scores) != set(ANCHOR_KEY):
@@ -208,6 +238,11 @@ def derive_expert(data, error_type=ValueError, integrity=None):
             participants.add(actor)
             if stage["stage"] in ("conditions", "falsification") and not spawned(actor, stage["stage"]):
                 gap(f"{stage['stage']}_actor_not_spawned:{fid}:{actor}")
+
+    # Every finding's reviewers took part, D-* included: deps_scan.py findings
+    # are reviewed through the same verification records and workflow journal.
+    for f in findings.values():
+        participants.update(_finding_actors(f))
 
     # Recon twice, reconciled.
     recon = _list(record.get("recon", []), "expert.recon", error_type)

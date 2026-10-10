@@ -68,12 +68,13 @@ invariant; its per-path cells live in the path trace (§3a), not here:
 | INV-01 | OWN | `<record>` belongs to one `<tenant>` | `<model file:line>` | 12 (§3a rows citing INV-01) | holds on 11/12 — see F-00x |
 
 `Status` is one of `holds on all N paths`, `violated (F-…)`, `holds on N/M,
-rest not read` or `not checked (reason)`. A ledger entry whose paths were not
+rest not read`, `not checked (reason)` or, for a family the app lacks,
+`N/A (reason)` (`not_applicable` in `invariant_ledger`). A ledger entry whose paths were not
 all read is never reported as holding.
 
 **Cells take five values, nothing else** — in the path trace (§3a) and the
 perspective steps. (The ledger `Status` column has its own
-four values, above.)
+five values, above.)
 
 | Value | Means | Required with it |
 |---|---|---|
@@ -286,8 +287,9 @@ fix:     Invoices are loaded only inside the caller's tenant: apply the
          receives not-found and no file bytes
 ```
 
-Never put working exploit strings, real credentials or real customer data in
-steps; `scripts/findings.py merge` refuses literal attack strings.
+A Japanese report may write the markers as `前提条件：`, `手順：`, `対比：` and
+`テスト：` (ASCII `:` also accepted). Never put working exploit strings, real
+credentials or real customer data in steps; `scripts/findings.py merge` refuses literal attack strings.
 
 ## 6. Perspectives as the coverage check
 
