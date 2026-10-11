@@ -73,6 +73,40 @@ class FindingsMergeTests(unittest.TestCase):
                 self.assertEqual(self.merge(fragment), 2)
                 self.assertEqual(self.out.read_bytes(), before)
 
+    def renumber(self):
+        with self.assertRaises(SystemExit) as raised:
+            raise SystemExit(self.tool.main(["renumber", str(self.out)]))
+        return raised.exception.code
+
+    def test_renumber_orders_by_severity_then_location_and_follows_references(self):
+        excluded = {"verdict": "FalsePositive", "evidence": "the query is scoped", "method": "static"}
+        findings = [dict(FINDING, id="F-001", severity="Low", location="b.py:9"),
+                    dict(FINDING, id="F-002", location="z.py:1", impact="same root as F-004"),
+                    dict(FINDING, id="F-003", location="a.py:5", validation=excluded),
+                    dict(FINDING, id="F-004", severity="Low", location="b.py:2")]
+        self.assertEqual(self.merge(self.fragment("a.json", {
+            "meta": META, "findings": findings, "next_steps": ["fix F-002 first, then F-001"]})), 0)
+        self.assertEqual(self.renumber(), 0)
+        data = json.loads(self.out.read_text(encoding="utf-8"))
+        # High z.py, then Low b.py:2 before b.py:9; the excluded High goes last.
+        self.assertEqual([(f["id"], f["location"]) for f in data["findings"]],
+                         [("F-001", "z.py:1"), ("F-002", "b.py:2"), ("F-003", "b.py:9"), ("F-004", "a.py:5")])
+        self.assertEqual(data["findings"][0]["impact"], "same root as F-002")
+        self.assertEqual(data["next_steps"], ["fix F-001 first, then F-003"])
+        before = self.out.read_bytes()
+        self.assertEqual(self.renumber(), 0)
+        self.assertEqual(self.out.read_bytes(), before)
+
+    def test_renumber_refuses_when_digests_pin_the_ids(self):
+        mapping = {"F-001": "F-002", "F-002": "F-001"}
+        data = {"findings": [dict(FINDING, id="F-001"), dict(FINDING, id="F-002", verification_workflow={})]}
+        self.assertIn("verification_workflow", self.tool.renumber_problems(data, data)[0])
+        data = {"findings": [dict(FINDING, id="F-001"), dict(FINDING, id="F-002")],
+                "evidence": [{"id": "E-001", "summary": "shows F-001"}]}
+        moved = self.tool.renumber(json.loads(json.dumps(data)), mapping)
+        self.assertEqual(self.tool.renumber_problems(data, moved),
+                         ["evidence: renumbering would change captured records whose digests pin the current IDs"])
+
 
 if __name__ == "__main__":
     unittest.main()

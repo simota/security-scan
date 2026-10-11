@@ -496,7 +496,8 @@ skills/security-scan/
   reference/invariants.md      invariant ledger, path trace, close-check, static reproduction
   reference/coverage-trace.md  ASVS / API Top 10 / CWE Top 25 mapped to perspectives and hunt steps
   scripts/deps_scan.py         dependency inventory, supply-chain checks, audits (stdlib only)
-  scripts/findings.py          merges JSON fragments into findings.json; refuses literal attack strings
+  scripts/findings.py          merges JSON fragments into findings.json; refuses literal attack strings;
+                               renumber restores the F-* severity order
   scripts/evidence_capture.py  assessed-revision source -> evidence/ and schema-2 records
   scripts/contract_check.py    run-contract gate shared by every host
   scripts/expert.py            expert-grade gate derivation (independence, redundancy, panels, calibration)

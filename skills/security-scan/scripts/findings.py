@@ -2,6 +2,7 @@
 """Merge finding fragments into findings.json without writing ad-hoc scripts.
 
     python3 findings.py merge FINDINGS FRAGMENT [FRAGMENT ...]
+    python3 findings.py renumber FINDINGS
 
 A fragment is a JSON file written with the host's file-write tool (never a
 shell heredoc or a generated script). It holds any of these top-level keys:
@@ -35,8 +36,16 @@ counted), so a refused write loses at most that batch.
 `D-*` findings belong to deps_scan.py: a fragment may only add `validation` or
 `verification` to an existing `D-*` ID, never create one or change its other fields.
 
-Exit codes: 0 merged, 1 a fragment was refused (reason on stderr), 2 unreadable
-input or schema error.
+`renumber` gives the F-* findings the order the run contract asks for, once
+severities are final: F-001.. by severity, then path and line, with
+FalsePositive / NotApplicable findings after the rest. Every F-* reference in
+the record (ids, profile lists, prose) follows the new numbers. It refuses,
+writing nothing, once a finding holds a verification_workflow journal or when
+the move would change captured evidence, test runs or the integrity policy,
+since their digests pin the old IDs.
+
+Exit codes: 0 merged or renumbered, 1 a fragment was refused or the record
+cannot be renumbered (reason on stderr), 2 unreadable input or schema error.
 """
 import argparse
 import copy
@@ -50,7 +59,7 @@ import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import render  # noqa: E402
-from contract_check import read_regular  # noqa: E402
+from contract_check import order_key, read_regular  # noqa: E402
 from expert import derive_expert  # noqa: E402
 
 LISTS = ("perspectives", "checked_ok", "decisions", "limitations", "next_steps")
@@ -292,6 +301,45 @@ def merge(base, fragment):
     return base
 
 
+CODE_REF = re.compile(r"\bF-[0-9]{3}\b")
+# Digests over these sections (evidence_capture.py, evidence_integrity.py) pin the IDs they name.
+SEALED = ("assessment", "evidence", "test_runs", "evidence_integrity")
+
+
+def renumber_map(findings):
+    """Old F-* id -> new id: contract_check.py's order; excluded findings last, in their old order."""
+    code = [f for f in findings if f["id"].startswith("F-")]
+    excluded = [f for f in code if (f.get("validation") or {}).get("verdict") in render.EXCLUDED]
+    active = sorted((f for f in code if f not in excluded), key=lambda f: (order_key(f), f["id"]))
+    excluded.sort(key=lambda f: f["id"])
+    return {f["id"]: f"F-{n:03d}" for n, f in enumerate(active + excluded, 1)}
+
+
+def renumber(data, mapping):
+    """Rewrite every F-* reference in data's strings at once, then order the F-* records by id."""
+    def rewrite(value):
+        if isinstance(value, str):
+            return CODE_REF.sub(lambda m: mapping.get(m.group(0), m.group(0)), value)
+        if isinstance(value, dict):
+            return {k: rewrite(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [rewrite(v) for v in value]
+        return value
+    data = rewrite(data)
+    code = sorted((f for f in data["findings"] if f["id"].startswith("F-")), key=lambda f: f["id"])
+    data["findings"] = code + [f for f in data["findings"] if not f["id"].startswith("F-")]
+    return data
+
+
+def renumber_problems(before, after):
+    journals = [f["id"] for f in before["findings"] if "verification_workflow" in f]
+    if journals:
+        return [f"{', '.join(journals)}: a verification_workflow journal pins the current IDs; "
+                "renumber before verification_workflow.py starts"]
+    return [f"{key}: renumbering would change captured records whose digests pin the current IDs"
+            for key in SEALED if before.get(key) != after.get(key)]
+
+
 class MergeConflict(Exception):
     pass
 
@@ -341,7 +389,11 @@ def main(argv=None):
     m = sub.add_parser("merge", help="merge fragments into FINDINGS")
     m.add_argument("findings", type=Path)
     m.add_argument("fragments", nargs="+", type=Path)
+    r = sub.add_parser("renumber", help="number F-* findings in severity order, then path and line")
+    r.add_argument("findings", type=Path)
     args = p.parse_args(argv)
+    if args.cmd == "renumber":
+        return main_renumber(args.findings)
 
     try:
         original = read_regular(args.findings) if os.path.lexists(args.findings) else None
@@ -397,6 +449,33 @@ def main(argv=None):
         print(f"error: {e}", file=sys.stderr)
         return 2
     print(f"merged {len(fragments)} fragment(s) into {args.findings}: {len(base['findings'])} finding(s)")
+    return 0
+
+
+def main_renumber(path):
+    try:
+        original = read_regular(path)
+        data = read_json(path, original)
+        if not isinstance(data, dict):
+            raise render.SchemaError("existing report must be an object")
+        render.validate_data(copy.deepcopy(data))
+        mapping = renumber_map(data["findings"])
+        if all(old == new for old, new in mapping.items()):
+            print(f"{path}: F-* findings already in order")
+            return 0
+        moved = renumber(copy.deepcopy(data), mapping)
+        refused = renumber_problems(data, moved)
+        if refused:
+            print("\n".join(refused), file=sys.stderr)
+            return 1
+        render.validate_data(copy.deepcopy(moved))
+        derive_expert(moved, render.SchemaError)
+        write_report(path, moved, original)
+    except (render.SchemaError, MergeConflict, OSError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    changes = ", ".join(f"{old}->{new}" for old, new in sorted(mapping.items()) if old != new)
+    print(f"renumbered {path}: {changes}")
     return 0
 
 
