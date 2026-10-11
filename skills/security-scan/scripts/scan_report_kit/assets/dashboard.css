@@ -101,6 +101,8 @@ table.register{table-layout:fixed}
    The register's fixed layout may break long paths and IDs anywhere. */
 th,td{text-align:left;padding:12px;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:break-word}
 table.register td{overflow-wrap:anywhere}
+/* Short identifiers (B-01, R-01, F-001) never break at their hyphen; mark their cells .nowrap. */
+th.nowrap,td.nowrap,.nowrap{white-space:nowrap}
 th{font-size:11px;color:var(--muted);font-weight:700;background:var(--soft)}
 table.register th:nth-child(1){width:9%}
 table.register th:nth-child(2){width:9%}
