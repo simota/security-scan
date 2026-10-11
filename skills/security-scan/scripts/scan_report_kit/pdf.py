@@ -90,19 +90,23 @@ def to_pdf(html_path, pdf_path, failures=None, timeout=None, redact=None):
                     break
                 last = size
                 time.sleep(0.5)
-            if proc.poll() is None:
+            # None: still running, stopped below once its PDF stopped growing.
+            status = proc.poll()
+            if status is None:
                 proc.terminate()
                 try:
                     proc.wait(timeout=10)
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.wait()
-            if pdf.exists() and pdf.stat().st_size > 0:
+            # A Chrome that failed on its own may have left a partial PDF: never accept it.
+            if not status and pdf.exists() and pdf.stat().st_size > 0:
                 return "chrome"
             err.seek(0)
             detail = _tail(err.read(), redact)
         reason = (f"timed out after {timeout:g} s" if timed_out
-                  else f"exited with status {proc.returncode} without writing a PDF")
+                  else f"exited with status {status} without writing a PDF" if not pdf.exists() or not pdf.stat().st_size
+                  else f"exited with status {status}; its PDF was discarded")
         failures.append(("chrome", reason + (" (as root, with --no-sandbox)" if sandbox else ""), detail))
         pdf.unlink(missing_ok=True)
     wp = shutil.which("weasyprint")
@@ -118,6 +122,7 @@ def to_pdf(html_path, pdf_path, failures=None, timeout=None, redact=None):
             return None
         if r.returncode == 0 and Path(pdf_path).exists():
             return "weasyprint"
+        Path(pdf_path).unlink(missing_ok=True)  # A failed run's partial output is not a report.
         detail = _tail(r.stderr, redact)
         failures.append(("weasyprint", f"exited with status {r.returncode} without writing a PDF", detail))
     return None
