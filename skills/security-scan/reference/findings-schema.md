@@ -53,6 +53,14 @@ python3 scripts/evidence_capture.py <repo> --findings <out>/findings.json <paths
 python3 scripts/findings.py merge <out>/findings.json <scratch>/frag-003.json
 ```
 
+When a later finding or a changed severity breaks the `F-*` order,
+`python3 scripts/findings.py renumber <out>/findings.json` puts the findings in
+severity order (then path and line, `FalsePositive`/`NotApplicable` last) and
+rewrites every `F-*` reference in the record. It writes nothing (exit 1) once a
+finding carries a `verification_workflow` journal, or when the move would
+change `assessment`, `evidence`, `test_runs` or `evidence_integrity`, whose
+digests pin the current IDs.
+
 A fragment holds `meta`, `findings`, `evidence`, `test_runs`, `expert`,
 `three_pass`, `evidence_integrity`, `invariant_ledger`, `perspectives`, `checked_ok`, `decisions`,
 `limitations`, `next_steps` and `remove`. First capture source to create the version-2
