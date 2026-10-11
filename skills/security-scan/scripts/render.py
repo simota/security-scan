@@ -14,11 +14,7 @@ import json
 import math
 import os
 import re
-import shutil
-import subprocess
 import sys
-import tempfile
-import time
 from collections import Counter
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
@@ -32,6 +28,8 @@ from evidence_integrity import verify_evidence
 from three_pass import derive_three_pass
 from expert import derive_expert
 from invariant_ledger import ledger_html, validate_ledger
+from scan_report_kit import pdf as kit_pdf, style as kit_style
+from scan_report_kit.output import write_output
 
 SEVERITIES = ["High", "Medium", "Low", "Info"]
 CONFIDENCES = ["Confirmed", "Environment-dependent", "Suspected"]
@@ -1231,131 +1229,25 @@ ASSESSMENT_LABELS = {
 }
 
 
+# Rules for security-scan record types only; the shared document stylesheet
+# (scan_report_kit/assets/document.css, docs: scan-report-kit) comes first.
 ASSESSMENT_CSS = """
-@page{
-  size:A4;margin:22mm 22mm 24mm;
-  @bottom-left{content:"SECURITY ASSESSMENT";font:7.5pt "Hiragino Sans","Noto Sans CJK JP",sans-serif;color:#5a5a5a}
-  @bottom-right{content:counter(page) " / " counter(pages);font:7.5pt "Hiragino Sans","Noto Sans CJK JP",sans-serif;color:#5a5a5a}
-}
-:root{--ink:#1b1b1b;--muted:#5a5a5a;--rule:#1b1b1b;--hair:#dcd9d2;--high:#8a1c1c;--medium:#7a4800;--low:#24476e;--link:#1f3f66;--mark:#f3ecd6;
-  --serif:"Hiragino Mincho ProN","Noto Serif CJK JP","Yu Mincho",Georgia,serif;
-  --sans:"Hiragino Sans","Noto Sans CJK JP","Noto Sans JP","Yu Gothic",Arial,sans-serif;
-  --mono:"DejaVu Sans Mono",Menlo,Consolas,monospace}
-*{box-sizing:border-box}
-html{background:#fff}
-body{margin:0;color:var(--ink);background:#fff;font:10pt/1.65 var(--serif);font-variant-numeric:lining-nums tabular-nums;overflow-wrap:anywhere;word-wrap:break-word;counter-reset:section table listing;hanging-punctuation:allow-end}
-h1,h2,h3,h4,h5{color:var(--ink);font-family:var(--serif);font-weight:700;break-after:avoid;page-break-after:avoid}
-h1{font-size:20pt;line-height:1.25;margin:0 0 2mm;letter-spacing:-.1pt}
-h2{font-size:13pt;line-height:1.3;margin:9mm 0 3mm}
-h3{font-size:11pt;line-height:1.4;margin:5mm 0 2mm}
-h4{font:700 7.8pt/1.4 var(--sans);letter-spacing:.08em;color:var(--muted);margin:3.5mm 0 1mm}
-h5{font-size:9.5pt;margin:3mm 0 1mm}
-main>section>h2{counter-increment:section}
-main>section>h2::before{content:counter(section);display:inline-block;min-width:8mm;font-weight:400}
-p{margin:0 0 2.5mm;orphans:3;widows:3}
-ul,ol{margin:1.5mm 0 3mm;padding-left:5mm}
-li{margin:0 0 1mm;orphans:2;widows:2}
-a{color:var(--link);text-decoration:underline;text-decoration-thickness:.4pt;text-underline-offset:2px;overflow-wrap:anywhere;word-wrap:break-word}
-code{font:8.4pt/1.45 var(--mono);overflow-wrap:anywhere;word-wrap:break-word;word-break:break-all}
-.report-header{margin:0 0 8mm;padding:0 0 4mm;border-bottom:.6pt solid var(--rule)}
-.kicker{font:700 7.8pt/1.4 var(--sans);letter-spacing:.18em;color:var(--muted);margin:0 0 5mm;padding-bottom:2mm;border-bottom:1.2pt solid var(--rule)}
-.project{font-size:13pt;line-height:1.35;font-style:italic;color:var(--ink);margin:0 0 5mm}
-.meta-line{display:grid;grid-template-columns:30mm minmax(0,1fr);gap:0 4mm;font:8.6pt/1.5 var(--sans);color:var(--ink);margin:0;padding:1.1mm 0;border-top:.3pt solid var(--hair)}
-.meta-line strong{font-weight:600;color:var(--muted);letter-spacing:.04em}
-.lead{font-size:10.5pt;line-height:1.65;margin:2mm 6mm 4mm;padding:3mm 0;border-top:.6pt solid var(--rule);border-bottom:.6pt solid var(--rule)}
-.small,.section-note{font-size:8.5pt;line-height:1.55;color:var(--muted)}
-.section-note{margin-bottom:3mm}
-.summary-section>h2{margin-top:0}
-.limit-heading{margin-top:5mm}
-.limits{margin-top:0;font-size:9.2pt}
-table{width:100%;border-collapse:collapse;margin:2mm 0 5mm;table-layout:fixed;font:8.6pt/1.5 var(--serif);border-top:1.2pt solid var(--rule);border-bottom:1.2pt solid var(--rule)}
-caption{caption-side:top;text-align:left;font:8.6pt/1.45 var(--serif);color:var(--ink);margin:0 0 1.6mm}
-caption::before{counter-increment:table;content:"Table " counter(table) ". ";font-weight:700}
-html[lang="ja"] caption::before{content:"表" counter(table) "　"}
-thead{display:table-header-group}
-tfoot{display:table-footer-group}
-th,td{border:0;padding:1.8mm 2.2mm;text-align:left;vertical-align:top;overflow-wrap:anywhere;word-wrap:break-word}
-th{background:none;color:var(--ink);font:700 7.6pt/1.4 var(--sans);letter-spacing:.06em;border-bottom:.6pt solid var(--rule)}
-tbody tr+tr td{border-top:.3pt solid var(--hair)}
-tr{break-inside:avoid;page-break-inside:avoid}
-.metrics{margin:3mm 0 3mm}
-.metrics td{font:400 18pt/1.2 var(--serif);padding:2mm 2.2mm 1.5mm}
-.metrics tbody th,.metrics td{vertical-align:baseline}.metrics tbody th{border-bottom:0}.metrics tbody tr+tr th{border-top:.3pt solid var(--hair)}
-.metrics .metric-urgent{color:var(--high)}
-.queue .ref-col{width:17%}.queue .finding-col{width:43%}.queue .action-col{width:40%}
-.queue td:first-child{font:8.2pt/1.5 var(--mono)}
-.queue-title{font-weight:700;margin-bottom:.8mm}
-.queue-location,.queue-location code{font-size:7.4pt;color:var(--muted)}
-.queue-action{font-size:8.4pt}
-.queue-action strong{display:block;margin-bottom:.6mm;font:700 7.4pt/1.4 var(--sans);letter-spacing:.06em}
-.queue-legend{font-size:8.6pt;margin:0 0 2mm}.queue-legend strong{font:700 7.4pt/1.4 var(--sans);letter-spacing:.06em;margin-right:1.5mm}
-.badge{display:inline-block;font:700 7.2pt/1.5 var(--sans);letter-spacing:.1em;padding:0;margin:.6mm 0;border:0;background:none;color:var(--muted);white-space:nowrap}
-.High{color:var(--high)}.Medium{color:var(--medium)}.Low{color:var(--low)}.Info{color:var(--muted)}
-.coverage .perspective-col{width:28%}.coverage .result-col{width:26%}.coverage .note-col{width:46%}
-.index .finding-col{width:43%}.index .severity-col{width:12%}.index .status-col{width:14%}.index .evidence-col{width:31%}
-.index-title{display:block;font-weight:700;text-decoration:none;color:var(--ink)}
-.index-id{font:7.6pt/1.4 var(--mono);color:var(--muted)}
 .evidence-cell{font-size:8pt}
 .evidence-cell div+div{margin-top:.8mm}
 .evidence-cell span{color:var(--muted)}
-#finding-details,.excluded-section{counter-reset:finding}
-.finding{counter-increment:finding;margin:7mm 0 0;padding:0 0 0 4mm;border-left:.6pt solid var(--hair);break-inside:auto;page-break-inside:auto}
-.finding.sev-High{border-left:2.4pt solid var(--high)}.finding.sev-Medium{border-left:1.2pt solid var(--medium)}.finding.sev-Low{border-left:.6pt solid var(--low)}
-.finding.excluded{border-left:.6pt dashed var(--hair)}.finding.excluded .badge{color:var(--muted)}
-.finding-header{break-inside:avoid;page-break-inside:avoid;break-after:avoid;page-break-after:avoid}
-.finding h3{font-size:11.5pt;line-height:1.4;margin:0 0 2.5mm}
-.finding-id{display:block;font:400 8pt/1.4 var(--mono);color:var(--muted);margin-bottom:1mm}
-#finding-details .finding-id::before{content:counter(section) "." counter(finding);margin-right:2.5mm;font-family:var(--serif);color:var(--ink)}
-.finding-state{margin:0 0 2.5mm;border-top:.6pt solid var(--rule);border-bottom:.6pt solid var(--rule)}
-.finding-state th{width:25%;padding:1mm 2mm;border-bottom:.3pt solid var(--hair)}
-.finding-state td{font-size:8.5pt;padding:1.1mm 2mm}
-.finding-state .badge{margin:0}
-.finding-context{font-size:8.8pt;margin-bottom:1.4mm}
-.finding-context strong{font:600 7.6pt/1.4 var(--sans);letter-spacing:.05em;color:var(--muted);margin-right:1.5mm}
-.finding-field{margin:0 0 3mm;break-inside:auto;page-break-inside:auto;orphans:3;widows:3}
-.finding-field h4{margin-bottom:1mm}
-.prose{white-space:pre-wrap;overflow-wrap:anywhere;word-wrap:break-word}
-.empty-value{color:var(--muted);font-style:italic}
-.snippet{counter-increment:listing;margin:1mm 0 3.5mm;padding:2mm 0 2mm 3mm;border:0;border-left:.6pt solid var(--rule);background:none;color:var(--ink);font:7.6pt/1.55 var(--mono);white-space:pre-wrap;overflow:visible;overflow-wrap:anywhere;word-wrap:break-word;word-break:break-all;max-width:100%;break-inside:auto;page-break-inside:auto}
-.snippet::before{content:"Listing " counter(listing);display:block;font:700 7.4pt/1.4 var(--sans);letter-spacing:.06em;color:var(--muted);margin-bottom:1.2mm}
-html[lang="ja"] .snippet::before{content:"コード " counter(listing);letter-spacing:.02em}
-.snippet span{display:block;white-space:pre-wrap;overflow-wrap:anywhere;word-wrap:break-word;break-inside:avoid;page-break-inside:avoid}
-.snippet .hit{background:var(--mark)}.snippet b{color:var(--muted);font-weight:400}
-.refs{padding-left:5mm;margin:1mm 0 3mm;font-size:8.4pt;line-height:1.5}
-.refs li,.refs a{overflow-wrap:anywhere;word-wrap:break-word;word-break:break-all}
-.rt{display:inline-block;min-width:15mm;font:7.2pt/1.4 var(--sans);letter-spacing:.05em;color:var(--muted)}
-.record-footer{break-before:avoid;page-break-before:avoid;font:7.4pt/1.4 var(--sans);margin:2mm 0 0;color:var(--muted)}
-.record-footer a{color:var(--muted)}
-.excluded-section{margin-top:9mm}
-.excluded-section>.section-note{break-inside:avoid;page-break-inside:avoid;break-after:avoid;page-break-after:avoid}
 .expert-summary,.three-pass-summary,.integrity-summary{margin:5mm 0;padding:0 0 0 4mm;border-left:.6pt solid var(--rule);overflow-wrap:anywhere;break-inside:auto!important;page-break-inside:auto}
 .expert-summary h3,.three-pass-summary h3{margin-top:0}
 .expert-lines{padding-left:4mm;font-size:9pt}
-.three-pass-summary .prose{white-space:pre-wrap;overflow-wrap:anywhere}.three-pass-summary h4{margin:3mm 0 1mm}.three-pass-stage{break-inside:avoid}
+.three-pass-summary .prose{white-space:pre-wrap;overflow-wrap:anywhere}
+.three-pass-summary h4{margin:3mm 0 1mm}
+.three-pass-stage{break-inside:avoid}
 .verification-record,.workflow-record{margin:3mm 0;padding:0 0 0 3mm;border:0;border-left:.3pt solid var(--hair);break-inside:auto;page-break-inside:auto}
 .verification-record h5,.workflow-record h5{font-size:9pt;margin:3mm 0 1mm;break-after:avoid}
-.verification-record p,.workflow-record p,.verification-gaps,.workflow-gaps{font-size:8.3pt;overflow-wrap:anywhere}.verification-gaps{color:var(--muted)}
+.verification-record p,.workflow-record p,.verification-gaps,.workflow-gaps{font-size:8.3pt;overflow-wrap:anywhere}
+.verification-gaps{color:var(--muted)}
 .verification-level{font-weight:700}
 .verification-record section,.workflow-record section{break-inside:auto;page-break-inside:auto}
 .validation-method{break-before:avoid;page-break-before:avoid}
-@media screen{
-  html{background:#efede7}
-  body{max-width:210mm;margin:10mm auto;padding:22mm 22mm 24mm;border:1px solid #dcd9d2}
-}
-@media screen and (max-width:600px){
-  body{margin:0;padding:8mm 5mm;border:0}
-  .meta-line{grid-template-columns:24mm minmax(0,1fr)}
-  .lead{margin:2mm 0 4mm}
-  .index,.index tbody,.index tr,.index td{display:block;width:100%}
-  .index colgroup,.index thead{display:none}
-  .index tr{margin:0 0 3mm;border-top:.6pt solid var(--rule)}
-  .index td{border:0!important;padding:1.5mm 0}
-  .index td::before{content:attr(data-label);display:block;font:600 7.6pt/1.4 var(--sans);letter-spacing:.05em;color:var(--muted);margin-bottom:.6mm}
-}
-@media print{
-  *{-webkit-print-color-adjust:exact;print-color-adjust:exact}
-  body{width:auto;max-width:none}
-}
 """
 
 
@@ -2368,7 +2260,7 @@ def render_assessment_html(data, L, lang, integrity=None):
                      "".join(card(f, True) for f in excluded) + "</section>" if excluded else "")
 
     # The running footer is CSS text, not a label: localize it explicitly.
-    assessment_css = ASSESSMENT_CSS.replace('"SECURITY ASSESSMENT"', '"' + L["a_running_footer"] + '"')
+    assessment_css = kit_style.document_css(L["a_running_footer"]) + ASSESSMENT_CSS
     return f"""<!doctype html>
 <html lang="{esc(lang)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{esc(L['title'])} - {esc(m['project'])}</title><style>{assessment_css}</style></head><body>
@@ -2398,117 +2290,14 @@ def render_assessment_html(data, L, lang, integrity=None):
 """
 
 
-CHROME_CANDIDATES = [
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    "/Applications/Chromium.app/Contents/MacOS/Chromium",
-    "google-chrome", "google-chrome-stable", "chromium", "chromium-browser",
-]
-
-
-PDF_TIMEOUT_BASE, PDF_TIMEOUT_PER_FINDING, PDF_TIMEOUT_MAX = 120.0, 0.05, 900.0
-
-
 def pdf_timeout(findings=0):
     """Seconds one engine may take: SECURITY_SCAN_PDF_TIMEOUT, else scaled by report size."""
-    value = os.environ.get("SECURITY_SCAN_PDF_TIMEOUT", "").strip()
-    if value:
-        try:
-            seconds = float(value)
-            if math.isfinite(seconds) and seconds > 0:
-                return seconds
-        except ValueError:
-            pass
-    return min(PDF_TIMEOUT_MAX, PDF_TIMEOUT_BASE + PDF_TIMEOUT_PER_FINDING * max(0, findings))
-
-
-def _running_as_root():
-    return hasattr(os, "geteuid") and os.geteuid() == 0
-
-
-def _tail(text, limit=300):
-    """The last meaningful stderr line(s), on one line, for the diagnostic."""
-    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
-    tail = " | ".join(lines[-2:])
-    return redact(tail[-limit:]) if tail else ""
+    return kit_pdf.pdf_timeout(findings, env="SECURITY_SCAN_PDF_TIMEOUT")
 
 
 def to_pdf(html_path, pdf_path, failures=None, timeout=None):
-    """Print html_path to pdf_path with headless Chrome, else WeasyPrint. Returns the engine used or None.
-
-    failures, when a list, receives one (engine, reason, stderr tail) triple for
-    each engine that was found but failed or timed out, so the caller can tell
-    "no engine" from "engine failed".
-    """
-    failures = [] if failures is None else failures
-    timeout = pdf_timeout() if timeout is None else timeout
-    # A previous run's PDF must never survive next to newer HTML.
-    Path(pdf_path).unlink(missing_ok=True)
-    chrome = os.environ.get("CHROME")
-    cands = [chrome] if chrome else CHROME_CANDIDATES
-    for c in cands:
-        exe = c if os.path.isabs(c) and os.path.exists(c) else shutil.which(c)
-        if not exe:
-            continue
-        pdf = Path(pdf_path)
-        pdf.unlink(missing_ok=True)
-        # Chrome refuses to start as root without --no-sandbox (containers, CI).
-        sandbox = ["--no-sandbox"] if _running_as_root() else []
-        timed_out = False
-        with tempfile.TemporaryDirectory() as profile, tempfile.TemporaryFile("w+", encoding="utf-8",
-                                                                              errors="replace") as err:
-            try:
-                proc = subprocess.Popen(
-                    [exe, "--headless=new", "--disable-gpu", *sandbox, "--no-pdf-header-footer",
-                     f"--user-data-dir={profile}", f"--print-to-pdf={pdf}", Path(html_path).resolve().as_uri()],
-                    stdout=subprocess.DEVNULL, stderr=err)
-            except OSError as e:
-                failures.append(("chrome", "could not be started", str(e.strerror or e)))
-                continue
-            # Chrome on some platforms keeps running after the PDF is written:
-            # wait for the file to appear and stop growing, then stop the process.
-            last, deadline = -1, time.monotonic() + timeout
-            while True:
-                if time.monotonic() >= deadline:
-                    timed_out = True
-                    break
-                size = pdf.stat().st_size if pdf.exists() else -1
-                if proc.poll() is not None and size <= 0 and (size < 0 or size == last):
-                    break  # Exited without writing (or left an empty file): try the next engine.
-                if size > 0 and size == last:
-                    break
-                last = size
-                time.sleep(0.5)
-            if proc.poll() is None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()
-            if pdf.exists() and pdf.stat().st_size > 0:
-                return "chrome"
-            err.seek(0)
-            detail = _tail(err.read())
-        reason = (f"timed out after {timeout:g} s" if timed_out
-                  else f"exited with status {proc.returncode} without writing a PDF")
-        failures.append(("chrome", reason + (" (as root, with --no-sandbox)" if sandbox else ""), detail))
-        pdf.unlink(missing_ok=True)
-    wp = shutil.which("weasyprint")
-    if wp:
-        try:
-            r = subprocess.run([wp, str(html_path), str(pdf_path)], capture_output=True, text=True, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            failures.append(("weasyprint", f"timed out after {timeout:g} s", ""))
-            Path(pdf_path).unlink(missing_ok=True)
-            return None
-        except OSError as e:
-            failures.append(("weasyprint", "could not be started", str(e.strerror or e)))
-            return None
-        if r.returncode == 0 and Path(pdf_path).exists():
-            return "weasyprint"
-        detail = _tail(r.stderr)
-        failures.append(("weasyprint", f"exited with status {r.returncode} without writing a PDF", detail))
-    return None
+    """Print html_path to pdf_path (scan_report_kit.pdf.to_pdf); engine stderr is secret-redacted."""
+    return kit_pdf.to_pdf(html_path, pdf_path, failures, pdf_timeout() if timeout is None else timeout, redact=redact)
 
 
 DASHBOARD = r"""<!doctype html>
@@ -2518,48 +2307,7 @@ DASHBOARD = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__TITLE__</title>
 <style>
-:root{color-scheme:light;--bg:#f6f5f1;--panel:#fff;--text:#1b1b1b;--muted:#5a5a5a;--line:#dcd9d2;--soft:#ecebe5;--high:#8a1c1c;--medium:#7a4800;--low:#24476e;--info:#5a5a5a;--accent:#1f3f66;--tint:#efede6;--warn:#f6f5f1;--warn-line:#1b1b1b;--serif:"Hiragino Mincho ProN","Noto Serif CJK JP","Yu Mincho",Georgia,serif;--sans:system-ui,-apple-system,"Hiragino Sans","Noto Sans CJK JP","Noto Sans JP",sans-serif}
-@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){color-scheme:dark;--bg:#17171a;--panel:#1f1f23;--text:#ece9e2;--muted:#b3aea4;--line:#3a3936;--soft:#2a2a2e;--high:#f2a19a;--medium:#e8bf7a;--low:#a9c3e6;--info:#b3aea4;--accent:#a9c3e6;--tint:#26252a;--warn:#17171a;--warn-line:#ece9e2}}
-:root[data-theme="dark"]{color-scheme:dark;--bg:#17171a;--panel:#1f1f23;--text:#ece9e2;--muted:#b3aea4;--line:#3a3936;--soft:#2a2a2e;--high:#f2a19a;--medium:#e8bf7a;--low:#a9c3e6;--info:#b3aea4;--accent:#a9c3e6;--tint:#26252a;--warn:#17171a;--warn-line:#ece9e2}
-*{box-sizing:border-box}[hidden]{display:none!important}html{scroll-behavior:smooth;scroll-padding-top:20px}body{margin:0;overflow-wrap:anywhere;background:var(--bg);color:var(--text);font:14px/1.65 system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif}main{max-width:1320px;margin:auto;padding:32px 28px 48px}a{color:var(--accent);text-underline-offset:3px}button,input,select{font:inherit}button,a,input,select,summary{-webkit-tap-highlight-color:transparent}:focus-visible{outline:3px solid var(--accent);outline-offset:3px}button{cursor:pointer}button,.button{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:8px 12px;text-decoration:none}button:hover,.button:hover{background:var(--soft)}.skip{position:absolute;left:20px;top:-100px}.skip:focus{top:8px;z-index:2}.masthead{display:flex;justify-content:space-between;align-items:center;gap:12px;border-bottom:1px solid var(--line);padding-bottom:18px;margin-bottom:26px}.brand{font-size:12px;font-weight:750;letter-spacing:.15em;color:var(--accent)}.tools{display:flex;gap:8px;flex-wrap:wrap}.hero{display:flex;justify-content:space-between;gap:24px;margin-bottom:20px}.hero h1{font-size:clamp(25px,3.5vw,38px);line-height:1.25;letter-spacing:-.04em;margin:3px 0 9px;overflow-wrap:anywhere}.eyebrow,.meta,.muted{color:var(--muted)}.eyebrow{font-size:13px}.meta{max-width:820px;overflow-wrap:anywhere}.hero-aside{align-self:flex-end;font-size:12px;text-align:right;max-width:280px}.summary-banner{padding:16px 20px;background:var(--tint);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;margin-bottom:16px}.summary-banner strong{display:block;font-size:18px}.summary-banner p{margin:5px 0 0}.cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:16px 0}.cards.part-cards{grid-template-columns:repeat(2,minmax(0,1fr))}.part-heading{margin:18px 0 8px}.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px 20px;text-align:left}.card .n{font-size:32px;line-height:1.25;font-weight:750;letter-spacing:-.03em}.card .l{font-size:12px;color:var(--muted);display:block;margin-bottom:8px}.card .sub{font-size:12px;color:var(--muted);margin-top:6px}.card.urgent .n{color:var(--high)}.card.review .n{color:var(--medium)}.report-note{font-size:12px;color:var(--muted);margin:8px 0 22px}.section-head{display:flex;justify-content:space-between;gap:16px;align-items:baseline;margin:26px 0 12px}h2{font-size:19px;letter-spacing:-.02em;margin:0}h3{font-size:15px;margin:0 0 6px}.section-head p{margin:4px 0 0;color:var(--muted)}.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:20px}.priority-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,330px),1fr));gap:12px}.hero>div,.priority-item,.panel{min-width:0}.priority-item h3{overflow-wrap:anywhere}.priority-item{border-top:3px solid var(--line)}.priority-item.sev-High{border-top-color:var(--high)}.priority-item.sev-Medium{border-top-color:var(--medium)}.priority-top{display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:10px}.priority-item h3 a{text-decoration:none;color:var(--text)}.priority-item h3 a:hover{text-decoration:underline}.priority-item p{margin:8px 0;overflow-wrap:anywhere}.priority-item .action-label{font-size:12px;font-weight:700;color:var(--accent)}.priority-item .impact{color:var(--muted)}.priority-item .action{padding-top:10px;border-top:1px solid var(--line)}.priority-item .location{font-size:12px;color:var(--muted)}.badge{display:inline-block;border:1px solid currentColor;border-radius:5px;padding:1px 7px;font-size:11px;line-height:1.7;font-weight:750;white-space:nowrap}.High{color:var(--high)}.Medium{color:var(--medium)}.Low{color:var(--low)}.Info{color:var(--info)}.verdict{font-size:12px;color:var(--muted)}.section-note{font-size:12px;color:var(--muted);margin:10px 0}.coverage{margin:20px 0;background:var(--warn);border-color:var(--warn-line)}summary{cursor:pointer;font-weight:700}summary .small{font-weight:400;color:var(--muted);margin-left:10px}.coverage p{margin:10px 0}.scope-meta{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:5px 16px;margin:16px 0}.scope-meta dt{font-size:12px;color:var(--muted)}.scope-meta dd{margin:0;overflow-wrap:anywhere}.coverage-columns{display:grid;grid-template-columns:1fr 1fr;gap:24px}.coverage ul{margin:6px 0;padding-left:20px}.perspective{border-bottom:1px solid var(--warn-line);padding:9px 0}.perspective:last-child{border:0}.perspective strong{display:block}.perspective p{margin:3px 0;font-size:13px}.chart-section{margin:20px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:16px}.grid .panel{padding:16px}.grid h3{font-size:13px}.bar{display:grid;grid-template-columns:minmax(85px,46%) 1fr 26px;gap:8px;align-items:center;margin:7px 0;font-size:12px}.bar .t{overflow-wrap:anywhere}.bar .track{height:7px;background:var(--soft);border-radius:4px;overflow:hidden}.bar .fill{height:100%;background:var(--accent)}.bar .v{text-align:right;font-variant-numeric:tabular-nums}.filters{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.filters label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}.filters select,.filters input{width:100%;min-width:0;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:9px;font-size:13px}.filters .search{grid-column:span 2}.filter-bottom{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:14px}.result-count{font-size:12px;color:var(--muted);margin:0}.tablewrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;margin-top:12px}table{border-collapse:collapse;width:100%;table-layout:fixed}th,td{text-align:left;padding:12px;border-bottom:1px solid var(--line);vertical-align:top;overflow-wrap:anywhere}th{font-size:11px;color:var(--muted);font-weight:700;background:var(--soft)}th:nth-child(1){width:9%}th:nth-child(2){width:9%}th:nth-child(3){width:14%}th:nth-child(4){width:9%}th:nth-child(5){width:11%}th:nth-child(6){width:30%}th:nth-child(7){width:18%}tr.row{cursor:pointer}tr.row:hover{background:var(--tint)}.finding-toggle{border:0;border-radius:3px;padding:0;background:transparent;text-align:left;font-weight:650;color:var(--text);width:100%}.finding-toggle:hover{background:transparent;color:var(--accent)}.finding-toggle .toggle-label{font-size:11px;display:block;font-weight:400;color:var(--accent);margin-top:4px}.location{display:block;overflow-wrap:anywhere;margin-top:4px;font-size:11px;color:var(--muted)}tr.detail>td{background:var(--tint);padding:18px 24px}tr.detail dl{display:grid;grid-template-columns:150px minmax(0,1fr);gap:8px 18px;margin:12px 0}tr.detail dt{font-size:12px;color:var(--muted)}tr.detail dd{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}.detail-actions{display:flex;justify-content:space-between;gap:12px;align-items:center}.detail-links{display:flex;gap:12px;align-items:center;flex-wrap:wrap;flex-shrink:0}.action-guidance{border-left:3px solid var(--accent);padding:8px 12px;background:var(--panel)}.action-guidance strong{display:block}.action-guidance p{margin:4px 0}.three-pass-summary{margin:16px 0;overflow-wrap:anywhere;break-inside:auto!important;page-break-inside:auto}.three-pass-summary .prose{white-space:pre-wrap;overflow-wrap:anywhere}.three-pass-summary h4{margin:12px 0 4px}.three-pass-stage{break-inside:avoid}.verification-record,.workflow-record{margin:16px 0;padding:16px;border:1px solid var(--line);border-radius:6px;min-width:0}.verification-record h4,.workflow-record h4{font-size:15px;margin:0 0 8px}.verification-record h5,.workflow-record h5{font-size:13px;margin:18px 0 6px}.verification-record .prose,.workflow-record .prose{white-space:pre-wrap;overflow-wrap:anywhere}.verification-level,.workflow-status,.workflow-next{display:block;font-size:12px;font-weight:600;margin-top:7px}.history{border:1px dashed var(--line);padding:12px;margin-top:16px}.history p{margin:5px 0;white-space:pre-wrap}.lists{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:12px;margin-top:24px}.lists h2{font-size:16px}.lists ul{margin:10px 0 0;padding-left:18px}.empty{color:var(--muted);padding:20px}.snippet{margin:0;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);overflow-x:auto;font:12px/1.6 ui-monospace,Menlo,monospace;white-space:pre}.snippet span{display:block}.snippet .hit{background:var(--warn)}.snippet b{color:var(--muted);font-weight:400}.refs{margin:0;padding-left:18px}.refs li{overflow-wrap:anywhere}.rt{display:inline-block;min-width:60px;color:var(--muted);font-size:12px}.footer{font-size:12px;color:var(--muted);border-top:1px solid var(--line);margin-top:32px;padding-top:16px}code{font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
-/* Academic layer (docs/report-design.md): serif argument, sans apparatus, booktabs rules, no boxes. */
-body{font-family:var(--serif);font-size:15px;line-height:1.7;font-variant-numeric:lining-nums tabular-nums}
-h1,h2,h3,h4{font-family:var(--serif);font-weight:700;letter-spacing:0}
-button,input,select,label,th,.badge,.brand,.eyebrow,.tools,.filters,.result-count,.card .l,.card .sub,.verdict,.location,.finding-toggle .toggle-label,.priority-item .action-label,.rt,tr.detail dt,.scope-meta dt,.bar,summary .small{font-family:var(--sans)}
-.brand{color:var(--muted);letter-spacing:.2em;font-size:11px}
-.masthead{border-bottom:1.5px solid var(--text)}
-.hero h1{font-size:clamp(26px,3.2vw,36px);letter-spacing:-.01em}
-.summary-banner{background:transparent;border:0;border-top:1px solid var(--text);border-bottom:1px solid var(--text);border-radius:0;padding:14px 4px}
-.summary-banner strong{font-size:17px}
-.cards{gap:28px}
-.card{background:transparent;border:0;border-top:1.5px solid var(--text);border-radius:0;padding:12px 2px 6px}
-.card .l{letter-spacing:.08em;font-size:11px}
-.card .n{font-family:var(--serif);font-weight:400;font-size:34px;letter-spacing:0}
-.panel{background:transparent;border:0;border-top:1px solid var(--line);border-radius:0;padding:18px 0}
-.priority-item{border-top-width:2px}
-.coverage{background:transparent;border:0;border-left:1px solid var(--text);border-radius:0;padding:4px 0 4px 18px}
-.coverage-columns{grid-template-columns:1fr;gap:8px}#perspectives{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));column-gap:32px}.perspective,.perspective:last-child{border:0;border-top:1px solid var(--line)}
-.bar .fill{background:var(--text)}.bar .track{border-radius:0;height:5px}
-.tablewrap{background:transparent;border:0;border-top:1.5px solid var(--text);border-bottom:1.5px solid var(--text);border-radius:0}
-th{background:transparent;color:var(--text);letter-spacing:.06em;font-size:11px;border-bottom:1px solid var(--text)}
-.badge{border:0;padding:0;border-radius:0;letter-spacing:.1em;font-size:11px}
-button,.button,.filters select,.filters input{border-radius:2px}
-.action-guidance{background:transparent}
-.snippet{border:0;border-left:1px solid var(--text);border-radius:0;background:transparent}
-.verification-record,.workflow-record{border:0;border-left:1px solid var(--line);border-radius:0;padding:4px 0 4px 16px}
-.expert-summary h3,.three-pass-summary h3{margin-top:0}
-.footer{border-top:1.5px solid var(--text)}
-.priority-item .impact{color:var(--text)}
-.finding-toggle{font-family:var(--serif);font-weight:700}
-#verification-summary h2,#decisions-section h2{margin-bottom:8px}#decisions-section ul{margin:0;padding-left:20px}
-.verify-legend{margin:0 0 14px;color:var(--muted)}.verify-legend .action-label{font-family:var(--sans);font-size:12px;font-weight:700;color:var(--accent)}
-.card .n .pair{display:inline-block;white-space:nowrap;margin-right:18px}.card .n .u{font-family:var(--sans);font-size:11px;letter-spacing:.06em;color:var(--muted);margin-left:6px}
-td .verification-level{font-family:var(--sans);font-size:11px;font-weight:400;color:var(--muted);margin-top:4px}
-.snippet .hit{background:var(--tint)}
-@media(max-width:850px){main{padding:22px 18px}.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.hero{display:block}.hero-aside{text-align:left;max-width:none;margin-top:12px}.coverage-columns{grid-template-columns:1fr}.filters{grid-template-columns:repeat(2,minmax(0,1fr))}table,tbody,tr,td{display:block}thead{display:none}tr.row{padding:14px;border-bottom:1px solid var(--line);display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}tr.row td{border:0;padding:0;font-size:12px}tr.row td:before{content:attr(data-label);display:block;color:var(--muted);font-size:10px;margin-bottom:3px}tr.row td:nth-child(6){grid-column:1/-1;grid-row:1}.finding-toggle{font-size:15px}tr.row td:nth-child(7){grid-column:span 2}.detail-actions{align-items:flex-start}tr.detail>td{padding:16px}tr.detail dl{grid-template-columns:minmax(0,1fr);gap:3px}tr.detail dd{margin-bottom:10px}}
-@media(max-width:480px){main{padding:16px 12px}.masthead{align-items:flex-start;flex-direction:column;gap:12px}.tools{width:100%}.tools .button{flex:1}.card{padding:14px}.card .n{font-size:28px}.panel{padding:16px}.section-head{display:block}.filters{grid-template-columns:1fr 1fr;gap:10px}.filters label:first-child,.filters .search{grid-column:1/-1}.filter-bottom{align-items:flex-start;flex-direction:column}.scope-meta{grid-template-columns:1fr;gap:2px}.scope-meta dd{margin-bottom:8px}.priority-top{flex-wrap:wrap}}
-@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
-@media print{body{background:white}.tools,.chart-section,.skip,.copy-finding,.toggle-label{display:none}.filters-panel{border:0;padding:0;box-shadow:none}.filters-panel *{display:none}.filters-panel .filter-bottom,.filters-panel #result-count{display:block}main{padding:0;max-width:none}.panel,.card{break-inside:avoid}.tablewrap{overflow:visible}.snippet{white-space:pre-wrap;overflow:visible}.footer{margin-top:16px}}
+__STYLE__
 </style>
 </head>
 <body>
@@ -2681,6 +2429,31 @@ listInto(byId('decisions'),D.decisions,L.not_recorded);
 </html>
 """
 
+# Rules for security-scan record types only, after the shared dashboard stylesheet.
+DASHBOARD_CSS = """
+.three-pass-summary{margin:16px 0;overflow-wrap:anywhere;break-inside:auto!important;page-break-inside:auto}
+.three-pass-summary .prose{white-space:pre-wrap;overflow-wrap:anywhere}
+.three-pass-summary h4{margin:12px 0 4px}
+.three-pass-stage{break-inside:avoid}
+.verification-record,.workflow-record{margin:16px 0;padding:16px;border:1px solid var(--line);border-radius:6px;min-width:0}
+.verification-record h4,.workflow-record h4{font-size:15px;margin:0 0 8px}
+.verification-record h5,.workflow-record h5{font-size:13px;margin:18px 0 6px}
+.verification-record .prose,.workflow-record .prose{white-space:pre-wrap;overflow-wrap:anywhere}
+.verification-level,.workflow-status,.workflow-next{display:block;font-size:12px;font-weight:600;margin-top:7px}
+.history{border:1px dashed var(--line);padding:12px;margin-top:16px}
+.history p{margin:5px 0;white-space:pre-wrap}
+.verification-record,.workflow-record{border:0;border-left:1px solid var(--line);border-radius:0;padding:4px 0 4px 16px}
+.expert-summary h3,.three-pass-summary h3{margin-top:0}
+#verification-summary h2,#decisions-section h2{margin-bottom:8px}
+#decisions-section ul{margin:0;padding-left:20px}
+.verify-legend{margin:0 0 14px;color:var(--muted)}
+.verify-legend .action-label{font-family:var(--sans);font-size:12px;font-weight:700;color:var(--accent)}
+.card .n .pair{display:inline-block;white-space:nowrap;margin-right:18px}
+.card .n .u{font-family:var(--sans);font-size:11px;letter-spacing:.06em;color:var(--muted);margin-left:6px}
+td .verification-level{font-family:var(--sans);font-size:11px;font-weight:400;color:var(--muted);margin-top:4px}
+"""
+DASHBOARD = DASHBOARD.replace("__STYLE__", kit_style.dashboard_css() + DASHBOARD_CSS, 1)
+
 
 def render_dashboard(data, L, lang, integrity=None):
     for f in data["findings"]:
@@ -2724,23 +2497,6 @@ def render_dashboard(data, L, lang, integrity=None):
     # Substitute only template tokens, not token-like strings inside report data.
     return re.sub(r"__(?:LANG|TITLE|NOSCRIPT|ASSESSMENT|DATA|THREE_PASS|EXPERT)__",
                   lambda match: replacements[match.group(0)], DASHBOARD)
-
-
-def write_output(path, text):
-    """Write via a temporary file in the same directory and os.replace(), which
-    replaces a link at path instead of following it."""
-    path = Path(path)
-    fd, tmp = tempfile.mkstemp(prefix="." + path.name + ".", suffix=".tmp", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
-        mask = os.umask(0)
-        os.umask(mask)
-        os.chmod(tmp, 0o666 & ~mask)  # The permissions write_text would give.
-        os.replace(tmp, path)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
 
 
 def main(argv=None):

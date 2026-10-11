@@ -135,9 +135,12 @@ python3 skills/security-scan/scripts/expert_audit.py out \
 The records prove the process was recorded, not that every vulnerability was
 found; the report never states a detection rate.
 
-Report typography follows `docs/report-design.md`: a journal-style assessment
-(numbered sections, captioned booktabs tables and listings, one mincho face
-for both scripts) and a dashboard in the same system.
+Report typography follows the shared *-scan report format, scan-report-kit
+(see `docs/report-design.md`): a journal-style assessment (numbered
+sections, captioned booktabs tables and listings, one mincho face for both
+scripts) and a dashboard in the same system. The kit's stylesheets and PDF
+engine are vendored in `skills/security-scan/scripts/scan_report_kit/`;
+change them upstream and re-vendor, never in place (`make check` verifies the copy).
 
 ## Outputs
 
@@ -507,6 +510,7 @@ skills/security-scan/
   scripts/three_pass.py        three-pass coverage profile checks
   scripts/invariant_ledger.py  opt-in invariant ledger and static-reproduction checks
   scripts/url_redaction.py     URL credential, query and fragment redaction for reports
+  scripts/scan_report_kit/     vendored scan-report-kit: shared stylesheets, PDF engine, safe writes
   templates/issue.{ja,en}.md     one finding as one issue
   templates/report.{ja,en}.md    findings report to an owner or security contact
 examples/findings.sample.json  fictional legacy sample for make demo LANG_OUT=en / make check
