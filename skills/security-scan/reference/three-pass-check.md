@@ -74,14 +74,15 @@ extensions cannot quietly become proof.
 
 ## Reuse the ordered workflow
 
-After recording discovery, use the existing local CLI for each finding:
+After recording discovery, use the existing local CLI for each finding (from
+this skill's directory; `<scratch>` is the run's scratch directory):
 
 ```sh
-python3 skills/security-scan/scripts/verification_workflow.py init findings.json --finding F-001 --actor coordinator
-python3 skills/security-scan/scripts/verification_workflow.py next findings.json --finding F-001 --out /tmp/conditions-handoff.json
+python3 scripts/verification_workflow.py init <out>/findings.json --finding F-001 --actor coordinator
+python3 scripts/verification_workflow.py next <out>/findings.json --finding F-001 --out <scratch>/conditions-handoff.json
 # Read sources, complete the handoff's submission_template and save it separately.
-python3 skills/security-scan/scripts/verification_workflow.py submit findings.json --finding F-001 --submission /tmp/conditions-result.json
-python3 skills/security-scan/scripts/verification_workflow.py next findings.json --finding F-001 --out /tmp/challenge-handoff.json
+python3 scripts/verification_workflow.py submit <out>/findings.json --finding F-001 --submission <scratch>/conditions-result.json
+python3 scripts/verification_workflow.py next <out>/findings.json --finding F-001 --out <scratch>/challenge-handoff.json
 ```
 
 The conditions actor must differ from discovery. The falsification actor must
@@ -134,10 +135,9 @@ removing an otherwise complete individual finding's fix readiness.
 ## Audit and report
 
 ```sh
-python3 skills/security-scan/scripts/verification_workflow.py audit findings.json
-python3 skills/security-scan/scripts/verification_workflow.py audit findings.json --require-complete --out /tmp/three-pass-audit.json
-python3 skills/security-scan/scripts/render.py findings.json --out /tmp/three-pass-report --lang en --no-pdf
-python3 skills/security-scan/scripts/render.py findings.json --out /tmp/three-pass-report-ja --lang ja
+python3 scripts/verification_workflow.py audit <out>/findings.json
+python3 scripts/verification_workflow.py audit <out>/findings.json --require-complete --out <scratch>/three-pass-audit.json
+python3 scripts/render.py <out>/findings.json --out <out> --lang <ja|en> --repo <repo>
 ```
 
 `audit` does not change findings. Optional `--out` creates a new audit JSON file
@@ -173,7 +173,8 @@ correspondence, not that the observations or reviewer identity are true.
 
 ## Synthetic regression benchmark
 
-Run `make benchmark` for deterministic fixture-based checks of profile gates.
+In the security-scan source repository, `make benchmark` runs deterministic
+fixture-based checks of profile gates.
 The fixture outcomes test the implementation's acceptance and hold rules; they
 are not a measured vulnerability detection rate and are not real assessment
 results. No target application, provider API or external scanner is executed.

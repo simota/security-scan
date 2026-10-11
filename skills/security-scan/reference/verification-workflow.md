@@ -34,13 +34,16 @@ stage: the finding would stay unverified.
 ## Run a review
 
 Start with a schema-version-2 findings file, a pinned assessment and its evidence
-registry. `examples/findings.workflow.sample.json` is an explicitly fictional
-unverified candidate for trying the workflow. Work on a copy of that example.
+registry. The commands below run from this skill's directory on the run's
+`<out>/findings.json` and keep handoffs and submissions in the run's scratch
+directory (`<scratch>`, `SKILL.md` *Run contract*). To practise first, copy the
+explicitly fictional unverified candidate `examples/findings.workflow.sample.json`
+(in the security-scan source repository; an installed skill does not ship
+`examples/`) into scratch and use that copy instead of `<out>/findings.json`.
 
 ```sh
-cp examples/findings.workflow.sample.json /tmp/findings-workflow.json
-python3 skills/security-scan/scripts/verification_workflow.py init /tmp/findings-workflow.json --finding F-001 --actor analyst
-python3 skills/security-scan/scripts/verification_workflow.py next /tmp/findings-workflow.json --finding F-001 --out /tmp/conditions-handoff.json
+python3 scripts/verification_workflow.py init <out>/findings.json --finding F-001 --actor analyst
+python3 scripts/verification_workflow.py next <out>/findings.json --finding F-001 --out <scratch>/conditions-handoff.json
 ```
 
 The handoff identifies the stage, current input digest, evidence and expected
@@ -51,8 +54,8 @@ whole handoff packet. Do not treat the fictional example's
 observations as a real assessment. Submit the completed file:
 
 ```sh
-python3 skills/security-scan/scripts/verification_workflow.py submit /tmp/findings-workflow.json --finding F-001 --submission /tmp/conditions-result.json
-python3 skills/security-scan/scripts/verification_workflow.py next /tmp/findings-workflow.json --finding F-001 --out /tmp/falsification-handoff.json
+python3 scripts/verification_workflow.py submit <out>/findings.json --finding F-001 --submission <scratch>/conditions-result.json
+python3 scripts/verification_workflow.py next <out>/findings.json --finding F-001 --out <scratch>/falsification-handoff.json
 ```
 
 Use a different declared actor for a `complete` falsification; the conditions
@@ -62,9 +65,9 @@ submission carries the digest from its own handoff; do not reuse the conditions
 digest for later stages.
 
 ```sh
-python3 skills/security-scan/scripts/verification_workflow.py status /tmp/findings-workflow.json
-python3 skills/security-scan/scripts/verification_workflow.py status /tmp/findings-workflow.json --require-complete
-python3 skills/security-scan/scripts/render.py /tmp/findings-workflow.json --out /tmp/workflow-report --lang ja --no-pdf
+python3 scripts/verification_workflow.py status <out>/findings.json
+python3 scripts/verification_workflow.py status <out>/findings.json --require-complete
+python3 scripts/render.py <out>/findings.json --out <out> --lang <ja|en> --repo <repo>
 ```
 
 Only init, submit, resume and invalidate update the findings file. Status and
@@ -123,8 +126,8 @@ handled safely; changing the result requires an explicit restart or invalidation
 rather than rewriting history.
 
 ```sh
-python3 skills/security-scan/scripts/verification_workflow.py resume /tmp/findings-workflow.json --finding F-001 --actor analyst --reason 'Missing source is now available; review the current input.'
-python3 skills/security-scan/scripts/verification_workflow.py invalidate /tmp/findings-workflow.json --finding F-001 --actor analyst --reason 'The assessment input needs another review.'
+python3 scripts/verification_workflow.py resume <out>/findings.json --finding F-001 --actor analyst --reason 'Missing source is now available; review the current input.'
+python3 scripts/verification_workflow.py invalidate <out>/findings.json --finding F-001 --actor analyst --reason 'The assessment input needs another review.'
 ```
 
 Resume makes blocked work available for another attempt, or starts a fresh round
@@ -171,18 +174,18 @@ The separate `evidence` command aliases receipt generation without advancing a
 stage or changing the findings. Its flags follow the standalone evidence CLI:
 
 ```sh
-python3 skills/security-scan/scripts/verification_workflow.py evidence findings.json \
+python3 scripts/verification_workflow.py evidence <out>/findings.json \
   --root /path/to/local-evidence --repository /path/to/owned-local-repository \
   --out /path/to/new-receipt.json
 ```
 
 ```sh
-python3 skills/security-scan/scripts/verification_workflow.py next findings.json \
-  --finding F-001 --out /path/to/new-handoff.json \
+python3 scripts/verification_workflow.py next <out>/findings.json \
+  --finding F-001 --out <scratch>/new-handoff.json \
   --evidence-root /path/to/local-evidence \
   --evidence-repository /path/to/owned-local-repository
-python3 skills/security-scan/scripts/verification_workflow.py submit findings.json \
-  --finding F-001 --submission /path/to/stage-result.json \
+python3 scripts/verification_workflow.py submit <out>/findings.json \
+  --finding F-001 --submission <scratch>/stage-result.json \
   --evidence-root /path/to/local-evidence \
   --evidence-repository /path/to/owned-local-repository
 ```
@@ -214,8 +217,8 @@ distinct. Fix verification continues to follow `reference/fix-verification.md`.
 The bundle command is an alias for the separate reproduction generator:
 
 ```sh
-python3 skills/security-scan/scripts/verification_workflow.py bundle \
-  findings.json --finding F-001 --plan plan.json --out NEW_BUNDLE
+python3 scripts/verification_workflow.py bundle \
+  <out>/findings.json --finding F-001 --plan <scratch>/plan.json --out <scratch>/new-bundle
 ```
 
 It reads the finding and evidence records but does not advance a review stage,

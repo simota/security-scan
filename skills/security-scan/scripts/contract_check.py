@@ -156,7 +156,8 @@ def check(data, out_dir, pdf=True, allow=()):
     # Limitations SKILL.md requires verbatim, matched case-insensitively as substrings.
     limits = [str(x).lower() for x in data.get("limitations", [])] if isinstance(data.get("limitations"), list) else []
     if not pdf and not any(NO_PDF in x for x in limits):
-        add('limitations: --no-pdf requires "assessment.pdf not produced: no PDF engine"')
+        add('limitations: --no-pdf requires "assessment.pdf not produced: no PDF engine", or the '
+            '"assessment.pdf not produced: PDF engine failed (...)" line render.py printed')
     # A stale PDF left from an earlier render contradicts the limitation in --no-pdf mode too.
     if (out_dir / "assessment.pdf").is_file() and any(NO_PDF in x for x in limits):
         add('limitations: says "assessment.pdf not produced", but assessment.pdf exists; '
@@ -229,12 +230,13 @@ def check(data, out_dir, pdf=True, allow=()):
                 "run deps_scan.py <repo> [--audit] --out {out}/deps.json --into {out}/findings.json".format(out=out_dir))
     hints = {"deps.json": "run deps_scan.py <repo> [--audit] --out {out}/deps.json --into {out}/findings.json",
              "evidence": "run evidence_capture.py <repo> --findings {out}/findings.json <paths>",
-             "assessment.pdf": "run render.py {out}/findings.json --repo <repo> --out {out} (if it exits 3 with "
-                               "no PDF engine: merge the limitation 'assessment.pdf not produced: no PDF engine', "
-                               "re-run render.py {out}/findings.json --repo <repo> --out {out} --no-pdf, "
+             "assessment.pdf": "run render.py {out}/findings.json --lang <lang> --repo <repo> --out {out} (if it "
+                               "exits 3 and no engine works anywhere: merge the limitation line it prints, "
+                               "re-run render.py {out}/findings.json --lang <lang> --repo <repo> --out {out} --no-pdf, "
                                "then contract_check.py {out} --no-pdf)"}
     for name in sorted(expected - present):
-        hint = hints.get(name, "run render.py {out}/findings.json --repo <repo> --out {out}").format(out=out_dir)
+        hint = hints.get(name, "run render.py {out}/findings.json --lang <lang> --repo <repo> --out {out}")
+        hint = hint.format(out=out_dir)
         add(f"outputs: {name} missing; {hint}")
     # A report rendered before the last merge or --into does not show the record.
     # render.py stamps each page with the digest of the findings.json it read;

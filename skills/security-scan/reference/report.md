@@ -42,7 +42,7 @@ stale like the primary pages.
 3. **Findings, by severity** — each includes:
 
    ```
-   [High|Medium|Low][Confirmed|Environment-dependent|Suspected] one-line title
+   [High|Medium|Low|Info][Confirmed|Environment-dependent|Suspected] one-line title
      location: path:line at the assessed revision
      actor and preconditions: role, tenant; numbered steps that set up the state
      steps: numbered request shapes (method, path, parameter names, placeholders)
