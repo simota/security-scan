@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import time
@@ -91,9 +92,9 @@ class RenderReviewTests(unittest.TestCase):
         html, pdf = self.root / "a.html", self.root / "a.pdf"
         html.write_text("<p>x</p>", encoding="utf-8")
         pdf.write_bytes(b"%PDF stale")
-        timeout = self.render.subprocess.TimeoutExpired("weasyprint", 120)
+        timeout = subprocess.TimeoutExpired("weasyprint", 120)
         with patch.dict(os.environ, {"CHROME": str(self.root / "missing"), "PATH": str(self.root / "bin")}), \
-             patch.object(self.render.subprocess, "run", side_effect=timeout):
+             patch.object(subprocess, "run", side_effect=timeout):
             self.assertIsNone(self.render.to_pdf(html, pdf))
         self.assertFalse(pdf.exists())
 

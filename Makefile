@@ -127,6 +127,8 @@ check: test ## verify the skill is self-contained and internally consistent
 	  $(PYTHON) -c 'import ast,sys; ast.parse(open(sys.argv[1]).read(), sys.argv[1])' "$$p" \
 	    || { echo "MISS $$p does not parse" >&2; fail=1; }; \
 	done; \
+	( cd "$(SKILL)/scripts/scan_report_kit" && shasum -a 256 -c --quiet MANIFEST ) >&2 \
+	  || { echo "MISS scripts/scan_report_kit differs from its MANIFEST - change scan-report-kit upstream and re-vendor" >&2; fail=1; }; \
 	out=$$(mktemp -d "$${TMPDIR:-/tmp}/$(NAME)-check.XXXXXX") || exit 1; \
 	for sample in examples/findings.sample*.json; do \
 	  PYTHONDONTWRITEBYTECODE=1 $(PYTHON) "$(SKILL)/scripts/render.py" "$$sample" --out "$$out" --no-pdf >/dev/null \
