@@ -100,10 +100,10 @@ not verified. This intentionally does not support arbitrary repository sizes.
 
 ## Verify and consume
 
-From the repository root:
+From this skill's directory:
 
 ```sh
-python3 skills/security-scan/scripts/evidence_integrity.py verify findings.json \
+python3 scripts/evidence_integrity.py verify <out>/findings.json \
   --root /path/to/local-evidence \
   --repository /path/to/owned-local-repository \
   --out /path/to/new-receipt.json
@@ -136,11 +136,11 @@ An imported, copied or hand-authored receipt never grants verification. Each
 consumer needs the actual local sources and performs fresh checks:
 
 ```sh
-python3 skills/security-scan/scripts/render.py findings.json \
+python3 scripts/render.py <out>/findings.json \
   --evidence-root /path/to/local-evidence \
   --evidence-repository /path/to/owned-local-repository \
-  --out /path/to/new-report --lang ja --no-pdf
-python3 skills/security-scan/scripts/verification_workflow.py status findings.json \
+  --out <out> --lang <ja|en> --repo <repo>
+python3 scripts/verification_workflow.py status <out>/findings.json \
   --evidence-root /path/to/local-evidence \
   --evidence-repository /path/to/owned-local-repository
 ```

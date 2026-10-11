@@ -31,9 +31,11 @@ boundary requirements in `reference/fix-verification.md`.
 
 ## Generate, verify and run
 
-Start with the fictional sample below to learn the format. Its finding, commits
-and source-evidence hash are invented; successful execution says nothing about
-an actual application's security.
+Start with the fictional sample below to learn the format. Run it from the
+security-scan source repository's root: the `examples/` files are not shipped
+inside an installed skill. Its finding, commits and source-evidence hash are
+invented; successful execution says nothing about an actual application's
+security.
 
 ```sh
 work=$(mktemp -d "${TMPDIR:-/tmp}/security-scan-repro.XXXXXX")
@@ -57,7 +59,8 @@ If the finding or other bound inputs change, prepare a new bundle against the
 new inputs and review it. Do not patch hashes just to silence a stale-input or
 code-integrity error.
 
-The ordered-review CLI offers the same generator as a convenience:
+The ordered-review CLI offers the same generator as a convenience (the same
+sample, from the source repository's root):
 
 ```sh
 python3 skills/security-scan/scripts/verification_workflow.py bundle \
@@ -72,18 +75,19 @@ decision stages. See `reference/verification-workflow.md` for those handoffs.
 
 Generated-script and findings-input hash verification remains mandatory. It is
 separate from optional verification of the registered evidence files themselves.
-For actual local artifacts, add these flags to `generate`, `verify` and `run`:
+For actual local artifacts, add these flags to `generate`, `verify` and `run`
+(from this skill's directory):
 
 ```sh
-python3 skills/security-scan/scripts/reproduction.py generate findings.json \
-  --finding F-001 --plan plan.json --out /path/to/new-bundle \
+python3 scripts/reproduction.py generate <out>/findings.json \
+  --finding F-001 --plan <scratch>/plan.json --out /path/to/new-bundle \
   --evidence-root /path/to/local-evidence \
   --evidence-repository /path/to/owned-local-repository
-python3 skills/security-scan/scripts/reproduction.py verify /path/to/new-bundle \
-  --findings findings.json --evidence-root /path/to/local-evidence \
+python3 scripts/reproduction.py verify /path/to/new-bundle \
+  --findings <out>/findings.json --evidence-root /path/to/local-evidence \
   --evidence-repository /path/to/owned-local-repository
-python3 skills/security-scan/scripts/reproduction.py run /path/to/new-bundle \
-  --findings findings.json --out /path/to/new-results \
+python3 scripts/reproduction.py run /path/to/new-bundle \
+  --findings <out>/findings.json --out /path/to/new-results \
   --evidence-root /path/to/local-evidence \
   --evidence-repository /path/to/owned-local-repository
 ```
@@ -221,8 +225,9 @@ caller's working directory. Every standalone command requires the unchanged
 source findings. The full sequence below is for unchecked default bundles;
 checked bundles require the repository runner for seeding and execution. The
 `cleanup.py` command also works for checked bundles without rechecking external
-evidence, subject to all manifest and owned-fixture checks above. Use isolated
-mode and disable site startup hooks:
+evidence, subject to all manifest and owned-fixture checks above. With the
+sample bundle above, from the source repository's root, use isolated mode and
+disable site startup hooks:
 
 ```sh
 findings="$PWD/examples/findings.workflow.sample.json"

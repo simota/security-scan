@@ -43,12 +43,14 @@ script (those embed finding text in a shell command, which host safety checks
 can refuse and which leaves no reviewable record):
 
 ```
-# 1. file-write tool: <scratch>/frag-001.json = {"meta": {...}, "findings": [...], "perspectives": [...]}
+# 1. end of RECON, file-write tool: <scratch>/frag-001.json = {"meta": {...}}
 python3 scripts/findings.py merge <out>/findings.json <scratch>/frag-001.json
-# 2. pin the revision and capture cited source
-python3 scripts/evidence_capture.py <repo> --findings <out>/findings.json <paths>…
-# 3. file-write tool: <scratch>/frag-002.json = {"findings": [{"id": "F-001", "verification": {...}}]}
+# 2. end of REVIEW: <scratch>/frag-002.json = {"findings": [...]}  (one to five settled F-NNN, severity order)
 python3 scripts/findings.py merge <out>/findings.json <scratch>/frag-002.json
+# 3. VERIFY: pin the revision and capture cited source
+python3 scripts/evidence_capture.py <repo> --findings <out>/findings.json <paths>…
+# 4. <scratch>/frag-003.json = {"findings": [{"id": "F-001", "verification": {...}}]}
+python3 scripts/findings.py merge <out>/findings.json <scratch>/frag-003.json
 ```
 
 A fragment holds `meta`, `findings`, `evidence`, `test_runs`, `expert`,
@@ -153,7 +155,8 @@ verified merely because it contains an evidence string.
 ```
 
 `meta.project`, `meta.date` and every finding's `id`, `title`, `severity`,
-`confidence` and `location` are required, and `id` must be unique. Every
+`confidence` and `location` are required (`contract_check.py` also requires
+`meta.assessor`: host and model, `SKILL.md` *Run contract*), and `id` must be unique. Every
 `perspectives` entry needs a `name`; use the names in `reference/perspectives.md`.
 These names, and each code finding's `category`, stay the English names from
 that table in every report language: `contract_check.py` matches them exactly,
@@ -199,7 +202,8 @@ recorded verdict and receive `legacy` verification. In version 2, a structured
 `remediation` requires structured `verification`.
 
 The full, explicitly synthetic example is
-`examples/findings.verification.sample.json` at the repository root. Its source,
+`examples/findings.verification.sample.json` in the security-scan source
+repository (an installed skill does not ship `examples/`). Its source,
 commits, hashes, reviewers and test outcomes are invented fixtures, not evidence
 of an executed assessment. The following describes the implemented fields;
 there is no automatic asset discovery or test runner. The optional three-pass

@@ -131,6 +131,15 @@ class ContractCheckRound6Tests(unittest.TestCase):
         hint = [p for p in problems if p.startswith("outputs: assessment.pdf missing")]
         self.assertEqual(len(hint), 1, problems)
         self.assertIn(f"--out {self.out} --no-pdf, then contract_check.py {self.out} --no-pdf", hint[0])
+        self.assertEqual(hint[0].count("--lang <lang>"), 2, hint[0])
+
+    def test_no_pdf_limitation_message_names_the_failed_engine_line(self):
+        data = self.conforming()
+        data["limitations"] = [x for x in data.get("limitations", []) if "assessment.pdf" not in x]
+        problems = [p for p in self.contract.check(data, self.out, pdf=False) if "--no-pdf requires" in p]
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("assessment.pdf not produced: no PDF engine", problems[0])
+        self.assertIn("assessment.pdf not produced: PDF engine failed (...)", problems[0])
 
 
 class ContractOrderAndLimitationTests(unittest.TestCase):

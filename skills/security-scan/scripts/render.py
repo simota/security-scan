@@ -2565,7 +2565,7 @@ def main(argv=None):
     failures = []
     engine = to_pdf(html_path, out / "assessment.pdf", failures, timeout=pdf_timeout(len(data["findings"])))
     if not engine:
-        rerun = (", re-run render.py <findings.json> --repo <repo> --out <out> --no-pdf, "
+        rerun = (f", re-run render.py <findings.json> --lang {a.lang} --repo <repo> --out <out> --no-pdf, "
                  "then contract_check.py <out> --no-pdf")
         if failures:
             # An engine was found but did not produce a PDF: say what happened.

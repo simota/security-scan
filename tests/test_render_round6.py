@@ -319,6 +319,12 @@ class PdfDiagnosticTests(TempDir):
         self.assertIn("no PDF engine found", err)
         self.assertIn("--repo <repo>", err)
         self.assertIn("--no-pdf", err)
+        # The re-render hint keeps the requested language; following it must not switch to English.
+        self.assertIn("--lang en ", err)
+        with patch.object(render, "to_pdf", return_value=None):
+            code, _, err = quiet(render.main, [str(source), "--out", str(self.root / "out"), "--lang", "ja"])
+        self.assertEqual(code, 3)
+        self.assertIn("--lang ja --repo <repo> --out <out> --no-pdf", err)
 
 
 class OutputSymlinkTests(TempDir):
