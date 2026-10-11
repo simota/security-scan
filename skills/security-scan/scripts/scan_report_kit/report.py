@@ -415,7 +415,7 @@ __CSS__
 <label><span data-l="filters_record_set"></span><select id="f-scope"></select></label><label><span data-l="severity"></span><select id="f-sev"></select></label><label><span data-l="status"></span><select id="f-status"></select></label><label><span data-l="category"></span><select id="f-cat"></select></label>
 <label class="search"><span data-l="search"></span><input id="f-q" type="search"></label><label><span data-l="sort"></span><select id="f-sort"></select></label>
 </div><div class="filter-bottom"><p class="result-count" id="result-count" aria-live="polite"></p><button id="reset" type="button" data-l="reset"></button></div></div>
-<div class="tablewrap"><table><thead><tr><th scope="col">ID</th><th scope="col" data-l="severity"></th><th scope="col" data-l="confidence"></th><th scope="col" data-l="status"></th><th scope="col" data-l="verdict"></th><th scope="col" data-l="title_col"></th><th scope="col" data-l="category"></th></tr></thead><tbody id="rows"></tbody></table></div></section>
+<div class="tablewrap"><table class="register"><thead><tr><th scope="col">ID</th><th scope="col" data-l="severity"></th><th scope="col" data-l="confidence"></th><th scope="col" data-l="status"></th><th scope="col" data-l="verdict"></th><th scope="col" data-l="title_col"></th><th scope="col" data-l="category"></th></tr></thead><tbody id="rows"></tbody></table></div></section>
 <div class="lists" id="lists"></div><footer class="footer" data-l="source_note"></footer>
 <noscript><p>__NOSCRIPT__ <a href="report.html">__REPORT__</a></p></noscript>
 </main>
