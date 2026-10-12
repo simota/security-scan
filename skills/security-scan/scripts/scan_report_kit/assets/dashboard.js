@@ -6,6 +6,7 @@
   var D = JSON.parse(document.getElementById('data').textContent), L = D.labels, ALL = D.findings;
   var F = ALL.filter(function (f) { return !f.excluded; }), SEV = D.order.severity, ST = D.order.status;
   var expanded = new Set();
+  var idOrder = new Intl.Collator(document.documentElement.lang || 'en', { numeric: true });
 
   function el(t, a, txt) {
     var e = document.createElement(t);
@@ -14,9 +15,13 @@
     return e;
   }
   function byId(id) { return document.getElementById(id); }
-  function fmt(text, values) { return text.replace(/\{(\w+)\}/g, function (_, key) { return values[key]; }); }
+  function fmt(text, values) {
+    return text.replace(/\{(\w+)\}/g, function (token, key) {
+      return Object.prototype.hasOwnProperty.call(values, key) ? values[key] : token;
+    });
+  }
   function badge(f) { return el('span', { 'class': 'badge ' + f.severity }, f.severity); }
-  function statusText(f) { return f.excluded ? L.excluded_short : f.status; }
+  function statusText(f) { return f.status + (f.excluded ? ' · ' + L.excluded_short : ''); }
   function count(fs, key) {
     var c = Object.create(null);
     fs.forEach(function (f) { var k = f[key] || L.none; c[k] = (c[k] || 0) + 1; });
@@ -97,7 +102,7 @@
 
   function bars(id, key, order, colored) {
     var c = count(F, key), keys = order || Object.keys(c).sort(function (a, b) { return c[b] - c[a] || a.localeCompare(b); });
-    var max = Math.max.apply(null, keys.map(function (k) { return c[k] || 0; }).concat([1]));
+    var max = keys.reduce(function (n, k) { return Math.max(n, c[k] || 0); }, 1);
     keys.forEach(function (k) {
       var row = el('div', { 'class': 'bar' }), track = el('div', { 'class': 'track' });
       var fill = el('div', { 'class': 'fill' + (colored ? ' ' + k : '') });
@@ -116,7 +121,7 @@
 
   function opts(id, vals, first) {
     var s = byId(id);
-    if (first) s.appendChild(el('option', { value: '' }, first));
+    if (first != null) s.appendChild(el('option', { value: '' }, first));
     vals.forEach(function (v) {
       var pair = Array.isArray(v) ? v : [v, v];
       s.appendChild(el('option', { value: pair[0] }, pair[1]));
@@ -144,7 +149,7 @@
   // A code fence longer than any backtick run in the text it wraps.
   function fence(text) {
     var runs = String(text).match(/`+/g) || [];
-    var n = Math.max.apply(null, runs.map(function (r) { return r.length; }).concat([2])) + 1;
+    var n = runs.reduce(function (longest, run) { return Math.max(longest, run.length); }, 2) + 1;
     return Array(n + 1).join('`');
   }
   function oneLine(x) { return String(x).replace(/\s*[\r\n]+\s*/g, ' '); }
@@ -200,14 +205,14 @@
   // Detail content is built on first expansion: a large register would
   // otherwise build every record's full detail tree on each redraw.
   function details(f) {
-    var dt = el('tr', { 'class': 'detail', id: f.anchor + '-detail' });
+    var dt = el('tr', { 'class': 'detail', id: f.anchor + '-detail', role: 'row' });
     dt.hidden = !expanded.has(f.anchor);
     if (!dt.hidden) fillDetails(dt, f);
     return dt;
   }
   function fillDetails(dt, f) {
     if (dt.firstChild) return;
-    var td = el('td', { colspan: 7 }), dl = el('dl');
+    var td = el('td', { colspan: 7, role: 'cell' }), dl = el('dl');
     var head = el('div', { 'class': 'detail-actions' }), links = el('span', { 'class': 'detail-links' });
     head.appendChild(el('strong', null, f.id + ' · ' + f.title));
     links.appendChild(copyButton(f));
@@ -255,8 +260,11 @@
   var searchCache = new Map();
   function searchText(f) {
     if (searchCache.has(f)) return searchCache.get(f);
-    var parts = [f.id, f.title, f.location, f.category, f.status, f.severity, f.confidence, f.verdict, f.action && f.action.text];
-    (f.fields || []).forEach(function (x) { parts.push(x.text); });
+    var parts = [f.id, f.title, f.location, f.category, statusText(f), f.severity, f.confidence, f.verdict];
+    if (f.action) parts.push(f.action.label, f.action.text);
+    (f.fields || []).forEach(function (x) { parts.push(x.label, x.text); });
+    if (f.snippet) parts.push(f.snippet.lines.join('\n'));
+    (f.references || []).forEach(function (r) { parts.push(r.type, r.title, r.url); });
     var text = parts.filter(Boolean).join('\n').toLowerCase();
     searchCache.set(f, text);
     return text;
@@ -271,19 +279,20 @@
         && (!v('f-cat') || f.category === v('f-cat')) && (!term || searchText(f).indexOf(term) >= 0);
     });
     if (v('f-sort') === 'priority') shown.sort(byPriority);
+    else shown.sort(function (a, b) { return idOrder.compare(a.id, b.id); });
     byId('result-count').textContent = fmt(L.showing, { shown: shown.length, total: pool.length });
     if (!shown.length) {
-      var empty = el('tr');
-      empty.appendChild(el('td', { colspan: 7, 'class': 'empty' }, pool.length ? L.no_matches : L.no_records));
+      var empty = el('tr', { role: 'row' });
+      empty.appendChild(el('td', { colspan: 7, 'class': 'empty', role: 'cell' }, pool.length ? L.no_matches : L.no_records));
       tb.appendChild(empty);
       return;
     }
     shown.forEach(function (f) {
-      var tr = el('tr', { 'class': 'row', id: f.anchor }), dt = details(f), button;
+      var tr = el('tr', { 'class': 'row', id: f.anchor, role: 'row' }), dt = details(f), button;
       var labels = ['ID', L.severity, L.confidence, L.status, L.verdict, L.title_col, L.category];
       var values = [f.id, null, f.confidence || L.none, statusText(f), f.verdict || L.none, null, f.category || L.none];
       values.forEach(function (value, i) {
-        var cell = el('td', { 'data-label': labels[i] }, value);
+        var cell = el('td', { 'data-label': labels[i], role: 'cell' }, value);
         if (i === 1) cell.appendChild(badge(f));
         if (i === 5) {
           button = el('button', { type: 'button', 'class': 'finding-toggle', 'aria-expanded': String(!dt.hidden), 'aria-controls': f.anchor + '-detail' });
@@ -308,7 +317,9 @@
     });
   }
   function openHash() {
-    var anchor = window.location.hash.slice(1), f = ALL.find(function (x) { return x.anchor === anchor; });
+    var anchor;
+    try { anchor = decodeURIComponent(window.location.hash.slice(1)); } catch (e) { return; }
+    var f = ALL.find(function (x) { return x.anchor === anchor; });
     if (!f) return;
     expanded.add(anchor);
     draw();
@@ -318,7 +329,10 @@
       draw();
     }
     var row = byId(anchor);
-    if (row) row.scrollIntoView();
+    if (row) {
+      row.querySelector('.finding-toggle').focus({ preventScroll: true });
+      row.scrollIntoView();
+    }
   }
   document.addEventListener('click', function (e) {
     var a = e.target.closest('a[href^="#finding-"]');
