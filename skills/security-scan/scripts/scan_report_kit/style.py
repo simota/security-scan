@@ -10,8 +10,17 @@ def _asset(name):
 
 
 def css_string(text):
-    """text as the body of a double-quoted CSS string."""
-    return str(text).replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+    """text as a double-quoted CSS string body, safe to inline in HTML.
+
+    HTML parses a style element before CSS parses its strings, so a literal
+    less-than sign must be escaped even inside a correctly quoted CSS string.
+    Terminate hexadecimal escapes so following text cannot extend them.
+    """
+    return "".join(
+        "\\" + char if char in ('"', "\\") else
+        f"\\{ord(char):x} " if char == "<" or ord(char) < 32 or ord(char) == 127 else char
+        for char in str(text)
+    )
 
 
 def document_css(running_footer):

@@ -7,7 +7,9 @@ the dashboard runtime come from style.py so every scan shares one look.
 import html
 import json
 import re
-from urllib.parse import urlsplit
+from datetime import date
+from unicodedata import normalize
+from urllib.parse import unquote, urlsplit
 
 from . import style
 
@@ -17,6 +19,10 @@ STATUSES = ["Open", "Fixed", "Accepted"]
 LIST_KEYS = ("limitations", "decisions", "next_steps", "checked_ok")
 META_KEYS = ("project", "date", "assessor", "scope", "method", "commit")
 REPORT_KEYS = ("kind", "title", "dashboard_title", "running_footer")
+FINDING_KEYS = ("id", "title", "severity", "status", "confidence", "verdict", "category", "location", "excluded")
+# Line numbers must stay exact in both Python and the JavaScript dashboard.
+MAX_LINE_NUMBER = 2 ** 53 - 1
+LINE_BREAKS = re.compile(r"[\r\n\v\f\x1c-\x1e\x85\u2028\u2029]")
 
 LABELS = {
     "en": {
@@ -100,16 +106,25 @@ LABELS = {
         "no_script": "このダッシュボードには JavaScript が必要です。印刷用報告書をご覧ください:",
     },
 }
+LABEL_KEYS = set().union(*(labels.keys() for labels in LABELS.values()))
 
 
 class FormatError(Exception):
     pass
 
 
-def _text(obj, key, where, *, required=False):
-    value = obj.get(key, "")
+def _string(value, where):
     if not isinstance(value, str):
-        raise FormatError(f"{where}.{key}: expected a string")
+        raise FormatError(f"{where}: expected a string")
+    if "\x00" in value:
+        raise FormatError(f"{where}: expected Unicode text without NUL characters")
+    if re.search(r"[\ud800-\udfff]", value):
+        raise FormatError(f"{where}: expected Unicode text without surrogate code points")
+    return value
+
+
+def _text(obj, key, where, *, required=False):
+    value = _string(obj.get(key, ""), f"{where}.{key}")
     if required and not value.strip():
         raise FormatError(f"{where}.{key}: required")
     return value
@@ -117,14 +132,44 @@ def _text(obj, key, where, *, required=False):
 
 def _strings(data, key):
     value = data.get(key, [])
-    if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
+    if not isinstance(value, list):
         raise FormatError(f"{key}: expected a list of strings")
+    for i, item in enumerate(value):
+        _string(item, f"{key}[{i}]")
     return value
 
 
 def http_url(value, where):
-    parts = urlsplit(value) if isinstance(value, str) else None
-    if not parts or parts.scheme not in ("http", "https") or not parts.netloc:
+    _string(value, where)
+    # Do not let urlsplit silently strip controls or accept a URL that a
+    # browser interprets differently (notably backslashes in the authority).
+    if any(char.isspace() or ord(char) < 32 or 127 <= ord(char) < 160 or char == "\\" for char in value):
+        raise FormatError(f"{where}: expected an http(s) URL")
+    try:
+        parts = urlsplit(value)
+        host = parts.hostname
+        valid = parts.scheme in ("http", "https") and bool(host)
+        # Accessing port validates its numeric syntax and range.
+        parts.port
+        if valid:
+            if re.search(r"%(?![0-9a-fA-F]{2})", host):
+                valid = False
+            else:
+                # urlsplit separates components; it does not validate domain
+                # names. Check decoded and NFKC-normalized host text so encoded
+                # delimiters cannot hide an unusable host. Keep paths/queries
+                # untouched and retain the original URL in the report. Python's
+                # IDNA2003 codec rejects valid modern IDNs (e.g. RTL labels ending
+                # in digits), so do not use it as a domain validity gate.
+                decoded = unquote(host, encoding="utf-8", errors="strict")
+                bracketed = parts.netloc.rsplit("@", 1)[-1].startswith("[")
+                normalized = normalize("NFKC", decoded)
+                forbidden = "#/<>?@[\\]^|\ufffd" + ("" if bracketed else ":%")
+                valid = not any(char.isspace() or ord(char) < 32 or 127 <= ord(char) < 160
+                                or char in forbidden for char in decoded + normalized)
+    except ValueError:
+        raise FormatError(f"{where}: expected an http(s) URL") from None
+    if not valid:
         raise FormatError(f"{where}: expected an http(s) URL")
     return value
 
@@ -143,12 +188,19 @@ def validate(data):
     meta = _object(data.get("meta"), "meta")
     for key in META_KEYS:
         _text(meta, key, "meta", required=key in ("project", "date"))
+    try:
+        if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", meta["date"]):
+            raise ValueError
+        date.fromisoformat(meta["date"])
+    except ValueError:
+        raise FormatError("meta.date: expected a valid date in YYYY-MM-DD form") from None
     report = _object(data.get("report", {}), "report")
     for key in REPORT_KEYS:
         _text(report, key, "report")
     labels = _object(data.get("labels", {}), "labels")
-    if not all(isinstance(v, str) for v in labels.values()):
-        raise FormatError("labels: expected string values")
+    for key, value in labels.items():
+        _string(key, "labels key")
+        _string(value, f"labels.{key}")
     _text(data, "summary", "report")
     for key in LIST_KEYS:
         _strings(data, key)
@@ -171,7 +223,9 @@ def validate(data):
         if fid in seen:
             raise FormatError(f"{where}.id: duplicate {fid!r}")
         seen.add(fid)
-        _text(f, "title", where, required=True)
+        title = _text(f, "title", where, required=True)
+        if LINE_BREAKS.search(title):
+            raise FormatError(f"{where}.title: expected one line")
         if f.get("severity") not in SEVERITIES:
             raise FormatError(f"{where}.severity: expected one of {SEVERITIES}")
         if f.get("status") not in STATUSES:
@@ -194,10 +248,18 @@ def validate(data):
         if "snippet" in f:
             s = _object(f["snippet"], f"{where}.snippet")
             hit = s.get("hit")
-            if (not isinstance(s.get("start"), int) or isinstance(s.get("start"), bool) or s["start"] < 1
-                    or not isinstance(s.get("lines"), list) or not all(isinstance(x, str) for x in s["lines"])
+            if (type(s.get("start")) is not int or not 1 <= s["start"] <= MAX_LINE_NUMBER
+                    or not isinstance(s.get("lines"), list)
                     or not (isinstance(hit, list) and len(hit) == 2 and all(type(n) is int for n in hit))):
                 raise FormatError(f"{where}.snippet: expected start >= 1, lines and hit [first, last]")
+            if not 1 <= hit[0] <= hit[1] <= MAX_LINE_NUMBER:
+                raise FormatError(f"{where}.snippet.hit: expected ordered positive line numbers <= {MAX_LINE_NUMBER}")
+            if s["start"] + len(s["lines"]) - 1 > MAX_LINE_NUMBER:
+                raise FormatError(f"{where}.snippet: displayed line numbers must be <= {MAX_LINE_NUMBER}")
+            for j, line in enumerate(s["lines"]):
+                _string(line, f"{where}.snippet.lines[{j}]")
+                if LINE_BREAKS.search(line):
+                    raise FormatError(f"{where}.snippet.lines[{j}]: expected one line")
         refs = f.get("references", [])
         if not isinstance(refs, list):
             raise FormatError(f"{where}.references: expected a list")
@@ -211,9 +273,12 @@ def validate(data):
 
 def labels_for(data, lang):
     """Built-in labels for lang, then the report's own kind/title strings, then its overrides."""
+    if not isinstance(lang, str) or lang not in LABELS:
+        raise FormatError(f"lang: expected one of {list(LABELS)}")
     L = dict(LABELS[lang])
-    L.update({k: v for k, v in data.get("report", {}).items() if v})
-    L.update(data.get("labels", {}))
+    names = data.get("report", {})
+    L.update({k: names[k] for k in REPORT_KEYS if names.get(k)})
+    L.update({k: v for k, v in data.get("labels", {}).items() if k in LABEL_KEYS})
     return L
 
 
@@ -223,7 +288,7 @@ def esc(s):
 
 def plural(L, key, n):
     """The label for count n; a `_one` variant carries the singular form."""
-    return L[key + "_one" if n == 1 and key + "_one" in L else key].format(n=n)
+    return L[key + "_one" if n == 1 and key + "_one" in L else key].replace("{n}", str(n))
 
 
 def anchor(index):
@@ -281,6 +346,7 @@ def refs_html(refs, L):
 
 def render_document(data, lang):
     """The printable report (report.html), typeset per docs/design.md; print it with pdf.to_pdf."""
+    validate(data)
     L = labels_for(data, lang)
     m, c = data["meta"], counts(data)
     anchors = {id(f): anchor(i) for i, f in enumerate(data["findings"])}
@@ -334,16 +400,18 @@ def render_document(data, lang):
                 if coverage_rows else f"<p class='small'>{esc(L['coverage_missing'])}</p>")
 
     index_rows = "".join(
-        f"<tr><td data-label='{esc(L['title_col'])}'><a class='index-title' href='#{anchors[id(f)]}'>{esc(f['title'])}</a>"
+        f"<tr role='row'><td role='cell' data-label='{esc(L['title_col'])}'><a class='index-title' href='#{anchors[id(f)]}'>{esc(f['title'])}</a>"
         f"<span class='index-id'>{esc(f['id'])}</span></td>"
-        f"<td data-label='{esc(L['severity'])}'><span class='badge {f['severity']}'>{f['severity']}</span></td>"
-        f"<td data-label='{esc(L['status'])}'>{esc(f['status'])}</td>"
-        f"<td data-label='{esc(L['location'])}'><code>{value(f.get('location'))}</code></td></tr>" for f in fs)
-    index = (f"<table class='index'><caption>{esc(L['register_caption'])}</caption>"
+        f"<td role='cell' data-label='{esc(L['severity'])}'><span class='badge {f['severity']}'>{f['severity']}</span></td>"
+        f"<td role='cell' data-label='{esc(L['status'])}'>{esc(f['status'])}</td>"
+        f"<td role='cell' data-label='{esc(L['location'])}'><code>{value(f.get('location'))}</code></td></tr>" for f in fs)
+    index = (f"<table class='index' role='table'><caption>{esc(L['register_caption'])}</caption>"
              "<colgroup><col class='finding-col'><col class='severity-col'><col class='status-col'><col class='evidence-col'></colgroup>"
-             f"<thead><tr><th scope='col'>{esc(L['title_col'])}</th><th scope='col'>{esc(L['severity'])}</th>"
-             f"<th scope='col'>{esc(L['status'])}</th><th scope='col'>{esc(L['location'])}</th></tr></thead>"
-             f"<tbody>{index_rows}</tbody></table>" if fs else f"<p class='small'>{esc(L['no_findings'])}</p>")
+             f"<thead role='rowgroup'><tr role='row'><th scope='col' role='columnheader'>{esc(L['title_col'])}</th>"
+             f"<th scope='col' role='columnheader'>{esc(L['severity'])}</th>"
+             f"<th scope='col' role='columnheader'>{esc(L['status'])}</th>"
+             f"<th scope='col' role='columnheader'>{esc(L['location'])}</th></tr></thead>"
+             f"<tbody role='rowgroup'>{index_rows}</tbody></table>" if fs else f"<p class='small'>{esc(L['no_findings'])}</p>")
 
     def card(f):
         state = "".join(f"<tr><th scope='row'>{esc(L[k])}</th><td>"
@@ -410,12 +478,12 @@ __CSS__
 <section aria-labelledby="priority-heading"><div class="section-head"><div><h2 id="priority-heading" data-l="priority"></h2><p data-l="priority_note"></p></div><a href="#findings" data-l="view_all"></a></div><div class="priority-list" id="priority"></div><p class="report-note" id="queue-note"></p></section>
 <details class="panel coverage" id="coverage" open><summary><span data-l="coverage"></span><span class="small" id="coverage-count"></span></summary><p data-l="coverage_note"></p><dl class="scope-meta" id="scope-meta"></dl><div class="coverage-columns"><div id="perspectives"></div><div><h3 data-l="limitations"></h3><div id="limitations"></div></div></div></details>
 <details class="chart-section"><summary data-l="overview"></summary><p class="section-note" data-l="count_basis"></p><div class="grid"><div class="panel"><h3 data-l="by_severity"></h3><div id="c-sev"></div></div><div class="panel"><h3 data-l="by_category"></h3><div id="c-cat"></div></div><div class="panel"><h3 data-l="by_status"></h3><div id="c-status"></div></div></div></details>
-<section id="findings" aria-labelledby="findings-heading"><div class="section-head"><div><h2 id="findings-heading" data-l="register"></h2><p data-l="register_note"></p></div></div>
+<section id="findings" tabindex="-1" aria-labelledby="findings-heading"><div class="section-head"><div><h2 id="findings-heading" data-l="register"></h2><p data-l="register_note"></p></div></div>
 <div class="panel filters-panel"><div class="filters">
 <label><span data-l="filters_record_set"></span><select id="f-scope"></select></label><label><span data-l="severity"></span><select id="f-sev"></select></label><label><span data-l="status"></span><select id="f-status"></select></label><label><span data-l="category"></span><select id="f-cat"></select></label>
 <label class="search"><span data-l="search"></span><input id="f-q" type="search"></label><label><span data-l="sort"></span><select id="f-sort"></select></label>
 </div><div class="filter-bottom"><p class="result-count" id="result-count" aria-live="polite"></p><button id="reset" type="button" data-l="reset"></button></div></div>
-<div class="tablewrap"><table class="register"><thead><tr><th scope="col">ID</th><th scope="col" data-l="severity"></th><th scope="col" data-l="confidence"></th><th scope="col" data-l="status"></th><th scope="col" data-l="verdict"></th><th scope="col" data-l="title_col"></th><th scope="col" data-l="category"></th></tr></thead><tbody id="rows"></tbody></table></div></section>
+<div class="tablewrap"><table class="register" role="table"><thead role="rowgroup"><tr role="row"><th scope="col" role="columnheader">ID</th><th scope="col" role="columnheader" data-l="severity"></th><th scope="col" role="columnheader" data-l="confidence"></th><th scope="col" role="columnheader" data-l="status"></th><th scope="col" role="columnheader" data-l="verdict"></th><th scope="col" role="columnheader" data-l="title_col"></th><th scope="col" role="columnheader" data-l="category"></th></tr></thead><tbody id="rows" role="rowgroup"></tbody></table></div></section>
 <div class="lists" id="lists"></div><footer class="footer" data-l="source_note"></footer>
 <noscript><p>__NOSCRIPT__ <a href="report.html">__REPORT__</a></p></noscript>
 </main>
@@ -428,19 +496,33 @@ __JS__
 """
 
 
+def _finding_payload(finding, index):
+    """Copy only the validated contract fields; extensions never enter the page."""
+    payload = {k: finding[k] for k in FINDING_KEYS if k in finding}
+    payload["anchor"] = anchor(index)
+    for key, keys in (("action", ("label", "text")), ("snippet", ("start", "hit", "lines"))):
+        if key in finding:
+            payload[key] = {k: finding[key][k] for k in keys if k in finding[key]}
+    for key, keys in (("fields", ("label", "text")), ("references", ("type", "title", "url"))):
+        if key in finding:
+            payload[key] = [{k: item[k] for k in keys if k in item} for item in finding[key]]
+    return payload
+
+
 def render_dashboard(data, lang):
     """The interactive dashboard (dashboard.html): self-contained, offline, light and dark themes."""
+    validate(data)
     L = labels_for(data, lang)
     payload = {
         "meta": {k: data["meta"][k] for k in META_KEYS if data["meta"].get(k)},
         "labels": L, "headline": headline(data, L), "summary": data.get("summary", ""),
-        "findings": [{**f, "anchor": anchor(i)} for i, f in enumerate(data["findings"])],
+        "findings": [_finding_payload(f, i) for i, f in enumerate(data["findings"])],
         "order": {"severity": SEVERITIES, "status": STATUSES},
         "perspectives": [{k: p[k] for k in ("name", "result", "note") if k in p} for p in data.get("perspectives", [])],
         **{k: data.get(k, []) for k in LIST_KEYS},
     }
     # Escape every less-than sign: <!-- and <script also change HTML parsing.
-    blob = json.dumps(payload, ensure_ascii=False).replace("<", "\\u003c")
+    blob = json.dumps(payload, ensure_ascii=False, allow_nan=False).replace("<", "\\u003c")
     replacements = {"__LANG__": esc(lang), "__TITLE__": esc(f"{L['dashboard_title']} - {data['meta']['project']}"),
                     "__NOSCRIPT__": esc(L["no_script"]), "__REPORT__": esc(L["report_link"]), "__DATA__": blob,
                     "__CSS__": style.dashboard_css(), "__JS__": style.dashboard_js()}

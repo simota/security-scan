@@ -1,5 +1,5 @@
 /* scan-report-kit document stylesheet: report.html / report.pdf. Design: docs/design.md.
-   __RUNNING_FOOTER__ is replaced by style.document_css() with the report's running footer. */
+   The quoted page footer is filled by style.document_css(). */
 @page{
   size:A4;margin:22mm 22mm 24mm;
   @bottom-left{content:"__RUNNING_FOOTER__";font:7.5pt "Hiragino Sans","Noto Sans CJK JP",sans-serif;color:#5a5a5a}
@@ -118,8 +118,10 @@ html[lang="ja"] .snippet::before{content:"コード " counter(listing);letter-sp
   body{margin:0;padding:8mm 5mm;border:0}
   .meta-line{grid-template-columns:24mm minmax(0,1fr)}
   .lead{margin:2mm 0 4mm}
-  .index,.index tbody,.index tr,.index td{display:block;width:100%}
-  .index colgroup,.index thead{display:none}
+  .index,.index caption,.index tbody,.index tr,.index td{display:block;width:100%}
+  .index colgroup{display:none}
+  /* Keep column headers available when the index becomes a stack of cards. */
+  .index thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
   .index tr{margin:0 0 3mm;border-top:.6pt solid var(--rule)}
   .index td{border:0!important;padding:1.5mm 0}
   .index td::before{content:attr(data-label);display:block;font:600 7.6pt/1.4 var(--sans);letter-spacing:.05em;color:var(--muted);margin-bottom:.6mm}
