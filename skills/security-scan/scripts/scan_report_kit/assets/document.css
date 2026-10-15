@@ -103,6 +103,7 @@ html[lang="ja"] .snippet::before{content:"コード " counter(listing);letter-sp
 .snippet span{display:block;white-space:pre-wrap;overflow-wrap:anywhere;word-wrap:break-word;break-inside:avoid;page-break-inside:avoid}
 .snippet .hit{background:var(--mark)}
 .snippet b{color:var(--muted);font-weight:400}
+.snippet .hit b{color:var(--ink);font-weight:700}
 .refs{padding-left:5mm;margin:1mm 0 3mm;font-size:8.4pt;line-height:1.5}
 .refs li,.refs a{overflow-wrap:anywhere;word-wrap:break-word;word-break:break-all}
 .rt{display:inline-block;min-width:15mm;font:7.2pt/1.4 var(--sans);letter-spacing:.05em;color:var(--muted)}

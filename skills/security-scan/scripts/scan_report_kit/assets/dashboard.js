@@ -39,11 +39,21 @@
   document.title = L.dashboard_title + ' - ' + D.meta.project;
   byId('h').textContent = D.meta.project;
   byId('meta').textContent = [D.meta.date, D.meta.assessor].filter(Boolean).join(' · ');
+  byId('appbar-project').textContent = D.meta.project;
   document.querySelectorAll('[data-l]').forEach(function (e) { e.textContent = L[e.getAttribute('data-l')]; });
+  byId('nav').setAttribute('aria-label', L.contents);
+  // Storage is a per-viewer convenience: it can be absent or throw (private
+  // windows, blocked site data), and the page then follows the OS theme.
+  var THEME_KEY = 'scan-report-kit.theme';
+  try {
+    var saved = window.localStorage.getItem(THEME_KEY);
+    if (saved === 'light' || saved === 'dark') document.documentElement.dataset.theme = saved;
+  } catch (e) { /* follow the operating-system preference */ }
   byId('theme').onclick = function () {
     var root = document.documentElement;
     var dark = root.dataset.theme ? root.dataset.theme === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
     root.dataset.theme = dark ? 'light' : 'dark';
+    try { window.localStorage.setItem(THEME_KEY, root.dataset.theme); } catch (e) { /* not remembered */ }
   };
 
   var summary = byId('summary');
@@ -146,17 +156,56 @@
   }
   byId('reset').onclick = function () { reset(); draw(); };
 
+  // Sidebar facets: included counts per severity; each one filters the
+  // register to that severity and a second press clears it.
+  var sevCount = count(F, 'severity'), facetButtons = SEV.map(function (s) {
+    var b = el('button', { type: 'button', 'class': 'facet', 'data-sev': s, 'aria-controls': 'rows', 'aria-pressed': 'false' });
+    b.appendChild(el('span', { 'class': 'facet-name ' + s }, s));
+    b.appendChild(el('span', { 'class': 'facet-n' }, String(sevCount[s] || 0)));
+    b.onclick = function () {
+      var on = b.getAttribute('aria-pressed') === 'true';
+      byId('f-scope').value = 'included';
+      byId('f-sev').value = on ? '' : s;
+      draw();
+      byId('findings').scrollIntoView();
+    };
+    byId('facets').appendChild(b);
+    return b;
+  });
+
   // A code fence longer than any backtick run in the text it wraps.
   function fence(text) {
     var runs = String(text).match(/`+/g) || [];
     var n = runs.reduce(function (longest, run) { return Math.max(longest, run.length); }, 2) + 1;
     return Array(n + 1).join('`');
   }
-  function oneLine(x) { return String(x).replace(/\s*[\r\n]+\s*/g, ' '); }
+  function oneLine(x) {
+    return String(x).replace(/\s+/g, function (space) { return /[\r\n]/.test(space) ? ' ' : space; });
+  }
+  // Recorded labels and metadata are literal text, including Markdown-looking
+  // punctuation and entity names. Body evidence stays unchanged inside fences.
+  function markdownInline(x) {
+    var text = oneLine(x).replace(/[\\`*_{}\[\]<>#!|~&]/g, function (c) { return '\\' + c; });
+    // Leading indentation is data too. Character references preserve it without
+    // introducing a Markdown code block or an indented nested list.
+    text = text.replace(/^[ \t]+/, function (space) {
+      return space.replace(/[ \t]/g, function (c) { return c === ' ' ? '&#32;' : '&#9;'; });
+    });
+    // A label begins immediately after a list marker in metadata. Escape a
+    // recorded leading marker so it cannot turn that label into a nested list.
+    return text.replace(/^([+-]|[0-9]{1,9}[.)])(?=[ \t])/, function (marker) {
+      return marker.slice(0, -1) + '\\' + marker.slice(-1);
+    });
+  }
+  function markdownUrl(url) {
+    // Autolinks decode HTML entities, and angle brackets terminate their syntax.
+    // Preserve query separators and entity-like text while quoting URL delimiters.
+    return url.replace(/&/g, '&amp;').replace(/</g, '%3C').replace(/>/g, '%3E');
+  }
   function findingMarkdown(f) {
-    var out = ['## ' + oneLine(f.id) + ' · ' + oneLine(f.title), ''];
-    function p(label, value) { if (value) out.push('- ' + label + ': ' + oneLine(value)); }
-    function block(label, value) { if (value) { var fc = fence(value); out.push('', '### ' + oneLine(label), fc + 'text', value, fc); } }
+    var out = ['## ' + markdownInline(f.id) + ' · ' + markdownInline(f.title), ''];
+    function p(label, value) { if (value) out.push('- ' + markdownInline(label) + ': ' + markdownInline(value)); }
+    function block(label, value) { if (value) { var fc = fence(value); out.push('', '### ' + markdownInline(label), fc + 'text', value, fc); } }
     p(L.severity, f.severity); p(L.status, statusText(f)); p(L.confidence, f.confidence); p(L.verdict, f.verdict);
     p(L.category, f.category); p(L.location, f.location);
     if (f.action && f.status === 'Open' && !f.excluded) block(f.action.label, f.action.text);
@@ -169,8 +218,8 @@
       block(L.snippet, lines);
     }
     if ((f.references || []).length) {
-      out.push('', '### ' + L.references);
-      f.references.forEach(function (r) { out.push('- [' + oneLine(r.type || L.source) + '] ' + oneLine(r.title || r.url) + ' <' + r.url + '>'); });
+      out.push('', '### ' + markdownInline(L.references));
+      f.references.forEach(function (r) { out.push('- [' + markdownInline(r.type || L.source) + '] ' + markdownInline(r.title || r.url) + ' <' + markdownUrl(r.url) + '>'); });
     }
     return out.join('\n') + '\n';
   }
@@ -210,6 +259,18 @@
     if (!dt.hidden) fillDetails(dt, f);
     return dt;
   }
+  // Render line endings consistently while keeping every recorded character in
+  // textContent. Hide CR itself; LF or an explicit br supplies the visible break.
+  function proseInto(box, text) {
+    var cr = /\r/g, start = 0, match;
+    while ((match = cr.exec(text))) {
+      box.appendChild(document.createTextNode(text.slice(start, match.index)));
+      box.appendChild(el('span', { hidden: '' }, '\r'));
+      if (text.charAt(match.index + 1) !== '\n') box.appendChild(el('br'));
+      start = match.index + 1;
+    }
+    box.appendChild(document.createTextNode(text.slice(start)));
+  }
   function fillDetails(dt, f) {
     if (dt.firstChild) return;
     var td = el('td', { colspan: 7, role: 'cell' }), dl = el('dl');
@@ -228,7 +289,7 @@
     function field(label, value) {
       dl.appendChild(el('dt', null, label));
       var dd = el('dd');
-      if (value instanceof Node) dd.appendChild(value); else dd.textContent = value;
+      if (value instanceof Node) dd.appendChild(value); else proseInto(dd, value);
       dl.appendChild(dd);
     }
     field(L.location, f.location || L.not_recorded);
@@ -281,6 +342,9 @@
     if (v('f-sort') === 'priority') shown.sort(byPriority);
     else shown.sort(function (a, b) { return idOrder.compare(a.id, b.id); });
     byId('result-count').textContent = fmt(L.showing, { shown: shown.length, total: pool.length });
+    facetButtons.forEach(function (b) {
+      b.setAttribute('aria-pressed', String(scope === 'included' && v('f-sev') === b.getAttribute('data-sev')));
+    });
     if (!shown.length) {
       var empty = el('tr', { role: 'row' });
       empty.appendChild(el('td', { colspan: 7, 'class': 'empty', role: 'cell' }, pool.length ? L.no_matches : L.no_records));
@@ -341,6 +405,52 @@
   window.addEventListener('hashchange', openHash);
   draw();
   if (window.location.hash) openHash();
+
+  // Keyboard: "/" searches, j/k step through the visible findings (Enter on
+  // the focused title toggles its details), Escape clears the search box.
+  document.addEventListener('keydown', function (e) {
+    if (e.altKey || e.ctrlKey || e.metaKey || e.isComposing) return;
+    var t = e.target, typing = t && t.closest && t.closest('input,select,textarea');
+    if (typing) {
+      if (e.key === 'Escape' && t === q && q.value) { q.value = ''; draw(); }
+      return;
+    }
+    if (e.key === '/') {
+      e.preventDefault();
+      q.focus();
+    } else if (e.key === 'j' || e.key === 'k') {
+      var toggles = rowsShown(), current = document.activeElement && document.activeElement.closest('tr.row');
+      if (!toggles.length) return;
+      var at = toggles.findIndex(function (b) { return b.closest('tr.row') === current; });
+      var next = at < 0 ? 0 : Math.min(toggles.length - 1, Math.max(0, at + (e.key === 'j' ? 1 : -1)));
+      e.preventDefault();
+      toggles[next].focus();
+      toggles[next].closest('tr.row').scrollIntoView({ block: 'nearest' });
+    }
+  });
+  function rowsShown() { return Array.from(byId('rows').querySelectorAll('button.finding-toggle')); }
+
+  // The register's column heads pin below the filter bar, whose height
+  // depends on the language and the viewport.
+  if (window.ResizeObserver) {
+    new window.ResizeObserver(function (entries) {
+      byId('findings').style.setProperty('--filters-h', entries[0].target.offsetHeight + 'px');
+    }).observe(document.querySelector('.filters-panel'));
+  }
+
+  // Mark the section in view in the sidebar contents.
+  var navLinks = Array.from(byId('nav').querySelectorAll('a[href^="#"]'));
+  if (window.IntersectionObserver) {
+    var visible = new Map();
+    var spy = new window.IntersectionObserver(function (entries) {
+      entries.forEach(function (en) { visible.set(en.target.id, en.isIntersecting); });
+      var first = navLinks.find(function (a) { return visible.get(a.getAttribute('href').slice(1)); });
+      navLinks.forEach(function (a) {
+        if (a === first) a.setAttribute('aria-current', 'location'); else a.removeAttribute('aria-current');
+      });
+    }, { rootMargin: '-35% 0px -60% 0px' });
+    navLinks.forEach(function (a) { var s = byId(a.getAttribute('href').slice(1)); if (s) spy.observe(s); });
+  }
 
   ['decisions', 'next_steps', 'checked_ok'].forEach(function (k) {
     var p = el('section', { 'class': 'panel' });
