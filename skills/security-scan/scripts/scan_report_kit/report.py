@@ -65,6 +65,8 @@ LABELS = {
         "view_all": "View all findings", "queue_more": "Showing {shown} of {total} open findings.",
         "source_note": "Generated from the recorded report data; this page changes nothing.",
         "no_script": "This dashboard needs JavaScript. Read the printable report instead:",
+        "contents": "Contents", "records": "Decisions and next steps", "shortcuts": "Keyboard",
+        "key_search": "Search", "key_move": "Next / previous finding", "key_toggle": "Show or hide details",
     },
     "ja": {
         "kind": "診断", "title": "診断報告書", "dashboard_title": "診断結果", "running_footer": "診断報告書",
@@ -104,6 +106,8 @@ LABELS = {
         "view_all": "すべての指摘を見る", "queue_more": "未対応{total}件中{shown}件を表示しています。",
         "source_note": "記録されたレポートデータから生成しています。このページは何も変更しません。",
         "no_script": "このダッシュボードには JavaScript が必要です。印刷用報告書をご覧ください:",
+        "contents": "目次", "records": "判断事項と次の手順", "shortcuts": "キー操作",
+        "key_search": "検索", "key_move": "次・前の指摘", "key_toggle": "詳細の表示・非表示",
     },
 }
 LABEL_KEYS = set().union(*(labels.keys() for labels in LABELS.values()))
@@ -283,7 +287,23 @@ def labels_for(data, lang):
 
 
 def esc(s):
-    return html.escape(str(s or ""))
+    # HTML input preprocessing normalizes literal CR and CRLF to LF before
+    # parsing text or attributes. A character reference keeps recorded text
+    # intact, including Windows line endings in multiline evidence.
+    return html.escape(str(s or "")).replace("\r", "&#13;")
+
+
+def prose_html(text):
+    # Browsers do not treat DOM CRs as line breaks, while PDF engines may
+    # normalize them to LF. Keep each CR in a hidden text node so textContent
+    # stays exact, then display one break using CRLF's LF or an explicit br.
+    parts = []
+    for part in re.split(r"(\r\n?)", str(text or "")):
+        if part.startswith("\r"):
+            parts.append("<span hidden>&#13;</span>" + ("\n" if part == "\r\n" else "<br>"))
+        else:
+            parts.append(esc(part))
+    return "".join(parts)
 
 
 def plural(L, key, n):
@@ -357,7 +377,7 @@ def render_document(data, lang):
         return esc(text) if str(text or "").strip() else esc(L["none"])
 
     def bullets(items, empty):
-        return ("<ul>" + "".join(f"<li class='prose'>{esc(x)}</li>" for x in items) + "</ul>"
+        return ("<ul>" + "".join(f"<li class='prose'>{prose_html(x)}</li>" for x in items) + "</ul>"
                 if items else f"<p class='small'>{esc(L[empty])}</p>")
 
     meta = "".join(f"<p class='meta-line'><strong>{esc(L[k])}</strong> {esc(m[k])}</p>"
@@ -417,10 +437,10 @@ def render_document(data, lang):
         state = "".join(f"<tr><th scope='row'>{esc(L[k])}</th><td>"
                         + (f"<span class='badge {f['severity']}'>{f['severity']}</span>" if k == "severity" else value(f.get(k)))
                         + "</td></tr>" for k in ("severity", "status", "confidence", "verdict", "category", "location"))
-        action = (f"<div class='finding-field'><h4>{esc(f['action']['label'])}</h4><p class='prose'>{esc(f['action'].get('text'))}</p></div>"
+        action = (f"<div class='finding-field'><h4>{esc(f['action']['label'])}</h4><p class='prose'>{prose_html(f['action'].get('text'))}</p></div>"
                   if f.get("action") and f["status"] == "Open" and not f.get("excluded") else "")
         fields = "".join(f"<div class='finding-field'><h4>{esc(x['label'])}</h4>"
-                         + (f"<p class='prose'>{esc(x['text'])}</p>" if x.get("text", "").strip()
+                         + (f"<p class='prose'>{prose_html(x['text'])}</p>" if x.get("text", "").strip()
                             else f"<p class='empty-value'>{esc(L['not_recorded'])}</p>") + "</div>"
                          for x in f.get("fields", []))
         snippet = (f"<div class='finding-field'><h4>{esc(L['snippet'])}</h4>{snippet_html(f['snippet'])}</div>"
@@ -438,14 +458,14 @@ def render_document(data, lang):
     excluded_html = (f"<section class='excluded-section' id='excluded'><h2>{esc(L['excluded'])}</h2>"
                      f"<p class='section-note'>{esc(L['excluded_note'])}</p>" + "".join(card(f) for f in excluded) + "</section>"
                      if excluded else "")
-    summary = data.get("summary", "").strip()
+    summary = data.get("summary", "")
     return f"""<!doctype html>
 <html lang="{esc(lang)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{esc(L['title'])} - {esc(m['project'])}</title><style>{style.document_css(L['running_footer'])}</style></head><body>
 <header class="report-header"><p class="kicker">{esc(L['kind'])}</p><h1>{esc(L['title'])}</h1>
 <p class="project">{esc(m['project'])}</p>{meta}</header>
 <main>
-<p class="lead prose">{esc(summary) if summary else esc(L['no_summary'])}</p>
+<p class="lead prose">{prose_html(summary if summary.strip() else L['no_summary'])}</p>
 <section class="summary-section" id="summary"><h2>{esc(L['summary'])}</h2><p>{esc(headline(data, L))}</p>{metrics}
 <h3 class="limit-heading">{esc(L['limitations'])}</h3><div class="limits">{bullets(data.get('limitations', []), 'limitations_empty')}</div></section>
 <section id="priority-queue"><h2>{esc(L['priority'])}</h2><p class="section-note">{esc(L['priority_note'])}</p>{queue}</section>
@@ -459,7 +479,7 @@ def render_document(data, lang):
 
 
 DASHBOARD = """<!doctype html>
-<html lang="__LANG__">
+<html lang="__LANG__" class="app-shell">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -470,13 +490,20 @@ __CSS__
 </head>
 <body>
 <a class="skip" href="#findings" data-l="jump"></a>
+<header class="appbar"><div class="appbar-in"><span class="brand"><span data-l="kind"></span><span class="appbar-project" id="appbar-project"></span></span><div class="tools"><a class="button" href="report.html" data-l="report_link"></a><button id="theme" type="button" data-l="theme"></button></div></div></header>
+<div class="shell">
+<nav class="sidebar" id="nav"><h2 class="nav-title" data-l="contents"></h2><ol class="nav-links">
+<li><a href="#overview" data-l="summary"></a></li><li><a href="#priority-section" data-l="priority"></a></li><li><a href="#coverage" data-l="coverage"></a></li><li><a href="#findings" data-l="register"></a></li><li><a href="#lists" data-l="records"></a></li>
+</ol><div class="facets"><h2 class="nav-title" data-l="severity"></h2><div id="facets"></div></div>
+<dl class="keys"><dt data-l="shortcuts" class="nav-title"></dt><dd><kbd>/</kbd> <span data-l="key_search"></span></dd><dd><kbd>j</kbd> <kbd>k</kbd> <span data-l="key_move"></span></dd><dd><kbd>Enter</kbd> <span data-l="key_toggle"></span></dd></dl></nav>
 <main>
-<header class="masthead"><span class="brand" data-l="kind"></span><div class="tools"><a class="button" href="report.html" data-l="report_link"></a><button id="theme" type="button" data-l="theme"></button></div></header>
+<section id="overview" tabindex="-1" aria-labelledby="h">
 <div class="hero"><div><div class="eyebrow" data-l="dashboard_title"></div><h1 id="h"></h1><div class="meta" id="meta"></div></div></div>
 <div class="summary-banner" id="summary"></div>
 <div class="cards" id="cards"></div>
-<section aria-labelledby="priority-heading"><div class="section-head"><div><h2 id="priority-heading" data-l="priority"></h2><p data-l="priority_note"></p></div><a href="#findings" data-l="view_all"></a></div><div class="priority-list" id="priority"></div><p class="report-note" id="queue-note"></p></section>
-<details class="panel coverage" id="coverage" open><summary><span data-l="coverage"></span><span class="small" id="coverage-count"></span></summary><p data-l="coverage_note"></p><dl class="scope-meta" id="scope-meta"></dl><div class="coverage-columns"><div id="perspectives"></div><div><h3 data-l="limitations"></h3><div id="limitations"></div></div></div></details>
+</section>
+<section id="priority-section" tabindex="-1" aria-labelledby="priority-heading"><div class="section-head"><div><h2 id="priority-heading" data-l="priority"></h2><p data-l="priority_note"></p></div><a href="#findings" data-l="view_all"></a></div><div class="priority-list" id="priority"></div><p class="report-note" id="queue-note"></p></section>
+<details class="panel coverage" id="coverage" tabindex="-1" open><summary><span data-l="coverage"></span><span class="small" id="coverage-count"></span></summary><p data-l="coverage_note"></p><dl class="scope-meta" id="scope-meta"></dl><div class="coverage-columns"><div id="perspectives"></div><div><h3 data-l="limitations"></h3><div id="limitations"></div></div></div></details>
 <details class="chart-section"><summary data-l="overview"></summary><p class="section-note" data-l="count_basis"></p><div class="grid"><div class="panel"><h3 data-l="by_severity"></h3><div id="c-sev"></div></div><div class="panel"><h3 data-l="by_category"></h3><div id="c-cat"></div></div><div class="panel"><h3 data-l="by_status"></h3><div id="c-status"></div></div></div></details>
 <section id="findings" tabindex="-1" aria-labelledby="findings-heading"><div class="section-head"><div><h2 id="findings-heading" data-l="register"></h2><p data-l="register_note"></p></div></div>
 <div class="panel filters-panel"><div class="filters">
@@ -484,9 +511,10 @@ __CSS__
 <label class="search"><span data-l="search"></span><input id="f-q" type="search"></label><label><span data-l="sort"></span><select id="f-sort"></select></label>
 </div><div class="filter-bottom"><p class="result-count" id="result-count" aria-live="polite"></p><button id="reset" type="button" data-l="reset"></button></div></div>
 <div class="tablewrap"><table class="register" role="table"><thead role="rowgroup"><tr role="row"><th scope="col" role="columnheader">ID</th><th scope="col" role="columnheader" data-l="severity"></th><th scope="col" role="columnheader" data-l="confidence"></th><th scope="col" role="columnheader" data-l="status"></th><th scope="col" role="columnheader" data-l="verdict"></th><th scope="col" role="columnheader" data-l="title_col"></th><th scope="col" role="columnheader" data-l="category"></th></tr></thead><tbody id="rows" role="rowgroup"></tbody></table></div></section>
-<div class="lists" id="lists"></div><footer class="footer" data-l="source_note"></footer>
+<div class="lists" id="lists" tabindex="-1"></div><footer class="footer" data-l="source_note"></footer>
 <noscript><p>__NOSCRIPT__ <a href="report.html">__REPORT__</a></p></noscript>
 </main>
+</div>
 <script id="data" type="application/json">__DATA__</script>
 <script>
 __JS__
