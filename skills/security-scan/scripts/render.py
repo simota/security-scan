@@ -221,6 +221,13 @@ LABELS['en'].update({'eyebrow': 'SECURITY REVIEW',
  'risk_summary_one': '1 open High / Medium finding needs attention.',
  'jump_findings': 'Jump to findings',
  'findings_register': 'Findings register',
+ 'contents': 'Contents',
+ 'nav_coverage': 'Scope and coverage',
+ 'nav_lists': 'Next steps and checks',
+ 'shortcuts': 'Keyboard',
+ 'key_search': 'Search',
+ 'key_move': 'Next / previous finding',
+ 'key_toggle': 'Show or hide details',
  'all_verdicts': 'All validations'})
 LABELS['ja'].update({'eyebrow': 'SECURITY REVIEW',
  'report_note': '静的レビュー · 読み取り専用 · オフラインレポート',
@@ -286,6 +293,13 @@ LABELS['ja'].update({'eyebrow': 'SECURITY REVIEW',
  'risk_summary': '未対応の High / Medium が {n} 件あります。',
  'jump_findings': '指摘一覧へ移動',
  'findings_register': '指摘一覧',
+ 'contents': '目次',
+ 'nav_coverage': '診断範囲と確認状況',
+ 'nav_lists': '次の対応と確認済み事項',
+ 'shortcuts': 'キー操作',
+ 'key_search': '検索',
+ 'key_move': '次・前の指摘',
+ 'key_toggle': '詳細の表示・非表示',
  'all_verdicts': 'すべての妥当性'})
 
 
@@ -2301,7 +2315,7 @@ def to_pdf(html_path, pdf_path, failures=None, timeout=None):
 
 
 DASHBOARD = r"""<!doctype html>
-<html lang="__LANG__">
+<html lang="__LANG__" class="app-shell">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -2312,26 +2326,34 @@ __STYLE__
 </head>
 <body>
 <a class="skip" href="#findings" data-l="jump_findings"></a>
+<header class="appbar"><div class="appbar-in"><span class="brand"><span data-l="eyebrow"></span><span class="appbar-project" id="appbar-project"></span></span><div class="tools"><a class="button" href="assessment.html" data-l="assessment_link"></a><button id="theme" type="button" data-l="theme"></button></div></div></header>
+<div class="shell">
+<nav class="sidebar" id="nav"><h2 class="nav-title" data-l="contents"></h2><ol class="nav-links">
+<li><a href="#overview" data-l="summary"></a></li><li><a href="#priority-section" data-l="priority"></a></li><li><a href="#decisions-section" data-l="decisions"></a></li><li><a href="#coverage" data-l="nav_coverage"></a></li><li><a href="#findings" data-l="findings_register"></a></li><li><a href="#lists" data-l="nav_lists"></a></li>
+</ol><div class="facets"><h2 class="nav-title" data-l="severity"></h2><div id="facets"></div></div>
+<dl class="keys"><dt data-l="shortcuts" class="nav-title"></dt><dd><kbd>/</kbd> <span data-l="key_search"></span></dd><dd><kbd>j</kbd> <kbd>k</kbd> <span data-l="key_move"></span></dd><dd><kbd>Enter</kbd> <span data-l="key_toggle"></span></dd></dl></nav>
 <main>
-<header class="masthead"><span class="brand" data-l="eyebrow"></span><div class="tools"><a class="button" href="assessment.html" data-l="assessment_link"></a><button id="theme" type="button" data-l="theme"></button></div></header>
+<section id="overview" tabindex="-1" aria-labelledby="h">
 <div class="hero"><div><div class="eyebrow" data-l="dash_title"></div><h1 id="h"></h1><div class="meta" id="meta"></div></div><div class="hero-aside" data-l="report_note"></div></div>
 <div class="summary-banner" id="summary"></div>
 <div class="cards" id="cards"></div><p class="report-note" data-l="counts_note"></p>
 <div class="cards part-cards" id="part-cards"></div><p class="report-note" data-l="part_note"></p>
-<section aria-labelledby="priority-heading"><div class="section-head"><div><h2 id="priority-heading" data-l="priority"></h2><p data-l="priority_note"></p></div><a href="#findings" data-l="view_all"></a></div><p class="verify-legend" id="verify-legend" hidden></p><div id="priority"></div><p class="section-note" id="queue-note"></p></section>
-<section class="panel" id="decisions-section" aria-labelledby="decisions-heading"><h2 id="decisions-heading" data-l="decisions"></h2><div id="decisions"></div></section>
+</section>
+<section id="priority-section" tabindex="-1" aria-labelledby="priority-heading"><div class="section-head"><div><h2 id="priority-heading" data-l="priority"></h2><p data-l="priority_note"></p></div><a href="#findings" data-l="view_all"></a></div><p class="verify-legend" id="verify-legend" hidden></p><div id="priority"></div><p class="section-note" id="queue-note"></p></section>
+<section class="panel" id="decisions-section" tabindex="-1" aria-labelledby="decisions-heading"><h2 id="decisions-heading" data-l="decisions"></h2><div id="decisions"></div></section>
 <section class="panel" id="verification-summary"></section>
 __EXPERT__
 __THREE_PASS__
-<details class="panel coverage" id="coverage" open><summary><span data-l="coverage_heading"></span><span class="small" id="coverage-count"></span></summary><p data-l="coverage_note"></p><dl class="scope-meta" id="scope-meta"></dl><div class="coverage-columns"><section><h3 data-l="limitations"></h3><div id="limitations"></div></section><section><h3 data-l="perspectives"></h3><div id="perspectives"></div></section></div></details>
+<details class="panel coverage" id="coverage" tabindex="-1" open><summary><span data-l="coverage_heading"></span><span class="small" id="coverage-count"></span></summary><p data-l="coverage_note"></p><dl class="scope-meta" id="scope-meta"></dl><div class="coverage-columns"><section><h3 data-l="limitations"></h3><div id="limitations"></div></section><section><h3 data-l="perspectives"></h3><div id="perspectives"></div></section></div></details>
 <details class="chart-section"><summary data-l="overview"></summary><p class="section-note" data-l="count_basis"></p><div class="grid"><div class="panel"><h3 data-l="by_sev"></h3><div id="c-sev"></div></div><div class="panel"><h3 data-l="by_conf"></h3><div id="c-conf"></div></div><div class="panel"><h3 data-l="by_cat"></h3><div id="c-cat"></div></div><div class="panel"><h3 data-l="by_status"></h3><div id="c-status"></div></div><div class="panel"><h3 data-l="by_verdict"></h3><div id="c-verdict"></div><p class="section-note" data-l="excluded_note"></p></div></div></details>
-<section id="findings" aria-labelledby="findings-heading"><div class="section-head"><div><h2 id="findings-heading" data-l="findings_register"></h2><p data-l="findings_note"></p></div></div>
+<section id="findings" tabindex="-1" aria-labelledby="findings-heading"><div class="section-head"><div><h2 id="findings-heading" data-l="findings_register"></h2><p data-l="findings_note"></p></div></div>
 <div class="panel filters-panel"><div class="filters">
 <label><span data-l="record_set"></span><select id="f-scope"></select></label><label><span data-l="part"></span><select id="f-part"></select></label><label><span data-l="severity"></span><select id="f-sev"></select></label><label><span data-l="confidence"></span><select id="f-conf"></select></label><label><span data-l="category"></span><select id="f-cat"></select></label><label><span data-l="status"></span><select id="f-status"></select></label><label><span data-l="verdict"></span><select id="f-verdict"></select></label><label><span data-l="sort"></span><select id="f-sort"></select></label><label class="search"><span data-l="search"></span><input id="f-q" type="search"></label></div><div class="filter-bottom"><p class="result-count" id="result-count" role="status" aria-live="polite"></p><button type="button" id="reset" data-l="reset"></button></div></div>
 <div class="tablewrap"><table class="register"><thead><tr><th scope="col">ID</th><th scope="col" data-l="severity"></th><th scope="col" data-l="confidence"></th><th scope="col" data-l="status"></th><th scope="col" data-l="verdict"></th><th scope="col" data-l="title_col"></th><th scope="col" data-l="category"></th></tr></thead><tbody id="rows"></tbody></table></div></section>
-<div class="lists" id="lists"></div><footer class="footer" data-l="source_note"></footer>
+<div class="lists" id="lists" tabindex="-1"></div><footer class="footer" data-l="source_note"></footer>
 <noscript><p>__NOSCRIPT__ <a href="assessment.html">__ASSESSMENT__</a></p></noscript>
 </main>
+</div>
 <script id="data" type="application/json">__DATA__</script>
 <script>
 (function(){
@@ -2352,7 +2374,7 @@ function ownValue(map,key){return map&&Object.prototype.hasOwnProperty.call(map,
 function action(f){var proof=R.verification[f.id],workflow=ownValue(R.workflows,f.id);return f.status==='Open'&&f.verdict==='Valid'&&f.confidence==='Confirmed'&&proof&&['static_supported','runtime_supported'].indexOf(proof.level)>=0&&(!workflow||workflow.status==='complete')?'fix_now':'verify_first';}
 function count(fs,key){var c=Object.create(null);fs.forEach(function(f){c[f[key]]=(c[f[key]]||0)+1;});return c;}
 function listInto(box,items,empty){if(!items.length){box.appendChild(el('p',{'class':'muted'},empty));return;}var ul=el('ul');items.forEach(function(x){ul.appendChild(el('li',null,x));});box.appendChild(ul);}
-document.title=L.dash_title+' - '+D.meta.project;byId('h').textContent=D.meta.project;
+document.title=L.dash_title+' - '+D.meta.project;byId('h').textContent=D.meta.project;byId('appbar-project').textContent=D.meta.project;byId('nav').setAttribute('aria-label',L.contents);
 byId('meta').textContent=[D.meta.date,D.meta.assessor].filter(Boolean).join(' · ');
 document.querySelectorAll('[data-l]').forEach(function(e){e.textContent=L[e.getAttribute('data-l')];});
 byId('theme').onclick=function(){var root=document.documentElement,dark=root.dataset.theme?root.dataset.theme==='dark':window.matchMedia('(prefers-color-scheme: dark)').matches;root.dataset.theme=dark?'light':'dark';};
@@ -2383,6 +2405,8 @@ var q=byId('f-q'),searchTimer=null;q.placeholder=L.search;q.oninput=function(){c
 function v(id){return byId(id).value;}
 function reset(){['f-part','f-sev','f-conf','f-cat','f-status','f-verdict'].forEach(function(id){byId(id).value='';});byId('f-scope').value='included';byId('f-sort').value='priority';q.value='';}
 byId('reset').onclick=function(){reset();draw();};
+// Sidebar facets: included counts per severity; a press filters the register, a second press clears it.
+var sevCount=count(F,'severity'),facetButtons=SEV.map(function(s){var b=el('button',{type:'button','class':'facet','data-sev':s,'aria-controls':'rows','aria-pressed':'false'});b.appendChild(el('span',{'class':'facet-name '+s},s));b.appendChild(el('span',{'class':'facet-n'},String(sevCount[s]||0)));b.onclick=function(){var on=b.getAttribute('aria-pressed')==='true';byId('f-scope').value='included';byId('f-sev').value=on?'':s;draw();byId('findings').scrollIntoView();};byId('facets').appendChild(b);return b;});
 function fence(text){var runs=String(text).match(/`+/g)||[],n=Math.max.apply(null,runs.map(function(r){return r.length;}).concat([2]))+1;return Array(n+1).join('`');}
 function oneLine(v){return String(v).replace(/\s*[\r\n]+\s*/g,' ');}
 function fenced(v){var fc=fence(v);return fc+'text\n'+v+'\n'+fc;}
@@ -2413,6 +2437,7 @@ function searchText(f){if(searchCache.has(f))return searchCache.get(f);var val=f
 function draw(){clearTimeout(searchTimer);var tb=byId('rows');tb.textContent='';var term=q.value.trim().toLowerCase(),scope=v('f-scope');var pool=scope==='all'?ALL:ALL.filter(function(f){return scope==='excluded'?excluded(f):!excluded(f);});var shown=pool.filter(function(f){return (!v('f-part')||f.part===v('f-part'))&&(!v('f-sev')||f.severity===v('f-sev'))&&(!v('f-conf')||f.confidence===v('f-conf'))&&(!v('f-cat')||f.category===v('f-cat'))&&(!v('f-status')||f.status===v('f-status'))&&(!v('f-verdict')||f.verdict===v('f-verdict'))&&(!term||searchText(f).indexOf(term)>=0);});
 shown.sort(function(a,b){var status=v('f-sort')==='priority'?Number(a.status!=='Open')-Number(b.status!=='Open'):0;return status||SEV.indexOf(a.severity)-SEV.indexOf(b.severity)||(v('f-sort')==='priority'?Number(action(a)!=='fix_now')-Number(action(b)!=='fix_now'):0)||Number(a.part==='deps')-Number(b.part==='deps')||(String(a.id)<String(b.id)?-1:String(a.id)>String(b.id)?1:0);});
 byId('result-count').textContent=fmt(L.showing,{shown:shown.length,total:pool.length});
+facetButtons.forEach(function(b){b.setAttribute('aria-pressed',String(scope==='included'&&v('f-sev')===b.getAttribute('data-sev')));});
 if(!shown.length){var empty=el('tr'),td=el('td',{colspan:7,'class':'empty'},pool.length?L.no_matches:L.no_records);empty.appendChild(td);tb.appendChild(empty);return;}
 shown.forEach(function(f){var anchor=D.anchors[f.id],tr=el('tr',{'class':'row',id:anchor}),dt=details(f,anchor);var labels=['ID',L.severity,L.confidence,L.status,L.verdict,L.title_col,L.category];var values=[f.id,null,f.confidence,statusText(f),f.verdict,null,f.category],button;
 values.forEach(function(value,i){var cell=el('td',{'data-label':labels[i]},value);if(i===1)cell.appendChild(badge(f));if(i===5){button=el('button',{type:'button','class':'finding-toggle','aria-expanded':String(!dt.hidden),'aria-controls':dt.id},f.title);button.appendChild(el('span',{'class':'toggle-label'},dt.hidden?L.expand:L.collapse));cell.appendChild(button);cell.appendChild(el('code',{'class':'location'},f.location));cell.appendChild(el('span',{'class':'verification-level'},D.verification_views[f.id].level));var workflowView=ownValue(D.workflow_views,f.id);if(workflowView){cell.appendChild(el('span',{'class':'workflow-status'},workflowView.status));cell.appendChild(el('span',{'class':'workflow-next'},L.w_next+': '+workflowView.next_stage));}}tr.appendChild(cell);});
@@ -2421,6 +2446,13 @@ button.onclick=function(e){e.stopPropagation();toggle();};tr.onclick=function(e)
 function openHash(){var anchor=window.location.hash.slice(1),f=ALL.find(function(x){return D.anchors[x.id]===anchor;});if(!f)return;expanded.add(anchor);draw();if(!byId(anchor)){reset();if(excluded(f))byId('f-scope').value='all';expanded.add(anchor);draw();}var row=byId(anchor);row.scrollIntoView({block:'start'});row.querySelector('button').focus({preventScroll:true});}
 document.addEventListener('click',function(e){var a=e.target.closest('a[href^="#finding-"]');if(a&&a.getAttribute('href')===window.location.hash){e.preventDefault();openHash();}});
 window.addEventListener('hashchange',openHash);draw();if(window.location.hash)openHash();
+// Keyboard: "/" searches, j/k step through the visible findings (Enter on the focused title toggles it), Escape clears the search.
+document.addEventListener('keydown',function(e){if(e.altKey||e.ctrlKey||e.metaKey||e.isComposing)return;var t=e.target;if(t&&t.closest&&t.closest('input,select,textarea')){if(e.key==='Escape'&&t===q&&q.value){q.value='';draw();}return;}
+if(e.key==='/'){e.preventDefault();q.focus();}else if(e.key==='j'||e.key==='k'){var toggles=Array.from(byId('rows').querySelectorAll('button.finding-toggle')),current=document.activeElement&&document.activeElement.closest('tr.row');if(!toggles.length)return;var at=toggles.findIndex(function(b){return b.closest('tr.row')===current;}),next=at<0?0:Math.min(toggles.length-1,Math.max(0,at+(e.key==='j'?1:-1)));e.preventDefault();toggles[next].focus();toggles[next].closest('tr.row').scrollIntoView({block:'nearest'});}});
+// The register's column heads pin below the filter bar, whose height depends on the language and viewport.
+if(window.ResizeObserver)new window.ResizeObserver(function(entries){byId('findings').style.setProperty('--filters-h',entries[0].target.offsetHeight+'px');}).observe(document.querySelector('.filters-panel'));
+// Mark the section in view in the sidebar contents.
+var navLinks=Array.from(byId('nav').querySelectorAll('a[href^="#"]'));if(window.IntersectionObserver){var visible=new Map(),spy=new window.IntersectionObserver(function(entries){entries.forEach(function(en){visible.set(en.target.id,en.isIntersecting);});var first=navLinks.find(function(a){return visible.get(a.getAttribute('href').slice(1));});navLinks.forEach(function(a){if(a===first)a.setAttribute('aria-current','location');else a.removeAttribute('aria-current');});},{rootMargin:'-35% 0px -60% 0px'});navLinks.forEach(function(a){var s=byId(a.getAttribute('href').slice(1));if(s)spy.observe(s);});}
 listInto(byId('decisions'),D.decisions,L.not_recorded);
 ['next_steps','checked_ok'].forEach(function(k){var p=el('section',{'class':'panel'});p.appendChild(el('h2',null,L[k]));listInto(p,D[k],L.not_recorded);byId('lists').appendChild(p);});
 })();
@@ -2451,6 +2483,11 @@ DASHBOARD_CSS = """
 .card .n .pair{display:inline-block;white-space:nowrap;margin-right:18px}
 .card .n .u{font-family:var(--sans);font-size:11px;letter-spacing:.06em;color:var(--muted);margin-left:6px}
 td .verification-level{font-family:var(--sans);font-size:11px;font-weight:400;color:var(--muted);margin-top:4px}
+/* Application shell: the register has eight selects plus search, so the pinned bar takes two rows. */
+.app-shell #decisions-section:focus{outline:0}
+.app-shell .filters{grid-template-columns:minmax(0,2fr) repeat(4,minmax(0,1fr))}
+@media(max-width:1099px){.app-shell .filters{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:850px){.app-shell .filters{grid-template-columns:repeat(2,minmax(0,1fr))}}
 """
 DASHBOARD = DASHBOARD.replace("__STYLE__", kit_style.dashboard_css() + DASHBOARD_CSS, 1)
 
