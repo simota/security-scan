@@ -168,8 +168,11 @@ totals include `Open`,
 validation distribution includes all records for traceability. Filters affect
 only the finding register, with a visible result count and a reset button.
 Choose Included, Excluded only, or All records, and open details with a keyboard
-or a direct finding link. Missing coverage is unknown, and zero findings is
-never presented as a guarantee of security.
+or a direct finding link. The dashboard uses scan-report-kit's application
+shell: a sticky app bar, a contents sidebar with per-severity counts that filter
+the register, pinned register filters, and the keys `/` (search), `j`/`k` (next
+or previous finding) and Enter (show or hide details). Missing coverage is
+unknown, and zero findings is never presented as a guarantee of security.
 
 Each finding carries its evidence: code findings embed the lines around
 `path:line` (with `--repo`, best-effort redaction) and link to the
