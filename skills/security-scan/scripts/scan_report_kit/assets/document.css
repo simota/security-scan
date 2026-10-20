@@ -95,6 +95,13 @@ tr{break-inside:avoid;page-break-inside:avoid}
 .finding-context strong{font:600 7.6pt/1.4 var(--sans);letter-spacing:.05em;color:var(--muted);margin-right:1.5mm}
 .finding-field{margin:0 0 3mm;break-inside:auto;page-break-inside:auto;orphans:3;widows:3}
 .finding-field h4{margin-bottom:1mm}
+.finding-group{margin:4mm 0 0;padding-top:1.5mm;border-top:.6pt solid var(--rule)}
+.finding-group>h4{color:var(--ink);letter-spacing:.12em;margin:0 0 1.5mm}
+.finding-field h5{font:700 7.4pt/1.4 var(--sans);letter-spacing:.06em;color:var(--muted);margin:2.5mm 0 1mm}
+.field-table{table-layout:auto;margin:1mm 0 2mm;border-top:.6pt solid var(--rule);border-bottom:.6pt solid var(--rule)}
+.field-table th,.field-table td{padding:1.1mm 2mm;white-space:pre-wrap}
+.field-table tbody th{width:22%;font-weight:600;border-bottom:0}
+.field-table tbody tr+tr th{border-top:.3pt solid var(--hair)}
 .prose{white-space:pre-wrap;overflow-wrap:anywhere;word-wrap:break-word}
 .empty-value{color:var(--muted);font-style:italic}
 .snippet{counter-increment:listing;margin:1mm 0 3.5mm;padding:2mm 0 2mm 3mm;border:0;border-left:.6pt solid var(--rule);background:none;color:var(--ink);font:7.6pt/1.55 var(--mono);white-space:pre-wrap;overflow:visible;overflow-wrap:anywhere;word-wrap:break-word;word-break:break-all;max-width:100%;break-inside:auto;page-break-inside:auto}

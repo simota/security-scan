@@ -71,6 +71,12 @@ def _stop(proc):
             os.killpg(proc.pid, sig)
         except ProcessLookupError:
             pass
+        except PermissionError:
+            # macOS reports EPERM, not ESRCH, while the group's remaining
+            # members are exiting. A leader still running is signalled
+            # directly, so a refusal can never leave the wait below unbounded.
+            if proc.poll() is None:
+                proc.send_signal(sig)
 
     if grouped:
         stop_group(signal.SIGTERM)
