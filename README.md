@@ -284,6 +284,7 @@ the bundled synthetic data and needs no network.
 
 ```sh
 work=$(mktemp -d "${TMPDIR:-/tmp}/security-scan-repro.XXXXXX")
+work=$(cd "$work" && pwd -P)
 python3 skills/security-scan/scripts/reproduction.py generate \
   examples/findings.workflow.sample.json --finding F-001 \
   --plan examples/reproduction.plan.sample.json --out "$work/bundle"

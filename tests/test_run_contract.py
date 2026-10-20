@@ -35,7 +35,8 @@ class RunContractTests(unittest.TestCase):
         cls.renderer = import_module(SCRIPTS / "render.py", "tested_renderer_contract")
 
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="security-scan-contract-"))
+        # Evidence roots must be physical paths: /tmp and $TMPDIR are symlinks on macOS.
+        self.tmp = Path(tempfile.mkdtemp(prefix="security-scan-contract-")).resolve()
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.repo = self.tmp / "app"
         (self.repo / "src").mkdir(parents=True)

@@ -39,6 +39,7 @@ security.
 
 ```sh
 work=$(mktemp -d "${TMPDIR:-/tmp}/security-scan-repro.XXXXXX")
+work=$(cd "$work" && pwd -P)
 python3 skills/security-scan/scripts/reproduction.py generate \
   examples/findings.workflow.sample.json --finding F-001 \
   --plan examples/reproduction.plan.sample.json --out "$work/bundle"
@@ -50,7 +51,9 @@ python3 skills/security-scan/scripts/reproduction.py run \
 ```
 
 Use new output directories with existing parent directories. Keep results outside
-the bundle; neither output path may contain the other. Symlinks are rejected. Review
+the bundle; neither output path may contain the other. Symlinks are rejected,
+including in parent directories, so the example resolves `$work` with `pwd -P`
+(`/tmp` and `$TMPDIR` are symlinks on macOS). Review
 the manifest, generated scripts and case instructions before executing them.
 The `run` entry point rechecks current findings and trusted template code before
 execution, then checks again before publishing evidence. `verify` provides the
