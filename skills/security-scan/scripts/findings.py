@@ -40,9 +40,9 @@ counted), so a refused write loses at most that batch.
 severities are final: F-001.. by severity, then path and line, with
 FalsePositive / NotApplicable findings after the rest. Every F-* reference in
 the record (ids, profile lists, prose) follows the new numbers. It refuses,
-writing nothing, once a finding holds a verification_workflow journal or when
-the move would change captured evidence, test runs or the integrity policy,
-since their digests pin the old IDs.
+writing nothing, when an F- id is not F-NNN, once a finding holds a
+verification_workflow journal, or when the move would change captured
+evidence, test runs or the integrity policy, since their digests pin the old IDs.
 
 Exit codes: 0 merged or renumbered, 1 a fragment was refused or the record
 cannot be renumbered (reason on stderr), 2 unreadable input or schema error.
@@ -301,7 +301,8 @@ def merge(base, fragment):
     return base
 
 
-CODE_REF = re.compile(r"\bF-[0-9]{3}\b")
+# ASCII word boundaries: Unicode \b treats kana and kanji as word characters, so "F-002を" would not match.
+CODE_REF = re.compile(r"\bF-[0-9]{3}\b", re.ASCII)
 # Digests over these sections (evidence_capture.py, evidence_integrity.py) pin the IDs they name.
 SEALED = ("assessment", "evidence", "test_runs", "evidence_integrity")
 
@@ -332,6 +333,9 @@ def renumber(data, mapping):
 
 
 def renumber_problems(before, after):
+    odd = [f["id"] for f in before["findings"] if f["id"].startswith("F-") and not CODE_REF.fullmatch(f["id"])]
+    if odd:
+        return [f"{', '.join(odd)}: not an F-NNN id; renumber cannot follow its references"]
     journals = [f["id"] for f in before["findings"] if "verification_workflow" in f]
     if journals:
         return [f"{', '.join(journals)}: a verification_workflow journal pins the current IDs; "

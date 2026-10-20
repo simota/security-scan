@@ -97,6 +97,21 @@ class FindingsMergeTests(unittest.TestCase):
         self.assertEqual(self.renumber(), 0)
         self.assertEqual(self.out.read_bytes(), before)
 
+    def test_renumber_follows_references_that_touch_japanese_text(self):
+        findings = [dict(FINDING, id="F-001", severity="Low"), dict(FINDING, id="F-002")]
+        self.assertEqual(self.merge(self.fragment("a.json", {
+            "meta": META, "findings": findings, "next_steps": ["F-002を先に修正し、次にF-001を確認する"]})), 0)
+        self.assertEqual(self.renumber(), 0)
+        data = json.loads(self.out.read_text(encoding="utf-8"))
+        self.assertEqual(data["next_steps"], ["F-001を先に修正し、次にF-002を確認する"])
+
+    def test_renumber_refuses_ids_outside_the_f_nnn_form(self):
+        self.out.write_text(json.dumps({"meta": META, "findings": [
+            dict(FINDING, id="F-01"), dict(FINDING, id="F-002", severity="Low")]}), encoding="utf-8")
+        before = self.out.read_bytes()
+        self.assertEqual(self.renumber(), 1)
+        self.assertEqual(self.out.read_bytes(), before)
+
     def test_renumber_refuses_when_digests_pin_the_ids(self):
         mapping = {"F-001": "F-002", "F-002": "F-001"}
         data = {"findings": [dict(FINDING, id="F-001"), dict(FINDING, id="F-002", verification_workflow={})]}
