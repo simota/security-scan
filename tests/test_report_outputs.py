@@ -558,6 +558,34 @@ class ReportOutputTests(unittest.TestCase):
         self.assertEqual(errors, [])
 
     @unittest.skipUnless(os.environ.get("SECURITY_SCAN_BROWSER_TEST") == "1", "opt-in Chromium interaction test")
+    def test_browser_severity_facet_shows_the_rows_it_counts(self):
+        page = self.start_browser()
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        data = self.report([self.finding("F-001"), self.finding("D-001"), self.finding("D-002", severity="Low")])
+        page.set_content(self.renderer.render_dashboard(data, self.renderer.LABELS["en"], "en"),
+                         wait_until="domcontentloaded")
+        facet = page.locator(".facet[data-sev='High']")
+        self.assertEqual(facet.locator(".facet-n").inner_text(), "2")
+        # Other filters left over from the register would hide counted rows.
+        page.select_option("#f-part", "code")
+        page.fill("#f-q", "no such text")
+        facet.click()
+        self.assertEqual(facet.get_attribute("aria-pressed"), "true")
+        self.assertEqual(sorted(page.locator("tr.row td:first-child").all_inner_texts()), ["D-001", "F-001"])
+        # Narrowing again leaves the facet's count behind, so it is no longer pressed.
+        page.select_option("#f-part", "deps")
+        self.assertEqual(facet.get_attribute("aria-pressed"), "false")
+        page.select_option("#f-sort", "severity")
+        facet.click()
+        self.assertEqual(page.locator("tr.row").count(), 2)
+        self.assertEqual(page.locator("#f-sort").input_value(), "severity")
+        facet.click()
+        self.assertEqual(facet.get_attribute("aria-pressed"), "false")
+        self.assertEqual(page.locator("tr.row").count(), 3)
+        self.assertEqual(errors, [])
+
+    @unittest.skipUnless(os.environ.get("SECURITY_SCAN_BROWSER_TEST") == "1", "opt-in Chromium interaction test")
     def test_browser_copy_keeps_record_text_inert_focus_and_filters(self):
         page = self.start_browser()
         errors = []
