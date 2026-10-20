@@ -14,6 +14,7 @@ REQUIRED_TESTS = frozenset({
     "test_report_outputs.ReportOutputTests.test_browser_copies_finding_details_as_markdown",
     "test_report_outputs.ReportOutputTests.test_browser_copy_keeps_record_text_inert_focus_and_filters",
     "test_report_outputs.ReportOutputTests.test_browser_parts_split_cards_priority_and_register_filter",
+    "test_report_outputs.ReportOutputTests.test_browser_severity_facet_shows_the_rows_it_counts",
     "test_review_hardening.ReviewHardeningTests.test_dashboard_draws_hostile_text_in_real_browser",
     "test_ci_report_artifacts.ReportArtifactTests.test_english_sample_pdf",
     "test_ci_report_artifacts.ReportArtifactTests.test_japanese_sample_pdf",
