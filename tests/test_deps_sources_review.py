@@ -146,6 +146,91 @@ class DepsSourcesReviewTests(unittest.TestCase):
             ("pyproject.toml:6", "python dependency evil is fetched outside the registry (URL)"),
             ("pyproject.toml:9", "python dependency tool is fetched outside the registry (URL)")])
 
+    def test_piped_shell_forms_and_arg_defaults_in_dockerfiles(self):
+        self.write("Dockerfile", "\n".join((
+            "ARG BASE", "ARG NODE=node:20",
+            "FROM ${BASE:-node} AS one", "FROM ${NODE} AS two", "FROM ${MISSING:-python:3.12}",
+            "RUN curl -fsSL https://example.com/install.sh \\", "    # fetch the installer", "    | bash -",
+            "RUN curl https://example.com/i | sudo -E bash", "RUN wget -qO- https://example.com/i | /bin/sh",
+            "RUN apt-get install -y curl | tee log", "RUN echo hi | shasum", "")))
+        piped = "remote script piped into a shell during build"
+        self.assertEqual(sorted(self.findings()), [
+            ("Dockerfile:10", piped), ("Dockerfile:3", "base image node is not pinned"),
+            ("Dockerfile:6", piped), ("Dockerfile:9", piped)])
+
+    def test_dockerfile_comment_ending_in_backslash_does_not_swallow_the_next_instruction(self):
+        self.write("Dockerfile", "# a note \\\nFROM node\n")
+        self.assertEqual(self.findings(), [("Dockerfile:2", "base image node is not pinned")])
+
+    def test_multiline_gem_declarations(self):
+        self.write("Gemfile", "\n".join((
+            'source "https://rubygems.org"', '', 'gem "evil",', '    git: "https://github.com/attacker/evil",',
+            '    branch: "main"', 'gem "other",', '  github: "attacker/other"', 'gem "rails",', '  "~> 7.1"',
+            'gem "single", git: "https://github.com/attacker/single"', '')))
+        self.write("Gemfile.lock", "")
+        title = "gem fetched outside rubygems (see source location)"
+        self.assertEqual(sorted(self.findings()), [("Gemfile:10", title), ("Gemfile:3", title), ("Gemfile:6", title)])
+
+    def test_composer_floating_alternatives_and_stability_case(self):
+        self.write("composer.lock", {"packages": []})
+        self.write("composer.json", {"minimum-stability": "rc", "require": {
+            "php": ">=8.1", "a/a": "*@beta", "b/b": "^1.0 || *", "c/c": "2.x-dev", "d/d": "^1.2@RC",
+            "e/e": "1.0.*", "g/g": "^2.0|^3.0", "h/h": ">=1.0 <2.0"}})
+        titles = [title for _, title in self.findings()]
+        self.assertEqual(sorted(titles), [
+            "composer dependency a/a floats (*@beta)", "composer dependency b/b floats (^1.0 || *)",
+            "composer dependency c/c floats (2.x-dev)", "composer minimum-stability is rc without prefer-stable"])
+
+    def test_package_source_spellings_and_plaintext_python_and_composer_sources(self):
+        self.write("cfg/pip.conf", "[global]\nEXTRA_INDEX_URL = https://internal.example/simple\n"
+                   "find_links: https://files.example/wheels\ntrusted_host = internal.example\n"
+                   "index-url = https://pypi.org/simple\n")
+        self.write("Pipfile", '[[source]]\nurl = "http://pypi.internal.example/simple"\nverify_ssl = false\n')
+        self.write("Pipfile.lock", "{}")
+        self.write("pyproject.toml", '[project.urls]\nHomepage = "http://example.com"\n'
+                   '[[tool.poetry.source]]\nname = "x"\nurl = "http://pypi.internal.example/simple"\n')
+        self.write("poetry.lock", "")
+        self.write("composer.json", {"homepage": "http://example.com", "config": {"secure-http": False,
+                                                                               "disable-tls": True},
+                                     "repositories": [{"type": "composer", "url": "http://packages.example.com"}]})
+        self.write("composer.lock", {"packages": []})
+        found = [f for f in self.findings() if "composer repository of type" not in f[1]]
+        self.assertEqual(sorted(found), [
+            ("Pipfile:2", "Pipfile fetches code over plaintext http://"),
+            ("Pipfile:3", "Pipfile disables TLS verification for a package source"),
+            ("cfg/pip.conf:2", "pip config adds a second index beside PyPI"),
+            ("cfg/pip.conf:3", "pip --find-links adds a package source beside the index"),
+            ("cfg/pip.conf:4", "pip.conf disables TLS verification for a package source"),
+            ("composer.json:1", "composer.json allows package downloads over plaintext http:// (secure-http: false)"),
+            ("composer.json:1", "composer.json disables TLS verification for a package source"),
+            ("composer.json:1", "composer.json fetches code over plaintext http://"),
+            ("pyproject.toml:5", "pyproject.toml fetches code over plaintext http://")])
+
+    def test_npm_aliases_dist_tags_and_bare_outside_paths(self):
+        (self.root / "libs" / "inside").mkdir(parents=True)
+        self.write("app/package-lock.json", {"lockfileVersion": 3, "packages": {}})
+        self.write("app/package.json", {"dependencies": {
+            "a": "npm:lodash@*", "b": "npm:lodash", "c": "npm:@scope/x@latest", "d": "next",
+            "e": "../../outside/lib", "f": "/opt/shared/lib", "g": "~/lib", "h": "portal:/opt/x",
+            "ok1": "npm:lodash@^4.17.21", "ok2": "v1.2.3", "ok3": "1.x", "ok4": "../libs/inside",
+            "ok5": "workspace:*", "ok6": "^1.0.0", "ok7": "file:../libs/inside", "ok8": "portal:../libs/inside"}})
+        titles = sorted(title for _, title in self.findings() if "integrity" not in title)
+        self.assertEqual(titles, [
+            "npm dependency a floats to any version (npm:lodash@*)",
+            "npm dependency b floats to any version (npm:lodash)",
+            "npm dependency c floats to any version (npm:@scope/x@latest)",
+            "npm dependency d floats to any version (next)",
+            "npm dependency e is fetched outside the registry (../../outside/lib)",
+            "npm dependency f is fetched outside the registry (/opt/shared/lib)",
+            "npm dependency g is fetched outside the registry (~/lib)",
+            "npm dependency h is fetched outside the registry (portal:/opt/x)"])
+
+    def test_docker_container_action_image(self):
+        self.write("a/action.yml", "name: x\nruns:\n  using: docker\n  image: docker://alpine:3.19\n")
+        self.write("b/action.yml", "name: y\nruns:\n  using: docker\n  image: Dockerfile\n")
+        self.write("c/action.yaml", "name: z\nruns:\n  using: docker\n  image: 'docker://alpine@sha256:%s'\n" % ("0" * 64))
+        self.assertEqual(self.findings(), [("a/action.yml:4", "workflow container image alpine:3.19 is not pinned to a digest")])
+
     def test_composer_lock_inventory_keeps_only_version_values(self):
         nested = {}
         for _ in range(900):  # deep enough to overflow safe_output on Python < 3.12

@@ -672,15 +672,18 @@ def mapping(value):
     return value if isinstance(value, dict) else {}
 
 
-NPM_EXTERNAL_SOURCE = re.compile(r"^(git(\+\w+)?:|git@|github:|gitlab:|bitbucket:|gist:|https?:|file:|link:)"
-                                 r"|^[\w.-]+/[\w.-]+(#.*)?$")
+# A path spec reaching here (bare ../ / ~/ paths included) already failed npm_local_path: it leaves the checkout.
+NPM_EXTERNAL_SOURCE = re.compile(r"^(git(\+\w+)?:|git@|github:|gitlab:|bitbucket:|gist:|https?:|file:|link:|portal:)"
+                                 r"|^(\.{1,2}/|/|~/)|^[\w.-]+/[\w.-]+(#.*)?$")
 
 
 def npm_floating(spec):
-    """True when any alternative of an npm range has no upper bound."""
+    """True when any alternative of an npm range has no upper bound, or names a dist-tag."""
     for alternative in spec.split("||"):
         parts = alternative.split()
-        if not parts or any(x.lower() in ("*", "x", "latest") for x in parts):
+        # A dist-tag (latest, next, beta) moves with every publish; v1.2.3 and x-ranges are versions.
+        if not parts or any(x.lower() in ("*", "x", "latest") for x in parts) or (
+                len(parts) == 1 and re.fullmatch(r"(?!v?\d)(?![xX*](?:\.[xX*\d]+)*$)[A-Za-z][\w.-]*", parts[0])):
             return True
         if (any(x.startswith(">") for x in parts) and not any(x.startswith("<") for x in parts)
                 and " - " not in alternative):
@@ -690,7 +693,7 @@ def npm_floating(spec):
 
 def npm_local_path(c, manifest, spec):
     """A relative file:/link: or ./ path that stays inside this checkout is first-party code."""
-    m = re.match(r"(file:|link:)?(.*)$", spec, re.S)
+    m = re.match(r"(file:|link:|portal:)?(.*)$", spec, re.S)
     if "\0" in spec or not (m[2] and not re.match(r"[/\\~]|[A-Za-z][\w+.-]*:", m[2]) if m[1] else re.match(r"\.{1,2}/", m[2])):
         return False
     # realpath follows in-checkout symlinks to their targets, as npm does.
@@ -704,16 +707,20 @@ def check_npm(c, p):
         return
     for section in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
         for name, spec in mapping(data.get(section)).items():
-            spec = str(spec).strip()
+            declared = spec = str(spec).strip()
+            # An alias (npm:real-name@range) installs real-name at range; no range means latest.
+            alias = re.match(r"npm:(?:@[^/@\s]+/)?[^@\s]+(?:@(.*))?$", spec, re.S)
+            if alias:
+                spec = alias[1] if alias[1] is not None else "latest"
             ln = line_of(text, f'"{name}"')
             if npm_local_path(c, p, spec):
                 continue
             if NPM_EXTERNAL_SOURCE.match(spec):
-                c.add("Medium", f"npm dependency {name} is fetched outside the registry ({spec})", p, ln,
+                c.add("Medium", f"npm dependency {name} is fetched outside the registry ({declared})", p, ln,
                       impact="Bypasses registry integrity and advisory coverage; the source can change",
                       fix="Depend on a published, version-pinned release")
             elif npm_floating(spec) and section != "peerDependencies":
-                c.add("Medium", f"npm dependency {name} floats to any version ({spec or 'empty'})", p, ln,
+                c.add("Medium", f"npm dependency {name} floats to any version ({declared or 'empty'})", p, ln,
                       impact="A newly published malicious or broken release is installed automatically",
                       fix="Use a bounded range and the lockfile")
     for hook in ("preinstall", "install", "postinstall", "prepare"):
@@ -837,7 +844,8 @@ def check_composer(c, p):
     text, data = load_json_object(c, p, "composer.json scan")
     if data is None:
         return
-    if data.get("minimum-stability") in ("dev", "alpha", "beta", "RC") and not data.get("prefer-stable"):
+    # Composer compares stability names case-insensitively ("rc" and "RC").
+    if str(data.get("minimum-stability")).lower() in ("dev", "alpha", "beta", "rc") and not data.get("prefer-stable"):
         c.add("Low", f"composer minimum-stability is {data['minimum-stability']} without prefer-stable", p,
               line_of(text, "minimum-stability"), impact="Unstable releases may be installed",
               fix="Set prefer-stable: true or raise minimum-stability")
@@ -854,7 +862,23 @@ def check_composer(c, p):
                   line_of(text, '"repositories"'),
                   impact="Packages outside Packagist lack its advisory and integrity coverage",
                   fix="Prefer published releases; pin references", confidence="Suspected")
-    plugins = mapping(data.get("config")).get("allow-plugins")
+        url = str(repo.get("url", ""))
+        if re.match(r"(?i)(http|git)://", url) and registry_host(url) not in LOCAL_HOSTS:
+            c.add("Medium", f"composer.json fetches code over plaintext {url.split(':', 1)[0].lower()}://", p,
+                  line_of(text, '"repositories"'), category=CAT_BUILD,
+                  impact="Anyone on the network path can substitute packages that then run in builds",
+                  fix="Use https:// (or ssh for git) for every package source")
+    config = mapping(data.get("config"))
+    if config.get("disable-tls") is True:
+        c.add("Medium", "composer.json disables TLS verification for a package source", p, line_of(text, "disable-tls"),
+              category=CAT_BUILD, impact="A network attacker can serve modified packages",
+              fix="Remove it and trust the CA instead")
+    if config.get("secure-http") is False:
+        c.add("Medium", "composer.json allows package downloads over plaintext http:// (secure-http: false)", p,
+              line_of(text, "secure-http"), category=CAT_BUILD,
+              impact="Anyone on the network path can substitute packages that then run in builds",
+              fix="Remove secure-http: false and use https:// sources")
+    plugins = config.get("allow-plugins")
     if plugins is True:
         c.add("Medium", "composer allow-plugins is true for every package", p, line_of(text, "allow-plugins"),
               impact="Any dependency's plugin code runs during install",
@@ -865,11 +889,15 @@ def check_composer(c, p):
             # Platform constraints (php, ext-*, lib-*) are not installed packages.
             if name in ("php", "php-64bit", "composer-plugin-api") or name.startswith(("ext-", "lib-")):
                 continue
+            # Each alternative without its @stability flag: "*@beta" and "^1.0 || *" take any version,
+            # "dev-main" and "2.x-dev" a moving branch.
+            alts = [re.sub(r"@\w+$", "", alt.strip()).strip() for alt in re.split(r"\|\|?", spec)]
             unbounded = any(
                 any(x.startswith(">") for x in alt.replace(",", " ").split())
                 and not any(x.startswith("<") for x in alt.replace(",", " ").split())
-                for alt in re.split(r"\|\|?", spec))
-            if spec in ("*", "") or spec.startswith("dev-") or "@dev" in spec or unbounded:
+                for alt in alts)
+            if (spec == "" or "@dev" in spec or unbounded
+                    or any(alt in ("*", "") or re.search(r"^dev-|-dev$", alt, re.I) for alt in alts)):
                 c.add("Medium", f"composer dependency {name} floats ({spec})", p, line_of(text, f'"{name}"'),
                       impact="Unreviewed code is pulled on update", fix="Require a tagged version range")
 
@@ -1053,8 +1081,15 @@ def ruby_code(ln):
 def check_gemfile(c, p):
     text = read(p)
     outside = r"""['"](?:/|\.\./)"""  # Only an absolute or parent path leaves this checkout.
+    statements = []  # (first line, parts); a line ending in "," continues it (gem "x",\n  git: "...")
     for i, ln in enumerate(text.splitlines(), 1):
-        ln = ruby_code(ln)
+        ln = ruby_code(ln).rstrip()
+        if statements and statements[-1][1][-1].endswith(","):
+            statements[-1][1].append(ln.strip())
+        else:
+            statements.append((i, [ln]))
+    for i, parts in statements:
+        ln = " ".join(parts)
         if (re.search(r"^\s*gem\s.*(\b(git|github)\s*:|:(git|github)\s*=>|\bpath\s*:\s*" + outside
                       + r"|:path\s*=>\s*" + outside + ")", ln)
                 or re.match(r"""^\s*(git|github)\s*\(?\s*['"]|^\s*path\s*\(?\s*""" + outside, ln)):
@@ -1410,8 +1445,11 @@ def privileged_workflows(files, root):
 SOURCE_CONFIGS = {"pom.xml", "settings.xml", "build.gradle", "build.gradle.kts", "settings.gradle",
                   "settings.gradle.kts", "nuget.config", "NuGet.Config", "pip.conf", "pip.ini", ".pypirc",
                   "bunfig.toml", ".npmrc", ".yarnrc", ".yarnrc.yml", ".gitmodules", "Gemfile"}
+# Manifests whose package-source tables check_source_transport reads (url = lines only).
+SOURCE_MANIFESTS = {"Pipfile", "pyproject.toml"}
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
-TLS_OFF = re.compile(r"""^\s*(?:strict-ssl(?:\s*=\s*|\s+)["']?false|["']?enableStrictSsl["']?\s*:\s*false|trusted-host\s*=|--trusted-host\b"""
+TLS_OFF = re.compile(r"""^\s*(?:strict-ssl(?:\s*=\s*|\s+)["']?false|["']?enableStrictSsl["']?\s*:\s*false"""
+                     r"""|trusted[-_]host\s*[=:]|--trusted-host\b|verify_ssl\s*=\s*false"""
                      r"""|allowInsecureProtocol\s*(?:=|\()\s*true|isAllowInsecureProtocol\s*=\s*true)""", re.I)
 
 
@@ -1478,6 +1516,8 @@ def check_source_transport(c, p):
                 continue
         elif p.name == "Gemfile" and not re.match(r"\s*(source|gem|git)\b", ln):
             continue
+        elif p.name in SOURCE_MANIFESTS and not re.match(r"""\s*["']?url["']?\s*=""", ln):
+            continue  # Pipfile [[source]] / Poetry source URLs; homepage and project URLs are metadata.
         for m in re.finditer(r"""\b(http|git)://([^\s"'<>/:]+)""", ln):
             if m.group(2).lower() in LOCAL_HOSTS or spans and not any(a <= m.start() < b for a, b in spans):
                 continue
@@ -1491,10 +1531,17 @@ def check_extra_sources(c, p):
     text = read(p)
     if p.name in ("pip.conf", "pip.ini"):
         for i, ln in enumerate(text.splitlines(), 1):
-            if re.match(r"\s*extra-index-url\s*=", ln):
+            # pip reads option names case-insensitively with "_" for "-" (extra_index_url).
+            key = re.match(r"\s*([\w-]+)\s*[=:]", ln)
+            key = key[1].lower().replace("_", "-") if key else ""
+            if key == "extra-index-url":
                 c.add("Medium", "pip config adds a second index beside PyPI", p, i, category=CAT_BUILD,
                       impact="Dependency confusion: a public package with an internal name may be installed",
                       fix="Use a single index that proxies PyPI, or pin hashes")
+            elif key == "find-links":
+                c.add("Medium", "pip --find-links adds a package source beside the index", p, i,
+                      impact="Packages found there can shadow or replace index releases",
+                      fix="Use a single trusted index or pin hashes", category=CAT_BUILD)
     elif p.name.lower() == "nuget.config":
         text = xml_code(text)
         adds, cursor = [], [0, 1]  # (line, key) of <add> inside <packageSources>; offsets only increase
@@ -2111,6 +2158,12 @@ def check_workflow(c, p, privileged=None, calls=None):
             image = child(yaml_children(lines, service[1] + 1, service[3]), "image")
             if image:
                 images.append((image[1] + 1, image_ref(image[2])))
+    # A Docker container action (action.yml runs.image: docker://...) runs that image for every caller;
+    # runs.image: Dockerfile builds from this repository and is checked as a Dockerfile.
+    runs = child(top, "runs") if p.name in ("action.yml", "action.yaml") else None
+    image = runs and child(yaml_children(lines, runs[1] + 1, runs[3]), "image")
+    if image and image_ref(image[2]) and image_ref(image[2]).startswith("docker://"):
+        images.append((image[1] + 1, image_ref(image[2])[len("docker://"):]))
     for i, img in images:
         if unpinned_image(img, digest=True):
             c.add("Low", f"workflow container image {img} is not pinned to a digest", p, i, category=CAT_BUILD,
@@ -2190,10 +2243,36 @@ def check_workflow(c, p, privileged=None, calls=None):
                       fix="Pass it through an env variable and quote it")
 
 
+def dockerfile_instructions(text):
+    """(first line number, instruction) with backslash continuations joined, as Docker reads them.
+
+    Comment lines never continue, and inside a continuation they are dropped, as Docker drops them.
+    """
+    pending, start = [], None
+    for i, ln in enumerate(text.splitlines(), 1):
+        if re.match(r"\s*#", ln):
+            if not pending:
+                yield i, ln
+            continue
+        if start is None:
+            start = i
+        if ln.rstrip().endswith("\\"):
+            pending.append(ln.rstrip()[:-1])
+            continue
+        yield start, " ".join(pending + [ln])
+        pending, start = [], None
+    if pending:
+        yield start, " ".join(pending)
+
+
+# A shell receiving a piped script: sh, bash, zsh, dash or ksh, by name or path, optionally under sudo.
+PIPED_SHELL = re.compile(r"\s*(?:sudo\s+(?:-\S+\s+)*)?(?:/\S*/)?(?:ba|z|da|k)?sh\b")
+
+
 def check_dockerfile(c, p):
     text = read(p)
     stages, args, seen_from = set(), {}, False
-    for i, ln in enumerate(text.splitlines(), 1):
+    for i, ln in dockerfile_instructions(text):
         a = re.match(r"\s*ARG\s+(\w+)=(\S+)", ln, re.I)
         if a and not seen_from:  # Only ARGs before the first FROM apply to FROM lines.
             args[a.group(1)] = a.group(2).strip("'\"")
@@ -2205,7 +2284,9 @@ def check_dockerfile(c, p):
         m = re.match(r"\s*FROM\s+(?:--platform=\S+\s+)?(\S+)(?:\s+AS\s+(\S+))?", ln, re.I)
         if m:
             seen_from = True
-            img = re.sub(r"\$\{?(\w+)\}?", lambda v: args.get(v.group(1), v.group(0)), m.group(1))
+            # $NAME, ${NAME} and ${NAME:-default} / ${NAME-default} take the ARG value, else the default.
+            img = re.sub(r"\$(?:(\w+)|\{(\w+)(?::?-([^}]*))?\})",
+                         lambda v: args.get(v[1] or v[2], v[3] if v[3] is not None else v[0]), m.group(1))
             earlier_stage = img.lower() in stages
             if m.group(2):
                 stages.add(m.group(2).lower())
@@ -2216,7 +2297,7 @@ def check_dockerfile(c, p):
                 c.add("Low", f"base image {img} is not pinned", p, i, category=CAT_BUILD,
                       impact="Rebuilds pull a different image", fix="Pin a version tag, ideally a digest")
         segments = ln.split("|")
-        if any(re.match(r"\s*(sh|bash)\b", seg) and re.search(r"curl|wget", prev)
+        if any(PIPED_SHELL.match(seg) and re.search(r"curl|wget", prev)
                for prev, seg in zip(segments, segments[1:])):
             c.add("Low", "remote script piped into a shell during build", p, i, category=CAT_BUILD,
                   impact="Build executes whatever the URL serves at that moment",
@@ -3037,7 +3118,7 @@ def scan(root, audit):
             check_workflow(c, p, privileged.get(p.resolve()), calls)
         elif COMPOSE_FILE.fullmatch(n):
             check_compose(c, p)
-        if n in SOURCE_CONFIGS or p.parent.name == ".cargo" and n in ("config", "config.toml"):
+        if n in SOURCE_CONFIGS or n in SOURCE_MANIFESTS or p.parent.name == ".cargo" and n in ("config", "config.toml"):
             check_source_transport(c, p)
             check_extra_sources(c, p)
         if n == "composer.lock":

@@ -67,6 +67,9 @@ class DepsScanPathologicalTests(unittest.TestCase):
         (self.root / "Cargo.toml").write_text("[dependencies]\nx = { " + 'git = "a' * 200000 + "\n")
         (self.root / "Cargo.lock").write_text('source = "' * 300000 + "\n")
         (self.root / "yarn.lock").write_text('  resolution: "' + "@" * 300000 + "\n")
+        # Continuation joins: one statement spanning every line must not be rebuilt per line.
+        (self.root / "Gemfile").write_text('gem "x",\n' * 100000)
+        (self.root / "Dockerfile").write_text("RUN curl x \\\n" * 100000 + "  | sh\n")
         self.timed_scan()
 
     def test_many_dependencies_and_hosts(self):
