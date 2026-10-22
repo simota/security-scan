@@ -15,6 +15,7 @@ import math
 import os
 import re
 import sys
+import unicodedata
 from collections import Counter
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
@@ -25,7 +26,8 @@ from url_redaction import URL_RE, has_url_credentials, redact_urls
 from verification import CLAIMS, derive_verification, validate_verification
 from verification_workflow import derive_workflow, validate_workflows
 from evidence_integrity import verify_evidence
-from three_pass import derive_three_pass
+from three_pass import derive_three_pass, enabled as three_pass_enabled
+from contract_check import read_regular
 from expert import derive_expert
 from invariant_ledger import ledger_html, validate_ledger
 from scan_report_kit import pdf as kit_pdf, style as kit_style
@@ -761,9 +763,15 @@ class SchemaError(Exception):
     pass
 
 
+def invisible_or_control(ch):
+    """C0/C1 controls, format characters (bidi overrides, zero-width) and line/paragraph separators."""
+    return unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp")
+
+
 def http_url(value, field="url"):
     """Validate every href, not just its HTML escaping."""
-    if not isinstance(value, str) or not value or any(ord(ch) <= 32 or ord(ch) == 127 for ch in value) or "\\" in value:
+    if (not isinstance(value, str) or not value or "\\" in value
+            or any(ch.isspace() or invisible_or_control(ch) for ch in value)):
         raise SchemaError(f"{field}: must be an absolute http(s) URL without whitespace or controls")
     try:
         parsed = urlsplit(value)
@@ -771,6 +779,9 @@ def http_url(value, field="url"):
                 or parsed.username is not None or parsed.password is not None):
             raise ValueError("unsafe URL")
         parsed.port  # Reject malformed/out-of-range ports too.
+        # Webhook and bot URLs carry the credential in the path, where dropping the query cannot help.
+        if TOKEN_RE.search(unquote(parsed.netloc + parsed.path)) or JWT_RE.search(unquote(parsed.path)):
+            raise ValueError("credential in path")
     except ValueError:
         raise SchemaError(f"{field}: must be an absolute http(s) URL without credentials") from None
     return value
@@ -881,7 +892,7 @@ def validate_data(data):
         f.pop("_evidence_integrity", None)
         for k in ("id", "title", "severity", "confidence", "location"):
             text_field(f, k, where, required=True)
-        if any(ord(char) < 32 or ord(char) == 127 for char in f["location"]):
+        if any(invisible_or_control(char) for char in f["location"]):
             raise SchemaError(f"{where}.location: must not contain control characters")
         match = LOC_RE.match(f["location"].strip())
         if match:
@@ -962,7 +973,8 @@ def validate_data(data):
         for k in ("result", "note"):
             text_field(perspective, k, where)
     data["perspectives"] = lens
-    if "three_pass" in data or "expert" in data:
+    # A versionless or version-1 "three_pass" key is uninterpreted legacy data, not the opt-in.
+    if three_pass_enabled(data) or "expert" in data:
         # These gates select code findings by F-NNN; any other id would be
         # silently outside them, letting an open finding pass "complete".
         for f in findings:
@@ -1483,7 +1495,10 @@ def _public_params(text):
     for item in text.split("&"):
         name, _, value = item.partition("=")
         name, value = unquote(name), unquote(value)
-        if (_SECRET_PARAM.search(name) or TOKEN_RE.search(value) or JWT_RE.search(value)
+        # A bare ?<token> puts the credential in the name.
+        whole = unquote(item)
+        if (_SECRET_PARAM.search(name) or _KEY_END.search(name) or TOKEN_RE.search(whole) or JWT_RE.search(whole)
+                or not value and secret_candidate(name) and not _ADVISORY_ID.fullmatch(name)
                 or secret_candidate(value) and not _ADVISORY_ID.fullmatch(value) or has_url_credentials(value)):
             continue
         kept.append(item)
@@ -1604,10 +1619,11 @@ def attach_sources(data, repo, context=3, evidence_dir=None):
         if blob is not None:
             text = blob.decode("utf-8", errors="replace")
         else:
-            path = (root / rel).resolve()
-            if root not in path.parents or not path.is_file() or sensitive_path(path.relative_to(root)):
-                continue
             try:
+                # An unreadable location (too long a name, a parent without access) only loses its excerpt.
+                path = (root / rel).resolve()
+                if root not in path.parents or not path.is_file() or sensitive_path(path.relative_to(root)):
+                    continue
                 # An excerpt is best-effort: a huge file is skipped, not read into memory.
                 if path.stat().st_size > MAX_SOURCE_BYTES:
                     continue
@@ -2552,7 +2568,8 @@ def main(argv=None):
         p.error("--evidence-repository requires --evidence-root")
     try:
         # One read: the stamp must describe exactly the bytes that were rendered.
-        source = Path(a.findings).read_bytes()
+        # A FIFO or device in its place would block or stream forever.
+        source = read_regular(a.findings)
         data = load(a.findings, source)
         integrity = None
         if a.evidence_root is not None:
