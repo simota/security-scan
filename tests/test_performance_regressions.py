@@ -72,6 +72,14 @@ class DepsScanPathologicalTests(unittest.TestCase):
         (self.root / "Dockerfile").write_text("RUN curl x \\\n" * 100000 + "  | sh\n")
         self.timed_scan()
 
+    def test_long_whitespace_runs_in_new_manifest_parsers(self):
+        # Two quantifiers able to share one whitespace run backtrack quadratically or worse.
+        (self.root / "Cargo.toml").write_text("[" + " " * 100000 + "x\n[" + " " * 100000 + "]\n[" + " ." * 50000 + "]\n")
+        (self.root / "requirements.txt").write_text("a" + " " * 100000 + "!\n-e a" + " " * 100000 + "!\n")
+        (self.root / "pyproject.toml").write_text('[project]\ndependencies = ["a' + " " * 100000 + '!"]\n'
+                                                  "[" + " " * 100000 + "x\n")
+        self.timed_scan()
+
     def test_many_dependencies_and_hosts(self):
         deps = {"pkg-%d" % i: "^1.0.%d" % i for i in range(20000)}
         (self.root / "package.json").write_text(json.dumps({"dependencies": deps}, indent=1))

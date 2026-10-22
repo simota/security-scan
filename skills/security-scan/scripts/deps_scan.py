@@ -904,8 +904,21 @@ def check_composer(c, p):
 
 # A requirement fetched from VCS or a URL rather than the index, including a
 # PEP 508 direct reference (name[extras] @ url, with or without spaces).
+# One whitespace run on each side of the optional extras, so no two runs can share the same spaces.
 PIP_URL = re.compile(r"^(?:git\+|https?://|hg\+|svn\+|bzr\+|file:)"
-                     r"|^[A-Za-z0-9][A-Za-z0-9._-]*\s*(?:\[[^\]]*\])?\s*@")
+                     r"|^[A-Za-z0-9][A-Za-z0-9._-]*\s*(?:\[[^\]]*\]\s*)?@")
+
+
+def file_url_path(c, url):
+    """The local path a file: URL names, or None for any other URL.
+
+    file:///abs and file://localhost/abs are absolute; file:./x and file:. are
+    relative to the manifest; PDM's ${PROJECT_ROOT} is the checkout root.
+    """
+    m = re.match(r"(?i)file:(?://(?:localhost)?(?=/))?([^#?\s\"']*)", url)
+    if not m:
+        return None
+    return re.sub(r"^/?\$\{PROJECT_ROOT\}", lambda _: str(c.root), m[1]) or "."
 
 
 def outside_checkout(c, manifest, path):
@@ -938,6 +951,14 @@ def check_requirements(c, p):
             s = editable.group(3).strip()
             if not PIP_URL.match(s) and not pip_outside_path(c, p, s):
                 continue  # A local editable path inside the checkout is first-party code.
+        direct = re.match(r"[A-Za-z0-9][A-Za-z0-9._-]*\s*(?:\[[^\]]*\]\s*)?@\s*(\S+)", s)  # name @ file:...
+        local = file_url_path(c, direct[1] if direct else s)
+        if local is not None:  # file:./libs/x is first-party; file:///opt/x leaves the checkout
+            if outside_checkout(c, p, local):
+                c.add("Medium", "Python dependency installed from a path outside the checkout (see source location)",
+                      p, i, impact="Bypasses index integrity and advisory coverage; the code is not part of this review",
+                      fix="Publish and pin a released version, or bring the code into the checkout")
+            continue
         extra = s.startswith("--extra-index-url")
         if extra:
             c.add("Medium", "pip --extra-index-url mixes a second index with PyPI", p, i,
@@ -986,7 +1007,7 @@ TOML_DEP_TABLES = {
 # PEP 621 / PEP 735 dependency lists, whose entries are PEP 508 strings.
 PEP508_TABLES = r"project|project\.optional-dependencies|dependency-groups|build-system"
 # Extras stop at a quote, so an unclosed "[" cannot make each string scan to the end of the line.
-PEP508_URL = re.compile(r"""["']\s*([A-Za-z0-9][\w.-]*)\s*(?:\[[^\]"']*\])?\s*@\s*[A-Za-z][\w+.-]*:""")
+PEP508_URL = re.compile(r"""["']\s*([A-Za-z0-9][\w.-]*)\s*(?:\[[^\]"']*\]\s*)?@\s*([A-Za-z][\w+.-]*:[^"'\s]*)""")
 
 
 def toml_string(value, key):
@@ -1017,9 +1038,9 @@ def check_toml_deps(c, p):
 
     for i, ln in enumerate(text.splitlines(), 1):
         code = ruby_code(ln).strip()  # TOML comments follow the same rule
-        header = re.fullmatch(r"\[\s*([^\[\]]+?)\s*\]", code)
+        header = re.fullmatch(r"\[([^\[\]]+)\]", code)  # one run, no nested quantifiers to backtrack
         if header or code.startswith("[["):
-            name = re.sub(r"""\s*\.\s*""", ".", header[1]) if header else ""
+            name = ".".join(part.strip() for part in header[1].split(".")) if header else ""
             m = deps.fullmatch(name)
             table = m[1] if m else None
             named = m[2].strip("\"'") if m and m[2] else None
@@ -1027,7 +1048,11 @@ def check_toml_deps(c, p):
             continue
         if p.name == "pyproject.toml" and pep508:
             for ref in PEP508_URL.finditer(code):
-                c.add("Medium", f"python dependency {ref[1]} is fetched outside the registry (URL)", p, i,
+                local = file_url_path(c, ref[2])
+                if local is not None and not outside_checkout(c, p, local):
+                    continue  # a first-party package of this checkout (PDM: file:///${PROJECT_ROOT}/...)
+                found = "URL" if local is None else "path outside the checkout"
+                c.add("Medium", f"python dependency {ref[1]} is fetched outside the registry ({found})", p, i,
                       impact="Bypasses index integrity and advisory coverage; the source can change",
                       fix="Depend on a published, version-pinned release")
         if table is None:
@@ -1445,8 +1470,9 @@ def privileged_workflows(files, root):
 SOURCE_CONFIGS = {"pom.xml", "settings.xml", "build.gradle", "build.gradle.kts", "settings.gradle",
                   "settings.gradle.kts", "nuget.config", "NuGet.Config", "pip.conf", "pip.ini", ".pypirc",
                   "bunfig.toml", ".npmrc", ".yarnrc", ".yarnrc.yml", ".gitmodules", "Gemfile"}
-# Manifests whose package-source tables check_source_transport reads (url = lines only).
+# Manifests whose package-source tables check_source_transport reads (their url = lines only).
 SOURCE_MANIFESTS = {"Pipfile", "pyproject.toml"}
+SOURCE_TABLES = {"source", "tool.poetry.source", "tool.uv.index", "tool.pdm.source"}
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 TLS_OFF = re.compile(r"""^\s*(?:strict-ssl(?:\s*=\s*|\s+)["']?false|["']?enableStrictSsl["']?\s*:\s*false"""
                      r"""|trusted[-_]host\s*[=:]|--trusted-host\b|verify_ssl\s*=\s*false"""
@@ -1463,7 +1489,7 @@ def check_source_transport(c, p):
     text = read(p)
     if p.suffix in (".xml", ".config"):
         text = xml_code(text)
-    in_repo, depth, repo_depth, pending, spans = 0, 0, None, False, None
+    in_repo, depth, repo_depth, pending, spans, in_source = 0, 0, None, False, None, False
     for i, ln in enumerate(text.splitlines(), 1):
         if ln.lstrip().startswith(("#", "//", ";", "<!--")):
             continue
@@ -1516,8 +1542,13 @@ def check_source_transport(c, p):
                 continue
         elif p.name == "Gemfile" and not re.match(r"\s*(source|gem|git)\b", ln):
             continue
-        elif p.name in SOURCE_MANIFESTS and not re.match(r"""\s*["']?url["']?\s*=""", ln):
-            continue  # Pipfile [[source]] / Poetry source URLs; homepage and project URLs are metadata.
+        elif p.name in SOURCE_MANIFESTS:
+            header = re.match(r"\s*\[\[?([^\[\]]*)\]", ln)
+            if header:
+                in_source = ".".join(x.strip() for x in header[1].split(".")) in SOURCE_TABLES
+                continue
+            if not in_source or not re.match(r"""\s*["']?url["']?\s*=""", ln):
+                continue  # Only package sources fetch code; homepage and project URLs are metadata.
         for m in re.finditer(r"""\b(http|git)://([^\s"'<>/:]+)""", ln):
             if m.group(2).lower() in LOCAL_HOSTS or spans and not any(a <= m.start() < b for a, b in spans):
                 continue
@@ -2244,25 +2275,39 @@ def check_workflow(c, p, privileged=None, calls=None):
 
 
 def dockerfile_instructions(text):
-    """(first line number, instruction) with backslash continuations joined, as Docker reads them.
+    """(first line number, instruction, line_at) with continuations joined, as Docker reads them.
 
-    Comment lines never continue, and inside a continuation they are dropped, as Docker drops them.
+    The continuation character is the `# escape=` parser directive's (default backslash).
+    Comment lines never continue, and inside a continuation they are dropped, as Docker
+    drops them. line_at(offset) is the physical line an offset of the instruction came from.
     """
-    pending, start = [], None
+    escape, directives = "\\", True
+    pending, marks, size = [], [], 0  # physical lines of the instruction, (offset, line number) of each, length
+
+    def joined():
+        text = " ".join(pending)
+        lines = list(marks)
+        return lines[0][1], text, lambda offset: lines[bisect.bisect_right(lines, (offset, float("inf"))) - 1][1]
+
     for i, ln in enumerate(text.splitlines(), 1):
+        directive = directives and re.match(r"\s*#\s*(\w+)\s*=\s*(\S+)\s*$", ln)
+        if directive and directive[1].lower() == "escape":
+            escape = directive[2][0]
+        directives = bool(directive)  # parser directives only lead the file
         if re.match(r"\s*#", ln):
             if not pending:
-                yield i, ln
+                yield i, ln, lambda offset, i=i: i
             continue
-        if start is None:
-            start = i
-        if ln.rstrip().endswith("\\"):
+        marks.append((size, i))
+        if ln.rstrip().endswith(escape):
             pending.append(ln.rstrip()[:-1])
+            size += len(pending[-1]) + 1
             continue
-        yield start, " ".join(pending + [ln])
-        pending, start = [], None
+        pending.append(ln)
+        yield joined()
+        pending, marks, size = [], [], 0
     if pending:
-        yield start, " ".join(pending)
+        yield joined()
 
 
 # A shell receiving a piped script: sh, bash, zsh, dash or ksh, by name or path, optionally under sudo.
@@ -2272,7 +2317,7 @@ PIPED_SHELL = re.compile(r"\s*(?:sudo\s+(?:-\S+\s+)*)?(?:/\S*/)?(?:ba|z|da|k)?sh
 def check_dockerfile(c, p):
     text = read(p)
     stages, args, seen_from = set(), {}, False
-    for i, ln in dockerfile_instructions(text):
+    for i, ln, line_at in dockerfile_instructions(text):
         a = re.match(r"\s*ARG\s+(\w+)=(\S+)", ln, re.I)
         if a and not seen_from:  # Only ARGs before the first FROM apply to FROM lines.
             args[a.group(1)] = a.group(2).strip("'\"")
@@ -2296,10 +2341,14 @@ def check_dockerfile(c, p):
             if ":" not in name or name.endswith(":latest"):
                 c.add("Low", f"base image {img} is not pinned", p, i, category=CAT_BUILD,
                       impact="Rebuilds pull a different image", fix="Pin a version tag, ideally a digest")
-        segments = ln.split("|")
-        if any(PIPED_SHELL.match(seg) and re.search(r"curl|wget", prev)
-               for prev, seg in zip(segments, segments[1:])):
-            c.add("Low", "remote script piped into a shell during build", p, i, category=CAT_BUILD,
+        segments, offset, piped = ln.split("|"), 0, None
+        for prev, seg in zip(segments, segments[1:]):
+            offset += len(prev) + 1
+            if PIPED_SHELL.match(seg) and re.search(r"curl|wget", prev):
+                piped = line_at(offset - 1)  # the line of the pipe, where a one-line RUN reported it
+                break
+        if piped is not None:
+            c.add("Low", "remote script piped into a shell during build", p, piped, category=CAT_BUILD,
                   impact="Build executes whatever the URL serves at that moment",
                   fix="Download a pinned version and verify its checksum")
 

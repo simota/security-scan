@@ -93,7 +93,7 @@ class DepsSourcesReviewTests(unittest.TestCase):
         path = "Python dependency installed from a path outside the checkout (see source location)"
         self.assertEqual(sorted(self.findings()), [
             ("requirements.txt:1", url), ("requirements.txt:2", url), ("requirements.txt:3", url),
-            ("requirements.txt:4", url), ("requirements.txt:5", path), ("requirements.txt:6", path),
+            ("requirements.txt:4", path), ("requirements.txt:5", path), ("requirements.txt:6", path),
             ("requirements.txt:7", path)])
 
     def test_cargo_manifest_and_lock_sources(self):
@@ -156,7 +156,7 @@ class DepsSourcesReviewTests(unittest.TestCase):
         piped = "remote script piped into a shell during build"
         self.assertEqual(sorted(self.findings()), [
             ("Dockerfile:10", piped), ("Dockerfile:3", "base image node is not pinned"),
-            ("Dockerfile:6", piped), ("Dockerfile:9", piped)])
+            ("Dockerfile:8", piped), ("Dockerfile:9", piped)])
 
     def test_dockerfile_comment_ending_in_backslash_does_not_swallow_the_next_instruction(self):
         self.write("Dockerfile", "# a note \\\nFROM node\n")
@@ -230,6 +230,42 @@ class DepsSourcesReviewTests(unittest.TestCase):
         self.write("b/action.yml", "name: y\nruns:\n  using: docker\n  image: Dockerfile\n")
         self.write("c/action.yaml", "name: z\nruns:\n  using: docker\n  image: 'docker://alpine@sha256:%s'\n" % ("0" * 64))
         self.assertEqual(self.findings(), [("a/action.yml:4", "workflow container image alpine:3.19 is not pinned to a digest")])
+
+    def test_file_urls_inside_the_checkout_are_first_party(self):
+        (self.root / "libs" / "foo").mkdir(parents=True)
+        self.write("requirements.txt", "-e file:.\n-e file:./libs/foo#egg=foo\nfile:./libs/foo\n"
+                   "file:///opt/src/x\n-e file:../outside\npkg @ file:///${PROJECT_ROOT}/libs/foo\n")
+        self.write("pyproject.toml", '[project]\ndependencies = ["sub @ file:///${PROJECT_ROOT}/libs/foo", '
+                   '"o @ file:///opt/o", "u @ https://example.com/u.whl"]\n')
+        self.write("pdm.lock", "")
+        path = "Python dependency installed from a path outside the checkout (see source location)"
+        self.assertEqual(sorted(self.findings()), [
+            ("pyproject.toml:2", "python dependency o is fetched outside the registry (path outside the checkout)"),
+            ("pyproject.toml:2", "python dependency u is fetched outside the registry (URL)"),
+            ("requirements.txt:4", path), ("requirements.txt:5", path)])
+
+    def test_dockerfile_escape_directive_and_physical_pipe_line(self):
+        self.write("Dockerfile", "\n".join((
+            "# escape=`", "FROM mcr.microsoft.com/windows/servercore:ltsc2022 AS build", "COPY t c:\\",
+            "RUN dir c:\\", "RUN curl https://example.com/i `", "  | sh", "FROM mcr.microsoft.com/dotnet/runtime", "")))
+        self.write("linux/Dockerfile", "\n".join((
+            "FROM debian:12", "RUN apt-get update \\", " && apt-get install -y curl \\",
+            " && curl -fsSL https://get.example.com | sh", "")))
+        piped = "remote script piped into a shell during build"
+        self.assertEqual(sorted(self.findings()), [
+            ("Dockerfile:6", piped), ("Dockerfile:7", "base image mcr.microsoft.com/dotnet/runtime is not pinned"),
+            ("linux/Dockerfile:4", piped)])
+
+    def test_plaintext_urls_count_only_in_package_source_tables(self):
+        self.write("pyproject.toml", "\n".join((
+            "[tool.semantic_release.remote]", 'url = "http://git.example.com/org/repo.git"',
+            "[project.urls]", 'url = "http://example.com"',
+            "[[tool.poetry.source]]", 'name = "x"', 'url = "http://pypi.internal.example/simple"',
+            "[[ tool.uv.index ]]", 'url = "http://index.example/simple"', "")))
+        self.write("poetry.lock", "")
+        self.assertEqual(sorted(self.findings()), [
+            ("pyproject.toml:7", "pyproject.toml fetches code over plaintext http://"),
+            ("pyproject.toml:9", "pyproject.toml fetches code over plaintext http://")])
 
     def test_composer_lock_inventory_keeps_only_version_values(self):
         nested = {}
