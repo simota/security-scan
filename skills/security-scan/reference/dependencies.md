@@ -31,8 +31,8 @@ Dockerfiles and Compose files:
 | Check | Why it matters |
 |---|---|
 | Manifest without a lockfile | Every install can resolve different, possibly compromised, versions |
-| Floating versions (`*`, `latest`, `dev-*`, unbounded `>`) | A newly published bad release is taken automatically |
-| Dependencies from git, URLs or local paths outside the checkout (`file:`/`link:`/`./` paths that resolve inside it are first-party) | Outside registry integrity and advisory coverage |
+| Floating versions (`*`, `latest`, `dev-*`, unbounded `>`; a Pipfile `"*"` is pipenv's default, pinned by `Pipfile.lock`, and is not reported) | A newly published bad release is taken automatically |
+| Dependencies from git, URLs or local paths outside the checkout (`file:`/`link:`/`./` paths that resolve inside it are first-party), in manifests (`Cargo.toml`, `pyproject.toml` PEP 508/Poetry/uv tables, `Pipfile`, requirements files including `name@url`) and lockfiles (including Yarn Berry `resolution:` and `Cargo.lock` `source`) | Outside registry integrity and advisory coverage |
 | Non-default registries, `--extra-index-url`, lockfile hosts | Dependency confusion: a public name can shadow an internal one |
 | Literal tokens in `.npmrc`, `.yarnrc.yml`, `.pypirc` | Publishing credentials in the repository |
 | Lockfile entries without integrity hashes, Composer `minimum-stability: dev`, pip `--find-links` | Downloads are not checked against a recorded hash, or unstable or unindexed packages are accepted |

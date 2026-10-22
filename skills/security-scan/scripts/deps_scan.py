@@ -735,16 +735,29 @@ def check_npm_lock(c, p):
         return cursor[1]
     resolved = re.compile(r'"resolved"\s*:\s*("(?:[^"\\]|\\.)*")'
                           r'|^[^\S\n]+resolved\s+("(?:[^"\\]|\\.)*")'
-                          r'|\btarball:\s*("(?:[^"\\]|\\.)*"|[^\s,}]+)', re.M)
+                          r'|\btarball:\s*("(?:[^"\\]|\\.)*"|[^\s,}]+)'
+                          # Yarn Berry: resolution: "<name>@<protocol or URL>" (pnpm's resolution: {...} is below).
+                          r'|^[^\S\n]+resolution:\s*("(?:[^"\\]|\\.)*")', re.M)
     for match in resolved.finditer(text):
         try:
-            raw = match[1] or match[2] or match[3]
+            raw = match[1] or match[2] or match[3] or match[4]
             url = json.loads(raw) if raw.startswith('"') else raw.strip("'")
+            berry = False
+            if match[4]:
+                # Drop the package name (scoped names start with @); npm:, workspace:, patch: and
+                # local file:/link:/portal: resolutions are the registry or paths package.json declares.
+                url = re.match(r"(?:@[^/@]+/)?[^@]*@(.*)$", url, re.S)
+                url = url[1] if url else ""
+                if not re.match(r"[a-z][\w+.-]*://|git@|github:|gitlab:|bitbucket:", url, re.I):
+                    continue
+                berry = True
             parsed = urlsplit(url)
             # Git hosts' archive endpoints are git sources served as tarballs.
             archive = re.match(r"(codeload\.github\.com|gitlab\.com|bitbucket\.org)$", parsed.hostname or "") and (
                 parsed.hostname == "codeload.github.com" or "/-/archive/" in parsed.path or "/get/" in parsed.path)
-            if archive or re.match(r"(git(\+[a-z]+)?|github|gitlab|bitbucket|file|link)$", parsed.scheme.lower()):
+            # Berry records a git dependency as <repository URL>#commit=<sha>, whatever the host.
+            git = berry and ("commit=" in parsed.fragment or parsed.path.endswith(".git") or url.startswith("git@"))
+            if archive or git or re.match(r"(git(\+[a-z]+)?|github|gitlab|bitbucket|file|link)$", parsed.scheme.lower()):
                 if "outside" not in hosts:
                     hosts["outside"] = line_at(match.start())
                 continue
@@ -789,8 +802,8 @@ def check_npm_lock(c, p):
         c.add("Low", f"lockfile resolves packages from non-default host {h}", p, hosts[h],
               impact="Packages come from a registry outside the public one; confirm it is trusted",
               fix="Confirm the host is an approved internal mirror", confidence="Suspected")
-    if p.name == "package-lock.json" and not re.search(r'"integrity"\s*:', text):
-        c.add("Low", "package-lock.json has no integrity hashes", p,
+    if p.name in ("package-lock.json", "npm-shrinkwrap.json") and not re.search(r'"integrity"\s*:', text):
+        c.add("Low", f"{p.name} has no integrity hashes", p,
               impact="Tampered tarballs are not detected", fix="Regenerate the lockfile with a current npm")
 
 
@@ -861,6 +874,31 @@ def check_composer(c, p):
                       impact="Unreviewed code is pulled on update", fix="Require a tagged version range")
 
 
+# A requirement fetched from VCS or a URL rather than the index, including a
+# PEP 508 direct reference (name[extras] @ url, with or without spaces).
+PIP_URL = re.compile(r"^(?:git\+|https?://|hg\+|svn\+|bzr\+|file:)"
+                     r"|^[A-Za-z0-9][A-Za-z0-9._-]*\s*(?:\[[^\]]*\])?\s*@")
+
+
+def outside_checkout(c, manifest, path):
+    """A path, relative to its manifest's directory, that resolves outside this checkout."""
+    if "\0" in path:
+        return False
+    target = os.path.realpath(os.path.join(Path(manifest).parent, os.path.expanduser(path)))
+    root = os.path.realpath(c.root)
+    return os.path.commonpath([target, root]) != root
+
+
+def pip_outside_path(c, requirements, spec):
+    """A ./, ../, / or ~/ path (extras and options aside) that resolves outside this checkout."""
+    path = spec.split()[0] if spec.split() else ""
+    if not re.match(r"\.{1,2}(?:[/\\[]|$)|/|~/", path):
+        return False
+    if path.endswith("]") and "[" in path:  # drop extras: .[dev]
+        path = path[:path.rindex("[")]
+    return outside_checkout(c, requirements, path)
+
+
 def check_requirements(c, p):
     text = read(p)
     for i, ln in enumerate(text.splitlines(), 1):
@@ -870,8 +908,8 @@ def check_requirements(c, p):
         editable = re.match(r"^(-e|--editable)(\s+|=)(.*)$", s)
         if editable:
             s = editable.group(3).strip()
-            if not re.match(r"^(git\+|https?://|hg\+|svn\+|bzr\+)", s):
-                continue  # A local editable path is first-party code, not a fetched dependency.
+            if not PIP_URL.match(s) and not pip_outside_path(c, p, s):
+                continue  # A local editable path inside the checkout is first-party code.
         extra = s.startswith("--extra-index-url")
         if extra:
             c.add("Medium", "pip --extra-index-url mixes a second index with PyPI", p, i,
@@ -892,15 +930,111 @@ def check_requirements(c, p):
             c.add("Medium", "pip --find-links adds a package source beside the index", p, i,
                   impact="Packages found there can shadow or replace index releases",
                   fix="Use a single trusted index or pin hashes", category=CAT_BUILD)
-        elif s.startswith("-") or s.startswith("."):
+        elif s.startswith("-"):
             continue
-        elif re.match(r"^(git\+|https?://|hg\+|svn\+|bzr\+)", s) or " @ " in s:
+        elif pip_outside_path(c, p, s):
+            c.add("Medium", "Python dependency installed from a path outside the checkout (see source location)", p, i,
+                  impact="Bypasses index integrity and advisory coverage; the code is not part of this review",
+                  fix="Publish and pin a released version, or bring the code into the checkout")
+        elif s.startswith((".", "/", "~")):
+            continue  # A path inside the checkout is first-party code.
+        elif PIP_URL.match(s):
             c.add("Medium", "Python dependency fetched from a URL (see source location)", p, i,
                   impact="Bypasses index integrity and advisory coverage", fix="Pin to a released version")
         elif "==" not in s and "--hash" not in s:
             c.add("Low", "Python requirement not pinned (see source location)", p, i,
                   impact="Installs whatever version is newest at install time",
                   fix="Pin with == (and --hash for reproducible installs) or use a lockfile")
+
+
+# Tables whose keys are dependency names, per TOML manifest; a [<table>.<name>]
+# subtable holds one dependency. Pipfile's "*" is pipenv's default, pinned by
+# Pipfile.lock, so only Cargo and Poetry report a "*" version as floating.
+TOML_DEP_TABLES = {
+    "Cargo.toml": r"(?:workspace\.|target\..+\.)?(?:dev-|build-)?dependencies",
+    "pyproject.toml": r"tool\.poetry\.(?:group\.[^.]+\.)?(?:dev-)?dependencies|tool\.uv\.sources",
+    "Pipfile": r"(?:dev-)?packages",
+}
+# PEP 621 / PEP 735 dependency lists, whose entries are PEP 508 strings.
+PEP508_TABLES = r"project|project\.optional-dependencies|dependency-groups|build-system"
+# Extras stop at a quote, so an unclosed "[" cannot make each string scan to the end of the line.
+PEP508_URL = re.compile(r"""["']\s*([A-Za-z0-9][\w.-]*)\s*(?:\[[^\]"']*\])?\s*@\s*[A-Za-z][\w+.-]*:""")
+
+
+def toml_string(value, key):
+    m = re.search(r"(?:^|[{,\s])" + key + r"""\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'([^']*)')""", value)
+    return None if m is None else m[1] if m[1] is not None else m[2]
+
+
+def check_toml_deps(c, p):
+    """git/URL/outside-path sources and "*" versions in Cargo.toml, pyproject.toml and Pipfile."""
+    text = read(p)
+    kind = {"Cargo.toml": "cargo", "pyproject.toml": "python", "Pipfile": "python"}[p.name]
+    deps = re.compile(r"(%s)(?:\.(.+))?" % TOML_DEP_TABLES[p.name])
+    table, named = None, None  # the dependency table, and the dependency a [<table>.<name>] subtable holds
+    pep508 = False  # inside a PEP 621 / PEP 735 table
+
+    def source(name, fields, line):
+        git, url, path, version = (fields.get(k) for k in ("git", "url", "path", "version"))
+        found = "git" if git is not None else "URL" if url is not None else \
+            "path outside the checkout" if path is not None and outside_checkout(c, p, path) else None
+        if found:
+            c.add("Medium", f"{kind} dependency {name} is fetched outside the registry ({found})", p, line,
+                  impact="Bypasses registry integrity and advisory coverage; the source can change",
+                  fix="Depend on a published, version-pinned release")
+        elif version is not None and version.strip() == "*" and p.name != "Pipfile" and name != "python":
+            c.add("Medium", f"{kind} dependency {name} floats to any version (*)", p, line,
+                  impact="A newly published malicious or broken release is installed automatically",
+                  fix="Require a bounded version and commit the lockfile")
+
+    for i, ln in enumerate(text.splitlines(), 1):
+        code = ruby_code(ln).strip()  # TOML comments follow the same rule
+        header = re.fullmatch(r"\[\s*([^\[\]]+?)\s*\]", code)
+        if header or code.startswith("[["):
+            name = re.sub(r"""\s*\.\s*""", ".", header[1]) if header else ""
+            m = deps.fullmatch(name)
+            table = m[1] if m else None
+            named = m[2].strip("\"'") if m and m[2] else None
+            pep508 = bool(re.fullmatch(PEP508_TABLES, name)) and p.name == "pyproject.toml"
+            continue
+        if p.name == "pyproject.toml" and pep508:
+            for ref in PEP508_URL.finditer(code):
+                c.add("Medium", f"python dependency {ref[1]} is fetched outside the registry (URL)", p, i,
+                      impact="Bypasses index integrity and advisory coverage; the source can change",
+                      fix="Depend on a published, version-pinned release")
+        if table is None:
+            continue
+        entry = re.match(r"""(?:"([^"]+)"|'([^']+)'|([\w.-]+))\s*=\s*(.*)$""", code)
+        if not entry:
+            continue
+        key, value = entry[1] or entry[2] or entry[3], entry[4].strip()
+        if named is not None:  # [<table>.<name>]: one field of that dependency per line
+            source(named, {key: value.strip("\"'")}, i)
+        elif value.startswith("{"):  # name = { git = "...", ... }
+            source(key, {k: toml_string(value, k) for k in ("git", "url", "path", "version")}, i)
+        else:  # name = "<version requirement>"
+            source(key, {"version": value.strip("\"'")}, i)
+
+
+def check_cargo_lock(c, p):
+    """Cargo.lock packages from git, or from a registry other than crates.io."""
+    text = read(p)
+    default = {"registry+https://github.com/rust-lang/crates.io-index", "sparse+https://index.crates.io/"}
+    first = {}
+    for i, ln in enumerate(text.splitlines(), 1):
+        m = re.match(r'\s*source\s*=\s*"([^"]*)"', ln)
+        if not m or m[1] in default:
+            continue
+        kind = "git" if m[1].startswith("git+") else registry_host(m[1].split("+", 1)[-1]) or m[1]
+        first.setdefault(kind, i)
+    if "git" in first:
+        c.add("Medium", "lockfile resolves a package from git or a local path, not a registry", p, first.pop("git"),
+              impact="Bypasses registry integrity and advisory coverage; the source can change",
+              fix="Depend on a published, version-pinned release")
+    for host in sorted(first):
+        c.add("Low", f"lockfile resolves packages from non-default host {host}", p, first[host],
+              impact="Packages come from a registry outside the public one; confirm it is trusted",
+              fix="Confirm the host is an approved internal mirror", confidence="Suspected")
 
 
 def ruby_code(ln):
@@ -2121,10 +2255,18 @@ def inventory_composer_lock(c, p):
         return
     pkgs = packages_list(data.get("packages")) + packages_list(data.get("packages-dev"))
     c.inventory.append({"ecosystem": "composer", "lockfile": c.rel(p), "packages": len(pkgs),
-                        "notable": {x["name"]: x.get("version") for x in pkgs
+                        "notable": {x["name"]: scalar(x.get("version")) for x in pkgs
                                     if x.get("name") in ("laravel/framework", "symfony/http-kernel",
                                                          "guzzlehttp/guzzle", "laravel/sanctum")},
-                        "platform": mapping(data.get("platform"))})
+                        # Versions only: a nested value would be copied into the report verbatim, and
+                        # deep nesting overflows safe_output's recursion on Python < 3.12.
+                        "platform": {k: v for k, v in mapping(data.get("platform")).items()
+                                     if scalar(v) is not None}})
+
+
+def scalar(value):
+    """A version string or number from a lockfile; anything else is not a version."""
+    return value if isinstance(value, (str, int, float)) and not isinstance(value, bool) else None
 
 
 def inventory_npm_lock(c, p):
@@ -2885,6 +3027,10 @@ def scan(root, audit):
             check_gemfile(c, p)
         elif n == "go.mod":
             check_gomod(c, p)
+        elif n in TOML_DEP_TABLES:
+            check_toml_deps(c, p)
+        elif n == "Cargo.lock":
+            check_cargo_lock(c, p)
         elif n.startswith("Dockerfile") or n.endswith(".Dockerfile"):
             check_dockerfile(c, p)
         elif is_workflow(p) or n in ("action.yml", "action.yaml"):
