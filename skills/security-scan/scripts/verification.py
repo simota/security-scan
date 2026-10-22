@@ -11,9 +11,10 @@ from datetime import datetime
 
 # Default_Ignorable_Code_Point characters that are not format (Cf) characters:
 # combining grapheme joiner, Hangul fillers, Khmer vowels, Mongolian and
-# variation selectors. They render as nothing.
-_IGNORABLE = re.compile("[\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u3164\ufe00-\ufe0f\uffa0"
-                        "\U000e0100-\U000e01ef]")
+# variation selectors, and the reserved (unassigned, so not Cf) ranges
+# U+2065, U+FFF0-FFF8, U+E0000-E0FFF. They render as nothing.
+_IGNORABLE = re.compile("[\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u2065\u3164\ufe00-\ufe0f\uffa0"
+                        "\ufff0-\ufff8\U000e0000-\U000e0fff]")
 
 
 def identity(name):

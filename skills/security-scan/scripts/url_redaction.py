@@ -22,7 +22,11 @@ SCHEMELESS_USERINFO_RE = re.compile(r"(?<![\w:/\\.-])//[^\s/?#\"'<>@:\[\]()]+:[^
 # A package version after '@' (unpkg.com/react@18.3.1/, pkg.go.dev/net@v0.17.0), not a host.
 VERSION_RE = re.compile(r"v?\d+(?:\.\d+){0,2}(?:[-+][\w.]+)?(?=[/?#]|$)")
 # A percent-encoded URL (https%3A%2F%2Fuser%3Apw%40host): its userinfo hides in %40.
-ENCODED_URL_RE = re.compile(r"(?i)(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*%3A%2F%2F[^\s\"'<>&]*")
+# Double or triple encoding (%253A%252F%252F) and partial encoding (https%3A//,
+# https:%2F%2F) hide it the same way; a plain :// is URL_RE's.
+_PCT = r"%(?:25){0,2}"
+ENCODED_URL_RE = re.compile(r"(?i)(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*(?!://)"
+                            r"(?::|" + _PCT + r"3A)(?:/|" + _PCT + r"2F){2}[^\s\"'<>&]*")
 # Database and service URLs, whose paths (a database, vhost or bucket name) never carry an '@'.
 SERVICE_SCHEME_RE = re.compile(r"(?i)(?:postgres(?:ql)?|mysql|mariadb|rediss?|mongodb|amqps?|mssql|sqlserver|oracle"
                                r"|ldaps?|smtps?|imaps?|s?ftp|nats|mqtts?|kafka|clickhouse|neo4j|bolt|couchdb)(?:\+|$)")
@@ -69,7 +73,10 @@ def hidden_userinfo(token):
 
 
 def _encoded_secret(token):
-    authority = re.split(r"(?i)%2F", token[token.lower().index("%2f%2f") + 6:], maxsplit=1)[0]
+    for _ in range(2):  # undo up to two extra rounds of encoding of '%'
+        token = re.sub(r"%25", "%", token)
+    token = re.sub(r"(?i)%2F", "/", re.sub(r"(?i)%3A", ":", token))
+    authority = token.partition("//")[2].partition("/")[0]
     return "%40" in authority.lower() or "@" in authority
 
 
@@ -86,8 +93,10 @@ def has_url_credentials(text):
             return True
         try:
             parts = urlsplit(token)
-            # https://TOKEN@host carries a credential as the user name alone.
-            if parts.password or parts.username and parts.scheme.lower() in ("http", "https"):
+            # https://TOKEN@host carries a credential as the user name alone, also under a
+            # VCS prefix (git+https://TOKEN@host); ssh's user name (git@) is an account, not one.
+            transport = parts.scheme.lower().rsplit("+", 1)[-1]
+            if parts.password or parts.username and transport in ("http", "https", "ws", "wss"):
                 return True
         except ValueError:
             return True

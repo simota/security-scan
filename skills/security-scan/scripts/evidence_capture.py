@@ -39,7 +39,7 @@ import sys
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from evidence_integrity import EvidenceError, _Root, _parts, _deadline, _json_object
+from evidence_integrity import EvidenceError, _Root, _parts, _deadline, _json_object, require_self_contained_git
 from render import SchemaError, derive_expert, secret_in_source, validate_data
 
 GIT_BINARY = "/usr/bin/git"  # Never resolve a program through target PATH/config.
@@ -209,6 +209,12 @@ def _capture(repo, out_root, source_root, findings_name, paths, commit, until):
         git_dir = None
     if git_dir is None or not stat.S_ISDIR(git_dir.st_mode):
         raise CaptureError("REPO must be the top level of a checkout with a .git directory")
+    # Alternates, grafts and promisor packs keep objects evidence_integrity.py cannot read:
+    # never pin evidence the verifier can only fail.
+    try:
+        require_self_contained_git(source_root, ".git/")
+    except EvidenceError as e:
+        raise CaptureError(f"REPO's .git is not self-contained ({e}); capture from a full, standalone clone") from None
     validate_findings(data)
     if not isinstance(paths, (list, tuple)) or not 0 < len(paths) <= MAX_PATHS:
         raise CaptureError(f"capture requires 1 to {MAX_PATHS} paths")

@@ -178,7 +178,7 @@ contain strings. Present `validation` and `previous_validation` values must be
 objects, `references` must be a list, and their documented text fields must be
 strings. An invalid value exits `2` with its field path (including list index)
 before creating report files. Text must be valid Unicode; locations cannot
-contain control characters, and source line numbers must be parseable by the
+contain control, bidi, zero-width or line-separator characters, and source line numbers must be parseable by the
 Python runtime. Non-finite JSON numbers are rejected, and JSON nested deeper
 than 200 levels is refused (exit `2`) by every tool that reads the record. Unknown extension fields
 are retained if their values can be represented safely in UTF-8/JSON output;
@@ -521,10 +521,12 @@ Every finding should point the reader at evidence they can open:
   or pull request, and any write-up. `deps_scan.py` fills these from
   supported audit results; add an `article` entry by hand when a vendor post or analysis explains the issue
   better than the advisory
-- Only absolute `http://` and `https://` URLs without credentials or control
-  characters are accepted; anything else is rejected when rendering.
-  Credential-like query or fragment parameters (`private_token`, signatures,
-  JWTs) are dropped from the displayed link
+- Only absolute `http://` and `https://` URLs without credentials (userinfo,
+  or a recognised token in the host or path such as a Slack webhook or bot
+  URL), whitespace, control, bidi or zero-width characters are accepted;
+  anything else is rejected when rendering. Credential-like query or fragment
+  parameters (`private_token`, `pass`, signatures, JWTs, a bare `?<token>`)
+  are dropped from the displayed link
 
 Render with `--repo` only for the requester's own copy of the report: the
 excerpts are source code, so the outputs carry the repository's confidentiality.

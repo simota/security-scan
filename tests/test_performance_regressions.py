@@ -60,6 +60,26 @@ class DepsScanPathologicalTests(unittest.TestCase):
                                          "      - run: echo ${{ " + "github[" * 3000 + " }}\n")
         self.timed_scan()
 
+    def test_pathological_dependency_source_lines(self):
+        # Unclosed extras and strings: each candidate start must not rescan to the end of the line.
+        (self.root / "pyproject.toml").write_text("[project]\ndependencies = [" + '"a[' * 200000 + "\n")
+        (self.root / "requirements.txt").write_text("a" * 300000 + "[" * 300000 + "\n./" + "[" * 300000 + "\n")
+        (self.root / "Cargo.toml").write_text("[dependencies]\nx = { " + 'git = "a' * 200000 + "\n")
+        (self.root / "Cargo.lock").write_text('source = "' * 300000 + "\n")
+        (self.root / "yarn.lock").write_text('  resolution: "' + "@" * 300000 + "\n")
+        # Continuation joins: one statement spanning every line must not be rebuilt per line.
+        (self.root / "Gemfile").write_text('gem "x",\n' * 100000)
+        (self.root / "Dockerfile").write_text("RUN curl x \\\n" * 100000 + "  | sh\n")
+        self.timed_scan()
+
+    def test_long_whitespace_runs_in_new_manifest_parsers(self):
+        # Two quantifiers able to share one whitespace run backtrack quadratically or worse.
+        (self.root / "Cargo.toml").write_text("[" + " " * 100000 + "x\n[" + " " * 100000 + "]\n[" + " ." * 50000 + "]\n")
+        (self.root / "requirements.txt").write_text("a" + " " * 100000 + "!\n-e a" + " " * 100000 + "!\n")
+        (self.root / "pyproject.toml").write_text('[project]\ndependencies = ["a' + " " * 100000 + '!"]\n'
+                                                  "[" + " " * 100000 + "x\n")
+        self.timed_scan()
+
     def test_many_dependencies_and_hosts(self):
         deps = {"pkg-%d" % i: "^1.0.%d" % i for i in range(20000)}
         (self.root / "package.json").write_text(json.dumps({"dependencies": deps}, indent=1))

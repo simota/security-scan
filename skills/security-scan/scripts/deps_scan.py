@@ -672,15 +672,18 @@ def mapping(value):
     return value if isinstance(value, dict) else {}
 
 
-NPM_EXTERNAL_SOURCE = re.compile(r"^(git(\+\w+)?:|git@|github:|gitlab:|bitbucket:|gist:|https?:|file:|link:)"
-                                 r"|^[\w.-]+/[\w.-]+(#.*)?$")
+# A path spec reaching here (bare ../ / ~/ paths included) already failed npm_local_path: it leaves the checkout.
+NPM_EXTERNAL_SOURCE = re.compile(r"^(git(\+\w+)?:|git@|github:|gitlab:|bitbucket:|gist:|https?:|file:|link:|portal:)"
+                                 r"|^(\.{1,2}/|/|~/)|^[\w.-]+/[\w.-]+(#.*)?$")
 
 
 def npm_floating(spec):
-    """True when any alternative of an npm range has no upper bound."""
+    """True when any alternative of an npm range has no upper bound, or names a dist-tag."""
     for alternative in spec.split("||"):
         parts = alternative.split()
-        if not parts or any(x.lower() in ("*", "x", "latest") for x in parts):
+        # A dist-tag (latest, next, beta) moves with every publish; v1.2.3 and x-ranges are versions.
+        if not parts or any(x.lower() in ("*", "x", "latest") for x in parts) or (
+                len(parts) == 1 and re.fullmatch(r"(?!v?\d)(?![xX*](?:\.[xX*\d]+)*$)[A-Za-z][\w.-]*", parts[0])):
             return True
         if (any(x.startswith(">") for x in parts) and not any(x.startswith("<") for x in parts)
                 and " - " not in alternative):
@@ -690,7 +693,7 @@ def npm_floating(spec):
 
 def npm_local_path(c, manifest, spec):
     """A relative file:/link: or ./ path that stays inside this checkout is first-party code."""
-    m = re.match(r"(file:|link:)?(.*)$", spec, re.S)
+    m = re.match(r"(file:|link:|portal:)?(.*)$", spec, re.S)
     if "\0" in spec or not (m[2] and not re.match(r"[/\\~]|[A-Za-z][\w+.-]*:", m[2]) if m[1] else re.match(r"\.{1,2}/", m[2])):
         return False
     # realpath follows in-checkout symlinks to their targets, as npm does.
@@ -704,16 +707,20 @@ def check_npm(c, p):
         return
     for section in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
         for name, spec in mapping(data.get(section)).items():
-            spec = str(spec).strip()
+            declared = spec = str(spec).strip()
+            # An alias (npm:real-name@range) installs real-name at range; no range means latest.
+            alias = re.match(r"npm:(?:@[^/@\s]+/)?[^@\s]+(?:@(.*))?$", spec, re.S)
+            if alias:
+                spec = alias[1] if alias[1] is not None else "latest"
             ln = line_of(text, f'"{name}"')
             if npm_local_path(c, p, spec):
                 continue
             if NPM_EXTERNAL_SOURCE.match(spec):
-                c.add("Medium", f"npm dependency {name} is fetched outside the registry ({spec})", p, ln,
+                c.add("Medium", f"npm dependency {name} is fetched outside the registry ({declared})", p, ln,
                       impact="Bypasses registry integrity and advisory coverage; the source can change",
                       fix="Depend on a published, version-pinned release")
             elif npm_floating(spec) and section != "peerDependencies":
-                c.add("Medium", f"npm dependency {name} floats to any version ({spec or 'empty'})", p, ln,
+                c.add("Medium", f"npm dependency {name} floats to any version ({declared or 'empty'})", p, ln,
                       impact="A newly published malicious or broken release is installed automatically",
                       fix="Use a bounded range and the lockfile")
     for hook in ("preinstall", "install", "postinstall", "prepare"):
@@ -735,16 +742,29 @@ def check_npm_lock(c, p):
         return cursor[1]
     resolved = re.compile(r'"resolved"\s*:\s*("(?:[^"\\]|\\.)*")'
                           r'|^[^\S\n]+resolved\s+("(?:[^"\\]|\\.)*")'
-                          r'|\btarball:\s*("(?:[^"\\]|\\.)*"|[^\s,}]+)', re.M)
+                          r'|\btarball:\s*("(?:[^"\\]|\\.)*"|[^\s,}]+)'
+                          # Yarn Berry: resolution: "<name>@<protocol or URL>" (pnpm's resolution: {...} is below).
+                          r'|^[^\S\n]+resolution:\s*("(?:[^"\\]|\\.)*")', re.M)
     for match in resolved.finditer(text):
         try:
-            raw = match[1] or match[2] or match[3]
+            raw = match[1] or match[2] or match[3] or match[4]
             url = json.loads(raw) if raw.startswith('"') else raw.strip("'")
+            berry = False
+            if match[4]:
+                # Drop the package name (scoped names start with @); npm:, workspace:, patch: and
+                # local file:/link:/portal: resolutions are the registry or paths package.json declares.
+                url = re.match(r"(?:@[^/@]+/)?[^@]*@(.*)$", url, re.S)
+                url = url[1] if url else ""
+                if not re.match(r"[a-z][\w+.-]*://|git@|github:|gitlab:|bitbucket:", url, re.I):
+                    continue
+                berry = True
             parsed = urlsplit(url)
             # Git hosts' archive endpoints are git sources served as tarballs.
             archive = re.match(r"(codeload\.github\.com|gitlab\.com|bitbucket\.org)$", parsed.hostname or "") and (
                 parsed.hostname == "codeload.github.com" or "/-/archive/" in parsed.path or "/get/" in parsed.path)
-            if archive or re.match(r"(git(\+[a-z]+)?|github|gitlab|bitbucket|file|link)$", parsed.scheme.lower()):
+            # Berry records a git dependency as <repository URL>#commit=<sha>, whatever the host.
+            git = berry and ("commit=" in parsed.fragment or parsed.path.endswith(".git") or url.startswith("git@"))
+            if archive or git or re.match(r"(git(\+[a-z]+)?|github|gitlab|bitbucket|file|link)$", parsed.scheme.lower()):
                 if "outside" not in hosts:
                     hosts["outside"] = line_at(match.start())
                 continue
@@ -789,8 +809,8 @@ def check_npm_lock(c, p):
         c.add("Low", f"lockfile resolves packages from non-default host {h}", p, hosts[h],
               impact="Packages come from a registry outside the public one; confirm it is trusted",
               fix="Confirm the host is an approved internal mirror", confidence="Suspected")
-    if p.name == "package-lock.json" and not re.search(r'"integrity"\s*:', text):
-        c.add("Low", "package-lock.json has no integrity hashes", p,
+    if p.name in ("package-lock.json", "npm-shrinkwrap.json") and not re.search(r'"integrity"\s*:', text):
+        c.add("Low", f"{p.name} has no integrity hashes", p,
               impact="Tampered tarballs are not detected", fix="Regenerate the lockfile with a current npm")
 
 
@@ -824,7 +844,8 @@ def check_composer(c, p):
     text, data = load_json_object(c, p, "composer.json scan")
     if data is None:
         return
-    if data.get("minimum-stability") in ("dev", "alpha", "beta", "RC") and not data.get("prefer-stable"):
+    # Composer compares stability names case-insensitively ("rc" and "RC").
+    if str(data.get("minimum-stability")).lower() in ("dev", "alpha", "beta", "rc") and not data.get("prefer-stable"):
         c.add("Low", f"composer minimum-stability is {data['minimum-stability']} without prefer-stable", p,
               line_of(text, "minimum-stability"), impact="Unstable releases may be installed",
               fix="Set prefer-stable: true or raise minimum-stability")
@@ -841,7 +862,23 @@ def check_composer(c, p):
                   line_of(text, '"repositories"'),
                   impact="Packages outside Packagist lack its advisory and integrity coverage",
                   fix="Prefer published releases; pin references", confidence="Suspected")
-    plugins = mapping(data.get("config")).get("allow-plugins")
+        url = str(repo.get("url", ""))
+        if re.match(r"(?i)(http|git)://", url) and registry_host(url) not in LOCAL_HOSTS:
+            c.add("Medium", f"composer.json fetches code over plaintext {url.split(':', 1)[0].lower()}://", p,
+                  line_of(text, '"repositories"'), category=CAT_BUILD,
+                  impact="Anyone on the network path can substitute packages that then run in builds",
+                  fix="Use https:// (or ssh for git) for every package source")
+    config = mapping(data.get("config"))
+    if config.get("disable-tls") is True:
+        c.add("Medium", "composer.json disables TLS verification for a package source", p, line_of(text, "disable-tls"),
+              category=CAT_BUILD, impact="A network attacker can serve modified packages",
+              fix="Remove it and trust the CA instead")
+    if config.get("secure-http") is False:
+        c.add("Medium", "composer.json allows package downloads over plaintext http:// (secure-http: false)", p,
+              line_of(text, "secure-http"), category=CAT_BUILD,
+              impact="Anyone on the network path can substitute packages that then run in builds",
+              fix="Remove secure-http: false and use https:// sources")
+    plugins = config.get("allow-plugins")
     if plugins is True:
         c.add("Medium", "composer allow-plugins is true for every package", p, line_of(text, "allow-plugins"),
               impact="Any dependency's plugin code runs during install",
@@ -852,13 +889,55 @@ def check_composer(c, p):
             # Platform constraints (php, ext-*, lib-*) are not installed packages.
             if name in ("php", "php-64bit", "composer-plugin-api") or name.startswith(("ext-", "lib-")):
                 continue
+            # Each alternative without its @stability flag: "*@beta" and "^1.0 || *" take any version,
+            # "dev-main" and "2.x-dev" a moving branch.
+            alts = [re.sub(r"@\w+$", "", alt.strip()).strip() for alt in re.split(r"\|\|?", spec)]
             unbounded = any(
                 any(x.startswith(">") for x in alt.replace(",", " ").split())
                 and not any(x.startswith("<") for x in alt.replace(",", " ").split())
-                for alt in re.split(r"\|\|?", spec))
-            if spec in ("*", "") or spec.startswith("dev-") or "@dev" in spec or unbounded:
+                for alt in alts)
+            if (spec == "" or "@dev" in spec or unbounded
+                    or any(alt in ("*", "") or re.search(r"^dev-|-dev$", alt, re.I) for alt in alts)):
                 c.add("Medium", f"composer dependency {name} floats ({spec})", p, line_of(text, f'"{name}"'),
                       impact="Unreviewed code is pulled on update", fix="Require a tagged version range")
+
+
+# A requirement fetched from VCS or a URL rather than the index, including a
+# PEP 508 direct reference (name[extras] @ url, with or without spaces).
+# One whitespace run on each side of the optional extras, so no two runs can share the same spaces.
+PIP_URL = re.compile(r"^(?:git\+|https?://|hg\+|svn\+|bzr\+|file:)"
+                     r"|^[A-Za-z0-9][A-Za-z0-9._-]*\s*(?:\[[^\]]*\]\s*)?@")
+
+
+def file_url_path(c, url):
+    """The local path a file: URL names, or None for any other URL.
+
+    file:///abs and file://localhost/abs are absolute; file:./x and file:. are
+    relative to the manifest; PDM's ${PROJECT_ROOT} is the checkout root.
+    """
+    m = re.match(r"(?i)file:(?://(?:localhost)?(?=/))?([^#?\s\"']*)", url)
+    if not m:
+        return None
+    return re.sub(r"^/?\$\{PROJECT_ROOT\}", lambda _: str(c.root), m[1]) or "."
+
+
+def outside_checkout(c, manifest, path):
+    """A path, relative to its manifest's directory, that resolves outside this checkout."""
+    if "\0" in path:
+        return False
+    target = os.path.realpath(os.path.join(Path(manifest).parent, os.path.expanduser(path)))
+    root = os.path.realpath(c.root)
+    return os.path.commonpath([target, root]) != root
+
+
+def pip_outside_path(c, requirements, spec):
+    """A ./, ../, / or ~/ path (extras and options aside) that resolves outside this checkout."""
+    path = spec.split()[0] if spec.split() else ""
+    if not re.match(r"\.{1,2}(?:[/\\[]|$)|/|~/", path):
+        return False
+    if path.endswith("]") and "[" in path:  # drop extras: .[dev]
+        path = path[:path.rindex("[")]
+    return outside_checkout(c, requirements, path)
 
 
 def check_requirements(c, p):
@@ -870,8 +949,16 @@ def check_requirements(c, p):
         editable = re.match(r"^(-e|--editable)(\s+|=)(.*)$", s)
         if editable:
             s = editable.group(3).strip()
-            if not re.match(r"^(git\+|https?://|hg\+|svn\+|bzr\+)", s):
-                continue  # A local editable path is first-party code, not a fetched dependency.
+            if not PIP_URL.match(s) and not pip_outside_path(c, p, s):
+                continue  # A local editable path inside the checkout is first-party code.
+        direct = re.match(r"[A-Za-z0-9][A-Za-z0-9._-]*\s*(?:\[[^\]]*\]\s*)?@\s*(\S+)", s)  # name @ file:...
+        local = file_url_path(c, direct[1] if direct else s)
+        if local is not None:  # file:./libs/x is first-party; file:///opt/x leaves the checkout
+            if outside_checkout(c, p, local):
+                c.add("Medium", "Python dependency installed from a path outside the checkout (see source location)",
+                      p, i, impact="Bypasses index integrity and advisory coverage; the code is not part of this review",
+                      fix="Publish and pin a released version, or bring the code into the checkout")
+            continue
         extra = s.startswith("--extra-index-url")
         if extra:
             c.add("Medium", "pip --extra-index-url mixes a second index with PyPI", p, i,
@@ -892,15 +979,115 @@ def check_requirements(c, p):
             c.add("Medium", "pip --find-links adds a package source beside the index", p, i,
                   impact="Packages found there can shadow or replace index releases",
                   fix="Use a single trusted index or pin hashes", category=CAT_BUILD)
-        elif s.startswith("-") or s.startswith("."):
+        elif s.startswith("-"):
             continue
-        elif re.match(r"^(git\+|https?://|hg\+|svn\+|bzr\+)", s) or " @ " in s:
+        elif pip_outside_path(c, p, s):
+            c.add("Medium", "Python dependency installed from a path outside the checkout (see source location)", p, i,
+                  impact="Bypasses index integrity and advisory coverage; the code is not part of this review",
+                  fix="Publish and pin a released version, or bring the code into the checkout")
+        elif s.startswith((".", "/", "~")):
+            continue  # A path inside the checkout is first-party code.
+        elif PIP_URL.match(s):
             c.add("Medium", "Python dependency fetched from a URL (see source location)", p, i,
                   impact="Bypasses index integrity and advisory coverage", fix="Pin to a released version")
         elif "==" not in s and "--hash" not in s:
             c.add("Low", "Python requirement not pinned (see source location)", p, i,
                   impact="Installs whatever version is newest at install time",
                   fix="Pin with == (and --hash for reproducible installs) or use a lockfile")
+
+
+# Tables whose keys are dependency names, per TOML manifest; a [<table>.<name>]
+# subtable holds one dependency. Pipfile's "*" is pipenv's default, pinned by
+# Pipfile.lock, so only Cargo and Poetry report a "*" version as floating.
+TOML_DEP_TABLES = {
+    "Cargo.toml": r"(?:workspace\.|target\..+\.)?(?:dev-|build-)?dependencies",
+    "pyproject.toml": r"tool\.poetry\.(?:group\.[^.]+\.)?(?:dev-)?dependencies|tool\.uv\.sources",
+    "Pipfile": r"(?:dev-)?packages",
+}
+# PEP 621 / PEP 735 dependency lists, whose entries are PEP 508 strings.
+PEP508_TABLES = r"project|project\.optional-dependencies|dependency-groups|build-system"
+# Extras stop at a quote, so an unclosed "[" cannot make each string scan to the end of the line.
+PEP508_URL = re.compile(r"""["']\s*([A-Za-z0-9][\w.-]*)\s*(?:\[[^\]"']*\]\s*)?@\s*([A-Za-z][\w+.-]*:[^"'\s]*)""")
+
+
+def toml_string(value, key):
+    m = re.search(r"(?:^|[{,\s])" + key + r"""\s*=\s*(?:"((?:[^"\\]|\\.)*)"|'([^']*)')""", value)
+    return None if m is None else m[1] if m[1] is not None else m[2]
+
+
+def check_toml_deps(c, p):
+    """git/URL/outside-path sources and "*" versions in Cargo.toml, pyproject.toml and Pipfile."""
+    text = read(p)
+    kind = {"Cargo.toml": "cargo", "pyproject.toml": "python", "Pipfile": "python"}[p.name]
+    deps = re.compile(r"(%s)(?:\.(.+))?" % TOML_DEP_TABLES[p.name])
+    table, named = None, None  # the dependency table, and the dependency a [<table>.<name>] subtable holds
+    pep508 = False  # inside a PEP 621 / PEP 735 table
+
+    def source(name, fields, line):
+        git, url, path, version = (fields.get(k) for k in ("git", "url", "path", "version"))
+        found = "git" if git is not None else "URL" if url is not None else \
+            "path outside the checkout" if path is not None and outside_checkout(c, p, path) else None
+        if found:
+            c.add("Medium", f"{kind} dependency {name} is fetched outside the registry ({found})", p, line,
+                  impact="Bypasses registry integrity and advisory coverage; the source can change",
+                  fix="Depend on a published, version-pinned release")
+        elif version is not None and version.strip() == "*" and p.name != "Pipfile" and name != "python":
+            c.add("Medium", f"{kind} dependency {name} floats to any version (*)", p, line,
+                  impact="A newly published malicious or broken release is installed automatically",
+                  fix="Require a bounded version and commit the lockfile")
+
+    for i, ln in enumerate(text.splitlines(), 1):
+        code = ruby_code(ln).strip()  # TOML comments follow the same rule
+        header = re.fullmatch(r"\[([^\[\]]+)\]", code)  # one run, no nested quantifiers to backtrack
+        if header or code.startswith("[["):
+            name = ".".join(part.strip() for part in header[1].split(".")) if header else ""
+            m = deps.fullmatch(name)
+            table = m[1] if m else None
+            named = m[2].strip("\"'") if m and m[2] else None
+            pep508 = bool(re.fullmatch(PEP508_TABLES, name)) and p.name == "pyproject.toml"
+            continue
+        if p.name == "pyproject.toml" and pep508:
+            for ref in PEP508_URL.finditer(code):
+                local = file_url_path(c, ref[2])
+                if local is not None and not outside_checkout(c, p, local):
+                    continue  # a first-party package of this checkout (PDM: file:///${PROJECT_ROOT}/...)
+                found = "URL" if local is None else "path outside the checkout"
+                c.add("Medium", f"python dependency {ref[1]} is fetched outside the registry ({found})", p, i,
+                      impact="Bypasses index integrity and advisory coverage; the source can change",
+                      fix="Depend on a published, version-pinned release")
+        if table is None:
+            continue
+        entry = re.match(r"""(?:"([^"]+)"|'([^']+)'|([\w.-]+))\s*=\s*(.*)$""", code)
+        if not entry:
+            continue
+        key, value = entry[1] or entry[2] or entry[3], entry[4].strip()
+        if named is not None:  # [<table>.<name>]: one field of that dependency per line
+            source(named, {key: value.strip("\"'")}, i)
+        elif value.startswith("{"):  # name = { git = "...", ... }
+            source(key, {k: toml_string(value, k) for k in ("git", "url", "path", "version")}, i)
+        else:  # name = "<version requirement>"
+            source(key, {"version": value.strip("\"'")}, i)
+
+
+def check_cargo_lock(c, p):
+    """Cargo.lock packages from git, or from a registry other than crates.io."""
+    text = read(p)
+    default = {"registry+https://github.com/rust-lang/crates.io-index", "sparse+https://index.crates.io/"}
+    first = {}
+    for i, ln in enumerate(text.splitlines(), 1):
+        m = re.match(r'\s*source\s*=\s*"([^"]*)"', ln)
+        if not m or m[1] in default:
+            continue
+        kind = "git" if m[1].startswith("git+") else registry_host(m[1].split("+", 1)[-1]) or m[1]
+        first.setdefault(kind, i)
+    if "git" in first:
+        c.add("Medium", "lockfile resolves a package from git or a local path, not a registry", p, first.pop("git"),
+              impact="Bypasses registry integrity and advisory coverage; the source can change",
+              fix="Depend on a published, version-pinned release")
+    for host in sorted(first):
+        c.add("Low", f"lockfile resolves packages from non-default host {host}", p, first[host],
+              impact="Packages come from a registry outside the public one; confirm it is trusted",
+              fix="Confirm the host is an approved internal mirror", confidence="Suspected")
 
 
 def ruby_code(ln):
@@ -919,8 +1106,15 @@ def ruby_code(ln):
 def check_gemfile(c, p):
     text = read(p)
     outside = r"""['"](?:/|\.\./)"""  # Only an absolute or parent path leaves this checkout.
+    statements = []  # (first line, parts); a line ending in "," continues it (gem "x",\n  git: "...")
     for i, ln in enumerate(text.splitlines(), 1):
-        ln = ruby_code(ln)
+        ln = ruby_code(ln).rstrip()
+        if statements and statements[-1][1][-1].endswith(","):
+            statements[-1][1].append(ln.strip())
+        else:
+            statements.append((i, [ln]))
+    for i, parts in statements:
+        ln = " ".join(parts)
         if (re.search(r"^\s*gem\s.*(\b(git|github)\s*:|:(git|github)\s*=>|\bpath\s*:\s*" + outside
                       + r"|:path\s*=>\s*" + outside + ")", ln)
                 or re.match(r"""^\s*(git|github)\s*\(?\s*['"]|^\s*path\s*\(?\s*""" + outside, ln)):
@@ -1276,8 +1470,12 @@ def privileged_workflows(files, root):
 SOURCE_CONFIGS = {"pom.xml", "settings.xml", "build.gradle", "build.gradle.kts", "settings.gradle",
                   "settings.gradle.kts", "nuget.config", "NuGet.Config", "pip.conf", "pip.ini", ".pypirc",
                   "bunfig.toml", ".npmrc", ".yarnrc", ".yarnrc.yml", ".gitmodules", "Gemfile"}
+# Manifests whose package-source tables check_source_transport reads (their url = lines only).
+SOURCE_MANIFESTS = {"Pipfile", "pyproject.toml"}
+SOURCE_TABLES = {"source", "tool.poetry.source", "tool.uv.index", "tool.pdm.source"}
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
-TLS_OFF = re.compile(r"""^\s*(?:strict-ssl(?:\s*=\s*|\s+)["']?false|["']?enableStrictSsl["']?\s*:\s*false|trusted-host\s*=|--trusted-host\b"""
+TLS_OFF = re.compile(r"""^\s*(?:strict-ssl(?:\s*=\s*|\s+)["']?false|["']?enableStrictSsl["']?\s*:\s*false"""
+                     r"""|trusted[-_]host\s*[=:]|--trusted-host\b|verify_ssl\s*=\s*false"""
                      r"""|allowInsecureProtocol\s*(?:=|\()\s*true|isAllowInsecureProtocol\s*=\s*true)""", re.I)
 
 
@@ -1291,7 +1489,7 @@ def check_source_transport(c, p):
     text = read(p)
     if p.suffix in (".xml", ".config"):
         text = xml_code(text)
-    in_repo, depth, repo_depth, pending, spans = 0, 0, None, False, None
+    in_repo, depth, repo_depth, pending, spans, in_source = 0, 0, None, False, None, False
     for i, ln in enumerate(text.splitlines(), 1):
         if ln.lstrip().startswith(("#", "//", ";", "<!--")):
             continue
@@ -1344,6 +1542,13 @@ def check_source_transport(c, p):
                 continue
         elif p.name == "Gemfile" and not re.match(r"\s*(source|gem|git)\b", ln):
             continue
+        elif p.name in SOURCE_MANIFESTS:
+            header = re.match(r"\s*\[\[?([^\[\]]*)\]", ln)
+            if header:
+                in_source = ".".join(x.strip() for x in header[1].split(".")) in SOURCE_TABLES
+                continue
+            if not in_source or not re.match(r"""\s*["']?url["']?\s*=""", ln):
+                continue  # Only package sources fetch code; homepage and project URLs are metadata.
         for m in re.finditer(r"""\b(http|git)://([^\s"'<>/:]+)""", ln):
             if m.group(2).lower() in LOCAL_HOSTS or spans and not any(a <= m.start() < b for a, b in spans):
                 continue
@@ -1357,10 +1562,17 @@ def check_extra_sources(c, p):
     text = read(p)
     if p.name in ("pip.conf", "pip.ini"):
         for i, ln in enumerate(text.splitlines(), 1):
-            if re.match(r"\s*extra-index-url\s*=", ln):
+            # pip reads option names case-insensitively with "_" for "-" (extra_index_url).
+            key = re.match(r"\s*([\w-]+)\s*[=:]", ln)
+            key = key[1].lower().replace("_", "-") if key else ""
+            if key == "extra-index-url":
                 c.add("Medium", "pip config adds a second index beside PyPI", p, i, category=CAT_BUILD,
                       impact="Dependency confusion: a public package with an internal name may be installed",
                       fix="Use a single index that proxies PyPI, or pin hashes")
+            elif key == "find-links":
+                c.add("Medium", "pip --find-links adds a package source beside the index", p, i,
+                      impact="Packages found there can shadow or replace index releases",
+                      fix="Use a single trusted index or pin hashes", category=CAT_BUILD)
     elif p.name.lower() == "nuget.config":
         text = xml_code(text)
         adds, cursor = [], [0, 1]  # (line, key) of <add> inside <packageSources>; offsets only increase
@@ -1977,6 +2189,12 @@ def check_workflow(c, p, privileged=None, calls=None):
             image = child(yaml_children(lines, service[1] + 1, service[3]), "image")
             if image:
                 images.append((image[1] + 1, image_ref(image[2])))
+    # A Docker container action (action.yml runs.image: docker://...) runs that image for every caller;
+    # runs.image: Dockerfile builds from this repository and is checked as a Dockerfile.
+    runs = child(top, "runs") if p.name in ("action.yml", "action.yaml") else None
+    image = runs and child(yaml_children(lines, runs[1] + 1, runs[3]), "image")
+    if image and image_ref(image[2]) and image_ref(image[2]).startswith("docker://"):
+        images.append((image[1] + 1, image_ref(image[2])[len("docker://"):]))
     for i, img in images:
         if unpinned_image(img, digest=True):
             c.add("Low", f"workflow container image {img} is not pinned to a digest", p, i, category=CAT_BUILD,
@@ -2056,10 +2274,50 @@ def check_workflow(c, p, privileged=None, calls=None):
                       fix="Pass it through an env variable and quote it")
 
 
+def dockerfile_instructions(text):
+    """(first line number, instruction, line_at) with continuations joined, as Docker reads them.
+
+    The continuation character is the `# escape=` parser directive's (default backslash).
+    Comment lines never continue, and inside a continuation they are dropped, as Docker
+    drops them. line_at(offset) is the physical line an offset of the instruction came from.
+    """
+    escape, directives = "\\", True
+    pending, marks, size = [], [], 0  # physical lines of the instruction, (offset, line number) of each, length
+
+    def joined():
+        text = " ".join(pending)
+        lines = list(marks)
+        return lines[0][1], text, lambda offset: lines[bisect.bisect_right(lines, (offset, float("inf"))) - 1][1]
+
+    for i, ln in enumerate(text.splitlines(), 1):
+        directive = directives and re.match(r"\s*#\s*(\w+)\s*=\s*(\S+)\s*$", ln)
+        if directive and directive[1].lower() == "escape":
+            escape = directive[2][0]
+        directives = bool(directive)  # parser directives only lead the file
+        if re.match(r"\s*#", ln):
+            if not pending:
+                yield i, ln, lambda offset, i=i: i
+            continue
+        marks.append((size, i))
+        if ln.rstrip().endswith(escape):
+            pending.append(ln.rstrip()[:-1])
+            size += len(pending[-1]) + 1
+            continue
+        pending.append(ln)
+        yield joined()
+        pending, marks, size = [], [], 0
+    if pending:
+        yield joined()
+
+
+# A shell receiving a piped script: sh, bash, zsh, dash or ksh, by name or path, optionally under sudo.
+PIPED_SHELL = re.compile(r"\s*(?:sudo\s+(?:-\S+\s+)*)?(?:/\S*/)?(?:ba|z|da|k)?sh\b")
+
+
 def check_dockerfile(c, p):
     text = read(p)
     stages, args, seen_from = set(), {}, False
-    for i, ln in enumerate(text.splitlines(), 1):
+    for i, ln, line_at in dockerfile_instructions(text):
         a = re.match(r"\s*ARG\s+(\w+)=(\S+)", ln, re.I)
         if a and not seen_from:  # Only ARGs before the first FROM apply to FROM lines.
             args[a.group(1)] = a.group(2).strip("'\"")
@@ -2071,7 +2329,9 @@ def check_dockerfile(c, p):
         m = re.match(r"\s*FROM\s+(?:--platform=\S+\s+)?(\S+)(?:\s+AS\s+(\S+))?", ln, re.I)
         if m:
             seen_from = True
-            img = re.sub(r"\$\{?(\w+)\}?", lambda v: args.get(v.group(1), v.group(0)), m.group(1))
+            # $NAME, ${NAME} and ${NAME:-default} / ${NAME-default} take the ARG value, else the default.
+            img = re.sub(r"\$(?:(\w+)|\{(\w+)(?::?-([^}]*))?\})",
+                         lambda v: args.get(v[1] or v[2], v[3] if v[3] is not None else v[0]), m.group(1))
             earlier_stage = img.lower() in stages
             if m.group(2):
                 stages.add(m.group(2).lower())
@@ -2081,10 +2341,14 @@ def check_dockerfile(c, p):
             if ":" not in name or name.endswith(":latest"):
                 c.add("Low", f"base image {img} is not pinned", p, i, category=CAT_BUILD,
                       impact="Rebuilds pull a different image", fix="Pin a version tag, ideally a digest")
-        segments = ln.split("|")
-        if any(re.match(r"\s*(sh|bash)\b", seg) and re.search(r"curl|wget", prev)
-               for prev, seg in zip(segments, segments[1:])):
-            c.add("Low", "remote script piped into a shell during build", p, i, category=CAT_BUILD,
+        segments, offset, piped = ln.split("|"), 0, None
+        for prev, seg in zip(segments, segments[1:]):
+            offset += len(prev) + 1
+            if PIPED_SHELL.match(seg) and re.search(r"curl|wget", prev):
+                piped = line_at(offset - 1)  # the line of the pipe, where a one-line RUN reported it
+                break
+        if piped is not None:
+            c.add("Low", "remote script piped into a shell during build", p, piped, category=CAT_BUILD,
                   impact="Build executes whatever the URL serves at that moment",
                   fix="Download a pinned version and verify its checksum")
 
@@ -2121,10 +2385,18 @@ def inventory_composer_lock(c, p):
         return
     pkgs = packages_list(data.get("packages")) + packages_list(data.get("packages-dev"))
     c.inventory.append({"ecosystem": "composer", "lockfile": c.rel(p), "packages": len(pkgs),
-                        "notable": {x["name"]: x.get("version") for x in pkgs
+                        "notable": {x["name"]: scalar(x.get("version")) for x in pkgs
                                     if x.get("name") in ("laravel/framework", "symfony/http-kernel",
                                                          "guzzlehttp/guzzle", "laravel/sanctum")},
-                        "platform": mapping(data.get("platform"))})
+                        # Versions only: a nested value would be copied into the report verbatim, and
+                        # deep nesting overflows safe_output's recursion on Python < 3.12.
+                        "platform": {k: v for k, v in mapping(data.get("platform")).items()
+                                     if scalar(v) is not None}})
+
+
+def scalar(value):
+    """A version string or number from a lockfile; anything else is not a version."""
+    return value if isinstance(value, (str, int, float)) and not isinstance(value, bool) else None
 
 
 def inventory_npm_lock(c, p):
@@ -2885,13 +3157,17 @@ def scan(root, audit):
             check_gemfile(c, p)
         elif n == "go.mod":
             check_gomod(c, p)
+        elif n in TOML_DEP_TABLES:
+            check_toml_deps(c, p)
+        elif n == "Cargo.lock":
+            check_cargo_lock(c, p)
         elif n.startswith("Dockerfile") or n.endswith(".Dockerfile"):
             check_dockerfile(c, p)
         elif is_workflow(p) or n in ("action.yml", "action.yaml"):
             check_workflow(c, p, privileged.get(p.resolve()), calls)
         elif COMPOSE_FILE.fullmatch(n):
             check_compose(c, p)
-        if n in SOURCE_CONFIGS or p.parent.name == ".cargo" and n in ("config", "config.toml"):
+        if n in SOURCE_CONFIGS or n in SOURCE_MANIFESTS or p.parent.name == ".cargo" and n in ("config", "config.toml"):
             check_source_transport(c, p)
             check_extra_sources(c, p)
         if n == "composer.lock":

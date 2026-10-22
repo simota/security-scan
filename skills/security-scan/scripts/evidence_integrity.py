@@ -354,6 +354,16 @@ class _Root:
         self.chain = []
 
 
+def require_self_contained_git(root, prefix):
+    """Refuse a repository whose objects live elsewhere: the snapshot copies only its own store."""
+    for forbidden in ("commondir", "info/grafts", "objects/info/alternates", "objects/info/http-alternates"):
+        if root.exists(prefix + forbidden):
+            raise EvidenceError("git_external_store_unsupported")
+    pack = prefix + "objects/pack"
+    if root.exists(pack) and any(n.endswith(".promisor") for n in root.listing(pack)):
+        raise EvidenceError("git_promisor_unsupported")
+
+
 class _GitSnapshot:
     def __init__(self, repository, object_length, until):
         self.until, self.object_length, self.temp = until, object_length, None
@@ -364,9 +374,7 @@ class _GitSnapshot:
                 if not stat.S_ISDIR(root.entry_stat(".git").st_mode):
                     raise EvidenceError("git_directory_file_unsupported")
                 prefix = ".git/"
-            for forbidden in ("commondir", "info/grafts", "objects/info/alternates", "objects/info/http-alternates"):
-                if root.exists(prefix + forbidden):
-                    raise EvidenceError("git_external_store_unsupported")
+            require_self_contained_git(root, prefix)
             self.temp = tempfile.TemporaryDirectory(prefix="evidence-git-")
             self.path = Path(self.temp.name)
             (self.path / "objects").mkdir()
