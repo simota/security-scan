@@ -38,6 +38,20 @@ class FindingsMergeTests(unittest.TestCase):
             raise SystemExit(self.tool.main(["merge", str(self.out), *fragments]))
         return raised.exception.code
 
+    def test_batch_bound_counts_every_fragment_of_one_merge(self):
+        self.assertEqual(self.merge(self.fragment("meta.json", {"meta": META})), 0)
+        batches = [self.fragment("b%d.json" % b, {"findings": [
+            dict(FINDING, id="F-%03d" % (b * 3 + i), location="src/orders.py:%d" % (b * 3 + i)) for i in range(1, 4)]})
+            for b in range(2)]
+        before = self.out.read_bytes()
+        self.assertEqual(self.merge(*batches), 1)  # 6 new findings in one invocation
+        self.assertEqual(self.out.read_bytes(), before)
+        self.assertEqual(self.merge(batches[0]), 0)
+        self.assertEqual(self.merge(batches[1]), 0)
+        self.assertEqual(len(json.loads(self.out.read_text(encoding="utf-8"))["findings"]), 6)
+        # Updates to recorded findings across fragments are not new findings.
+        self.assertEqual(self.merge(*batches), 0)
+
     def test_creates_then_updates_by_id_and_dedupes_lists(self):
         first = self.fragment("a.json", {"meta": META, "findings": [FINDING], "limitations": ["no deploy config"]})
         self.assertEqual(self.merge(first), 0)
@@ -96,6 +110,25 @@ class FindingsMergeTests(unittest.TestCase):
         before = self.out.read_bytes()
         self.assertEqual(self.renumber(), 0)
         self.assertEqual(self.out.read_bytes(), before)
+
+    def test_renumber_leaves_paths_urls_and_scanner_fields_alone(self):
+        ref = {"type": "report", "url": "https://tracker.example/browse/F-001", "title": "F-001 in last year's test"}
+        findings = [dict(FINDING, id="F-001", severity="Low", location="src/forms/F-002/view.py:4",
+                         impact="same root as F-002", references=[ref]),
+                    dict(FINDING, id="F-002", location="a.py:1")]
+        self.assertEqual(self.merge(self.fragment("a.json", {"meta": META, "findings": findings})), 0)
+        self.assertEqual(self.renumber(), 0)
+        low = json.loads(self.out.read_text(encoding="utf-8"))["findings"][1]
+        self.assertEqual((low["id"], low["location"], low["impact"]), ("F-002", "src/forms/F-002/view.py:4",
+                                                                       "same root as F-001"))
+        self.assertEqual(low["references"][0]["url"], ref["url"])
+        # meta.source_url and a D-* finding's scanner fields are not references; its review is.
+        data = {"meta": {"source_url": "https://git.example/F-001/app"},
+                "findings": [{"id": "D-001", "title": "F-001 helper advisory", "validation": {"evidence": "see F-001"}}]}
+        moved = self.tool.renumber(data, {"F-001": "F-002"})
+        self.assertEqual(moved["meta"]["source_url"], "https://git.example/F-001/app")
+        self.assertEqual(moved["findings"][0]["title"], "F-001 helper advisory")
+        self.assertEqual(moved["findings"][0]["validation"]["evidence"], "see F-002")
 
     def test_renumber_follows_references_that_touch_japanese_text(self):
         findings = [dict(FINDING, id="F-001", severity="Low"), dict(FINDING, id="F-002")]
