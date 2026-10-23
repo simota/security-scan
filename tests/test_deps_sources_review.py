@@ -185,6 +185,25 @@ class DepsSourcesReviewTests(unittest.TestCase):
             ("pyproject.toml:12", "python dependency one floats to any version (*)"),
             ("pyproject.toml:5", "python dependency foo is fetched outside the registry (git)")])
 
+    def test_cargo_patch_and_replace_sources(self):
+        (self.root / "vendor" / "inner").mkdir(parents=True)
+        self.write("Cargo.toml", "\n".join((
+            '[package]', 'name = "app"', '',
+            '[patch.crates-io]',
+            'serde = { git = "https://github.com/attacker/serde" }',
+            'inner = { path = "vendor/inner" }', '',
+            '[patch."https://github.com/rust-lang/crates.io-index"]',
+            'log = { path = "../../outside/log" }', '',
+            '[patch.crates-io.rand]', 'git = "https://example.com/rand.git"', '',
+            '[replace]',
+            '"libc:0.2.0" = { git = "https://github.com/attacker/libc" }', '')))
+        found = [f for f in self.findings() if "has no lockfile" not in f[1]]
+        self.assertEqual(sorted(found), [
+            ("Cargo.toml:12", "cargo dependency rand is fetched outside the registry (git)"),
+            ("Cargo.toml:15", "cargo dependency libc:0.2.0 is fetched outside the registry (git)"),
+            ("Cargo.toml:5", "cargo dependency serde is fetched outside the registry (git)"),
+            ("Cargo.toml:9", "cargo dependency log is fetched outside the registry (path outside the checkout)")])
+
     def test_piped_shell_forms_and_arg_defaults_in_dockerfiles(self):
         self.write("Dockerfile", "\n".join((
             "ARG BASE", "ARG NODE=node:20",

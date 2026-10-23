@@ -1000,7 +1000,8 @@ def check_requirements(c, p):
 # subtable holds one dependency. Pipfile's "*" is pipenv's default, pinned by
 # Pipfile.lock, so only Cargo and Poetry report a "*" version as floating.
 TOML_DEP_TABLES = {
-    "Cargo.toml": r"(?:workspace\.|target\..+\.)?(?:dev-|build-)?dependencies",
+    "Cargo.toml": r"(?:workspace\.|target\..+\.)?(?:dev-|build-)?dependencies"
+                  r"|patch\.(?:\"[^\"]*\"|'[^']*'|[^.]+)|replace",  # [patch.<registry>] and [replace] override sources
     "pyproject.toml": r"tool\.poetry\.(?:group\.[^.]+\.)?(?:dev-)?dependencies|tool\.uv\.sources",
     "Pipfile": r"(?:dev-)?packages",
 }
