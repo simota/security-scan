@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from verification import CLAIMS, DEFINITIVE, derive_verification, identity, integrity_state, parse_timestamp
 from three_pass import (REASONS as THREE_PASS_REASONS, enabled as three_pass_enabled,
                         validate_profile, validate_coverage_checks, discovery_state, stage_gaps, derive_three_pass)
+from payloads import PAYLOAD
 
 STAGES = ("conditions", "falsification", "decision")
 OUTCOMES = ("complete", "held", "error", "unknown", "conflict")
@@ -458,6 +459,7 @@ def validate_workflows(data, error_type=ValueError, integrity=None):
 def _event(action, actor, reason, before, after, **fields):
     _text({"actor": actor, "reason": reason}, "actor", "event")
     _text({"reason": reason}, "reason", "event")
+    _refuse_payloads({"actor": actor, "reason": reason}, "event")
     result = dict(action=action, actor=actor, reason=reason, input_digest=before, output_digest=after,
                   recorded_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
     result.update(fields)
@@ -504,9 +506,23 @@ def _validate_observations(data, finding, output):
             _error("submission.evidence_ids", "evidence must match assessment commit/worktree pin")
 
 
+def _refuse_payloads(value, where):
+    """A submission's text reaches the report like findings.py prose: no literal attack strings."""
+    if isinstance(value, str) and PAYLOAD.search(value):
+        _error(where, "contains a literal attack string; describe the weakness and name the parameter "
+                      "with a placeholder instead")
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            _refuse_payloads(item, "{}.{}".format(where, key))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _refuse_payloads(item, "{}[{}]".format(where, index))
+
+
 def submit(data, finding_id, output, integrity=None):
     """Apply one manually supplied stage transactionally; identical retries are no-ops."""
     _submission_shape(output)
+    _refuse_payloads(output, "submission")
     _validate_base(data)
     finding = _finding(data, finding_id)
     state = derive_workflow(data, finding, WorkflowError, integrity)

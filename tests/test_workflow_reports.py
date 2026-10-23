@@ -3,6 +3,7 @@
 The fixture submits recorded stage outputs. It runs no agents, commands from the
 record, application tests, advisory services, or network requests.
 """
+import contextlib
 import copy
 import importlib
 import json
@@ -22,6 +23,12 @@ BROWSER_TESTS = os.environ.get("SECURITY_SCAN_BROWSER_TEST") == "1"
 HOSTILE = "</script><svg onload='window.WORKFLOW_INJECTED=1'>日本語 & \"handoff\"</svg>"
 SECRET = (" password=WORKFLOW_SECRET https://workflow-user:WORKFLOW_URL_SECRET@example.invalid/lineage"
           "?token=WORKFLOW_QUERY_SECRET#WORKFLOW_FRAGMENT_SECRET")
+
+
+def record(workflow, hostile, action, *args):
+    """A journal call, past its payload gate for hostile text: the reports must stay inert for records written any other way."""
+    with patch.object(workflow, "_refuse_payloads", lambda *_: None) if hostile else contextlib.nullcontext():
+        return getattr(workflow, action)(*args)
 
 
 def fixture(workflow, *, stop_after="decision", interrupted=False, hostile=False, finding_id="F-001", opaque=False):
@@ -50,8 +57,8 @@ def fixture(workflow, *, stop_after="decision", interrupted=False, hostile=False
         for review in proof["reviews"]:
             review["evidence_ids"] = [new_id if item == old_id else item for item in review["evidence_ids"]]
     evidence_id = data["evidence"][0]["id"]
-    workflow.initialize(data, finding["id"], "synthetic-coordinator" + suffix,
-                        "Synthetic workflow initialized. 検証の開始" + suffix)
+    record(workflow, hostile, "initialize", data, finding["id"], "synthetic-coordinator" + suffix,
+           "Synthetic workflow initialized. 検証の開始" + suffix)
     outputs = [
         {"stage": "conditions", "actor": proof["reviewer"] + suffix, "status": "complete",
          "summary": "CONDITIONS_PROOF: synthetic condition trace. 成立条件の記録" + suffix,
@@ -76,11 +83,11 @@ def fixture(workflow, *, stop_after="decision", interrupted=False, hostile=False
             held = {"stage": "falsification", "actor": output["actor"], "status": "held",
                     "summary": "HELD_HISTORY: synthetic missing counterevidence. 根拠不足で保留" + suffix,
                     "evidence_ids": [evidence_id], "input_digest": workflow.derive_workflow(data, finding)["input_digest"]}
-            workflow.submit(data, finding["id"], held)
-            workflow.resume(data, finding["id"], "synthetic-coordinator" + suffix,
-                            "RESUMED_HISTORY: synthetic missing evidence supplied. 根拠を補い再開" + suffix)
+            record(workflow, hostile, "submit", data, finding["id"], held)
+            record(workflow, hostile, "resume", data, finding["id"], "synthetic-coordinator" + suffix,
+                   "RESUMED_HISTORY: synthetic missing evidence supplied. 根拠を補い再開" + suffix)
         output["input_digest"] = workflow.derive_workflow(data, finding)["input_digest"]
-        workflow.submit(data, finding["id"], output)
+        record(workflow, hostile, "submit", data, finding["id"], output)
         if output["stage"] == stop_after:
             break
     return data
@@ -99,7 +106,7 @@ def held_fixture(workflow, *, status="held", hostile=False, finding_id="F-001"):
               "summary": "NEW_ROUND_HOLD: earlier evidence needs a fresh manual check." + suffix,
               "evidence_ids": [data["evidence"][0]["id"]],
               "input_digest": workflow.derive_workflow(data, finding)["input_digest"]}
-    workflow.submit(data, finding_id, output)
+    record(workflow, hostile, "submit", data, finding_id, output)
     return data
 
 

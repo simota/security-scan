@@ -204,8 +204,11 @@ unless actual sources are checked; do not retroactively certify historical work.
 
 Keep observations sanitized before storing them. Never include secret values,
 real credentials, unnecessary personal data or working exploit payloads in
-handoffs, submissions or history. Reports redact recognized patterns as a
-best-effort safeguard; review them before sharing.
+handoffs, submissions or history. `submit` refuses a submission whose text,
+and `init`/`invalidate`/`resume` an actor or reason that, holds a literal attack
+string, with the same patterns as a `findings.py merge`.
+Reports redact recognized patterns as a best-effort safeguard; review them
+before sharing.
 
 Runtime reproduction is separate and still requires explicit authorization for
 owned local or throwaway code. The workflow does not expand that authorization.
