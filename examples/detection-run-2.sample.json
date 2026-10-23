@@ -1,0 +1,58 @@
+{
+  "manifest": {
+    "schema_version": 3,
+    "method_version": "security-scan-detection-v3",
+    "run_id": "fixture-run-002",
+    "status": "complete",
+    "modality": "static-source-review",
+    "ground_truth_sha256": "sha256:dcf715a83c125b54efdaafb29969d69e06bde7cbd352cedfb502a9117791605e",
+    "benchmark_id": "security-scan-static-fixture",
+    "benchmark_version": "2026-10-23.v3",
+    "source_revision": "sha256:2e74b3be767376f7695b6480b28e56316d44646db2b460c399aa66d8535303af",
+    "scanner": {
+      "name": "security-scan",
+      "version": "fixture-v1",
+      "configuration": "full-static-review",
+      "subject_model": "fixture-no-model",
+      "subject_role": "primary-source-reviewer"
+    },
+    "scanner_configuration": {
+      "encoding": "utf-8",
+      "content": "{\"mode\":\"full-static-review\",\"network\":\"disabled\",\"target_execution\":false}\n",
+      "sha256": "sha256:7c6df231b5711a5e2ce901e042a6d233c88f5c8786c376e479192e44f75f0b7a"
+    },
+    "input_set": {
+      "encoding": "utf-8",
+      "content": "source=detection-fixture-source.txt\nground_truth=sha256:dcf715a83c125b54efdaafb29969d69e06bde7cbd352cedfb502a9117791605e\n",
+      "sha256": "sha256:021436ce9454d51252b9656f1969a1f2cf8d8434c06572016cb3d18719aacaf3"
+    },
+    "condition": {"id": "full-static-review-v1", "source_access": "full-source"},
+    "resources": {
+      "wall_seconds": 47,
+      "worker_count": 1,
+      "model_calls": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "estimated_cost_usd": 0.0
+    },
+    "adjudicator": {
+      "kind": "fixture-oracle",
+      "identity": "fixture-oracle-2"
+    }
+  },
+  "findings": [
+    {"id": "F-101", "title": "Cross-tenant detail read", "summary": "The order detail handler has broken object-level authorization because order_id lacks a tenant constraint."},
+    {"id": "F-102", "title": "Unbounded search result limit", "summary": "The search handler permits resource consumption because request_limit reaches the database query without a maximum."},
+    {"id": "F-103", "title": "Candidate: cache response metadata", "summary": "A cache response exposes metadata whose security relevance has not been independently dispositioned."}
+  ],
+  "adjudications": [
+    {"ground_truth_id": "GT-001", "detected": true, "matched_finding_id": "F-101", "gates": {"component": true, "class": true, "keywords": true, "proof": false}, "evidence": {"finding_excerpt": "The order detail handler has broken object-level authorization because order_id lacks a tenant constraint.", "source_location": "detection-fixture-source.txt:1", "source_excerpt": "orders.py: def order_detail(order_id, tenant_id): return db.order_by_id(order_id)  # tenant_id is available but the lookup has no tenant scope"}, "reason": "The detail path and missing ownership constraint match the fixture oracle."},
+    {"ground_truth_id": "GT-002", "detected": false, "matched_finding_id": null, "gates": {"component": false, "class": false, "keywords": false, "proof": false}, "evidence": null, "reason": "No finding described the return destination."},
+    {"ground_truth_id": "GT-003", "detected": false, "matched_finding_id": null, "gates": {"component": false, "class": false, "keywords": false, "proof": false}, "evidence": null, "reason": "No finding described the export projection."},
+    {"ground_truth_id": "GT-004", "detected": true, "matched_finding_id": "F-102", "gates": {"component": true, "class": true, "keywords": true, "proof": false}, "evidence": {"finding_excerpt": "The search handler permits resource consumption because request_limit reaches the database query without a maximum.", "source_location": "detection-fixture-source.txt:4", "source_excerpt": "search.py: def search(request_limit): return db.search(limit=request_limit)  # request_limit has no enforcing maximum"}, "reason": "The unbounded request value is traced to the query boundary."}
+  ],
+  "benign_adjudications": [
+    {"ground_truth_id": "BT-001", "outcome": "true_negative", "matched_finding_ids": [], "evidence": {"source_location": "detection-fixture-source.txt:5", "source_excerpt": "health.py: def health(): return {\"build_label\": ALLOWLISTED_BUILD_LABEL}  # public label; no secret or revision identifier"}, "reason": "The run reported no finding at the reviewed health projection."},
+    {"ground_truth_id": "BT-002", "outcome": "true_negative", "matched_finding_ids": [], "evidence": {"source_location": "detection-fixture-source.txt:6", "source_excerpt": "cache.py: def cache_get(tenant_id, caller_key): return cache.get(f\"{tenant_id}:{caller_key}\")  # tenant-scoped key"}, "reason": "The run reported no finding at the reviewed scoped cache lookup."}
+  ]
+}

@@ -52,8 +52,9 @@ DEMO_OUT ?= $(or $(TMPDIR),/tmp)/$(NAME)-demo
 LANG_OUT ?= ja
 DEMO_INPUT ?= $(REPO)/examples/findings.sample$(if $(filter ja,$(LANG_OUT)),.ja,).json
 NO_PDF   ?=
+DETECTION_OUT ?= $(or $(TMPDIR),/tmp)/security-scan-detection-results
 
-.PHONY: help link unlink status check demo deps test benchmark
+.PHONY: help link unlink status check demo deps test benchmark detection-benchmark
 
 help: ## list targets
 	@echo "$(NAME) - skill install"
@@ -63,7 +64,7 @@ help: ## list targets
 	@echo
 	@echo "  skill:  $(SKILL)"
 	@echo "  vars:   AGENT PROJECT SKILLS_DIR CODEX_HOME AGY_HOME TARGET AUDIT OUT"
-	@echo "          DEMO_OUT DEMO_INPUT LANG_OUT NO_PDF PYTHON"
+	@echo "          DEMO_OUT DEMO_INPUT LANG_OUT NO_PDF DETECTION_OUT PYTHON"
 
 link: ## symlink the skill into every installed host's skills dir
 	@n=0; \
@@ -104,6 +105,21 @@ status: ## show what is installed, per host
 
 benchmark: ## check synthetic three-pass gate outcomes (not detector accuracy)
 	@cd "$(REPO)" && PYTHONDONTWRITEBYTECODE=1 $(PYTHON) scripts/ci/benchmark_three_pass.py
+
+detection-benchmark: ## validate and aggregate three static detection fixtures
+	@cd "$(REPO)" || exit 1; \
+	out="$(DETECTION_OUT)"; \
+	[ ! -e "$$out" ] || { echo "refusing $$out - choose a new DETECTION_OUT to preserve existing evidence" >&2; exit 1; }; \
+	mkdir -p "$$out" || exit 1; \
+	for n in 1 2 3; do \
+	  PYTHONDONTWRITEBYTECODE=1 $(PYTHON) scripts/ci/benchmark_detection.py validate \
+	    --ground-truth examples/detection-ground-truth.sample.json \
+	    --findings "examples/detection-run-$$n.sample.json" --out "$$out/run-$$n.json" || exit 1; \
+	done; \
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) scripts/ci/benchmark_detection.py summarize \
+	  --runs "$$out/run-1.json" "$$out/run-2.json" "$$out/run-3.json" \
+	  --min-runs 3 --out "$$out/summary.json" || exit 1; \
+	$(PYTHON) -c 'import json,sys; d=json.load(open(sys.argv[1])); print("detection benchmark ok -", d["run_count"], "runs, mean", d["aggregate"]["detection_rate"]["mean"], "- sealed evidence retained at", sys.argv[2])' "$$out/summary.json" "$$out"
 
 test: ## run offline regression tests (no external audit commands)
 	@cd "$(REPO)" && PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m unittest discover -s tests -v

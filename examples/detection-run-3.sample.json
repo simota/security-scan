@@ -1,0 +1,59 @@
+{
+  "manifest": {
+    "schema_version": 3,
+    "method_version": "security-scan-detection-v3",
+    "run_id": "fixture-run-003",
+    "status": "complete",
+    "modality": "static-source-review",
+    "ground_truth_sha256": "sha256:dcf715a83c125b54efdaafb29969d69e06bde7cbd352cedfb502a9117791605e",
+    "benchmark_id": "security-scan-static-fixture",
+    "benchmark_version": "2026-10-23.v3",
+    "source_revision": "sha256:2e74b3be767376f7695b6480b28e56316d44646db2b460c399aa66d8535303af",
+    "scanner": {
+      "name": "security-scan",
+      "version": "fixture-v1",
+      "configuration": "full-static-review",
+      "subject_model": "fixture-no-model",
+      "subject_role": "primary-source-reviewer"
+    },
+    "scanner_configuration": {
+      "encoding": "utf-8",
+      "content": "{\"mode\":\"full-static-review\",\"network\":\"disabled\",\"target_execution\":false}\n",
+      "sha256": "sha256:7c6df231b5711a5e2ce901e042a6d233c88f5c8786c376e479192e44f75f0b7a"
+    },
+    "input_set": {
+      "encoding": "utf-8",
+      "content": "source=detection-fixture-source.txt\nground_truth=sha256:dcf715a83c125b54efdaafb29969d69e06bde7cbd352cedfb502a9117791605e\n",
+      "sha256": "sha256:021436ce9454d51252b9656f1969a1f2cf8d8434c06572016cb3d18719aacaf3"
+    },
+    "condition": {"id": "full-static-review-v1", "source_access": "full-source"},
+    "resources": {
+      "wall_seconds": 45,
+      "worker_count": 1,
+      "model_calls": 0,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "estimated_cost_usd": 0.0
+    },
+    "adjudicator": {
+      "kind": "fixture-oracle",
+      "identity": "fixture-oracle-3"
+    }
+  },
+  "findings": [
+    {"id": "F-201", "title": "Order access omits caller tenant", "summary": "The order detail handler has broken object-level authorization: order_id has no tenant predicate."},
+    {"id": "F-202", "title": "Export includes recovery data", "summary": "The account export has sensitive data exposure because recovery_value enters the export projection."},
+    {"id": "F-203", "title": "Search count is uncapped", "summary": "The search handler permits resource consumption by forwarding an uncapped result count into the query."},
+    {"id": "F-204", "title": "Cache key may cross tenants", "summary": "The cache lookup was reported as missing a tenant namespace."}
+  ],
+  "adjudications": [
+    {"ground_truth_id": "GT-001", "detected": true, "matched_finding_id": "F-201", "gates": {"component": true, "class": true, "keywords": true, "proof": false}, "evidence": {"finding_excerpt": "The order detail handler has broken object-level authorization: order_id has no tenant predicate.", "source_location": "detection-fixture-source.txt:1", "source_excerpt": "orders.py: def order_detail(order_id, tenant_id): return db.order_by_id(order_id)  # tenant_id is available but the lookup has no tenant scope"}, "reason": "The relevant handler and absent tenant predicate are identified."},
+    {"ground_truth_id": "GT-002", "detected": false, "matched_finding_id": null, "gates": {"component": false, "class": false, "keywords": false, "proof": false}, "evidence": null, "reason": "No finding described the redirect behavior."},
+    {"ground_truth_id": "GT-003", "detected": true, "matched_finding_id": "F-202", "gates": {"component": true, "class": true, "keywords": true, "proof": false}, "evidence": {"finding_excerpt": "The account export has sensitive data exposure because recovery_value enters the export projection.", "source_location": "detection-fixture-source.txt:3", "source_excerpt": "export.py: def account_export(account): return json({\"email\": account.email, \"recovery_value\": account.recovery_value})"}, "reason": "The export projection and recovery value match the fixture oracle."},
+    {"ground_truth_id": "GT-004", "detected": true, "matched_finding_id": "F-203", "gates": {"component": true, "class": true, "keywords": false, "proof": false}, "evidence": {"finding_excerpt": "The search handler permits resource consumption by forwarding an uncapped result count into the query.", "source_location": "detection-fixture-source.txt:4", "source_excerpt": "search.py: def search(request_limit): return db.search(limit=request_limit)  # request_limit has no enforcing maximum"}, "reason": "The handler and resource-consumption class match; mechanism wording is incomplete."}
+  ],
+  "benign_adjudications": [
+    {"ground_truth_id": "BT-001", "outcome": "true_negative", "matched_finding_ids": [], "evidence": {"source_location": "detection-fixture-source.txt:5", "source_excerpt": "health.py: def health(): return {\"build_label\": ALLOWLISTED_BUILD_LABEL}  # public label; no secret or revision identifier"}, "reason": "The run reported no finding at the reviewed health projection."},
+    {"ground_truth_id": "BT-002", "outcome": "false_positive", "matched_finding_ids": ["F-204"], "evidence": {"source_location": "detection-fixture-source.txt:6", "source_excerpt": "cache.py: def cache_get(tenant_id, caller_key): return cache.get(f\"{tenant_id}:{caller_key}\")  # tenant-scoped key"}, "reason": "Independent fixture review disproved the reported cross-tenant cache path."}
+  ]
+}

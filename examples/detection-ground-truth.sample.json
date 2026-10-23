@@ -1,0 +1,106 @@
+{
+  "schema_version": 3,
+  "benchmark_id": "security-scan-static-fixture",
+  "version": "2026-10-23.v3",
+  "modality": "static-source-review",
+  "source": {
+    "kind": "synthetic",
+    "uri": "fixture:examples/detection-fixture-source.txt",
+    "artifact_path": "detection-fixture-source.txt",
+    "revision": "sha256:2e74b3be767376f7695b6480b28e56316d44646db2b460c399aa66d8535303af",
+    "artifact_sha256": "sha256:2e74b3be767376f7695b6480b28e56316d44646db2b460c399aa66d8535303af",
+    "license": "CC0-1.0"
+  },
+  "cases": [
+    {
+      "id": "GT-001",
+      "disposition": "vulnerable",
+      "title": "Cross-tenant order read",
+      "location": "detection-fixture-source.txt:1",
+      "component": "order detail handler",
+      "vulnerability_class": "broken object-level authorization",
+      "mechanism": "record lookup omits the authenticated tenant scope",
+      "gate_expectations": {
+        "component": {"finding_terms": ["order", "detail"], "source_terms": ["order_detail"]},
+        "class": {"finding_terms": ["authorization"], "source_terms": ["tenant_id"]},
+        "keywords": {"finding_terms": ["order_id", "tenant"], "source_terms": ["order_id", "tenant"]},
+        "proof": {"finding_terms": ["db.order_by_id", "no tenant scope"], "source_terms": ["db.order_by_id", "no tenant scope"]}
+      }
+    },
+    {
+      "id": "GT-002",
+      "disposition": "vulnerable",
+      "title": "Untrusted return location",
+      "location": "detection-fixture-source.txt:2",
+      "component": "sign-in redirect handler",
+      "vulnerability_class": "open redirect",
+      "mechanism": "a caller-controlled absolute destination is accepted",
+      "gate_expectations": {
+        "component": {"finding_terms": ["sign-in"], "source_terms": ["sign_in"]},
+        "class": {"finding_terms": ["open redirect"], "source_terms": ["redirect"]},
+        "keywords": {"finding_terms": ["return_url", "absolute"], "source_terms": ["return_url", "absolute"]},
+        "proof": {"finding_terms": ["redirect(return_url)"], "source_terms": ["redirect(return_url)"]}
+      }
+    },
+    {
+      "id": "GT-003",
+      "disposition": "vulnerable",
+      "title": "Over-broad export",
+      "location": "detection-fixture-source.txt:3",
+      "component": "account export service",
+      "vulnerability_class": "sensitive data exposure",
+      "mechanism": "the export projection includes an internal recovery value",
+      "gate_expectations": {
+        "component": {"finding_terms": ["account export"], "source_terms": ["account_export"]},
+        "class": {"finding_terms": ["sensitive data exposure"], "source_terms": ["recovery_value"]},
+        "keywords": {"finding_terms": ["export", "recovery_value"], "source_terms": ["json", "recovery_value"]},
+        "proof": {"finding_terms": ["json", "recovery_value"], "source_terms": ["json", "recovery_value"]}
+      }
+    },
+    {
+      "id": "GT-004",
+      "disposition": "vulnerable",
+      "title": "Missing request budget",
+      "location": "detection-fixture-source.txt:4",
+      "component": "search handler",
+      "vulnerability_class": "uncontrolled resource consumption",
+      "mechanism": "an unbounded result limit reaches the database query",
+      "gate_expectations": {
+        "component": {"finding_terms": ["search"], "source_terms": ["search"]},
+        "class": {"finding_terms": ["resource consumption"], "source_terms": ["no enforcing maximum"]},
+        "keywords": {"finding_terms": ["request_limit", "database query"], "source_terms": ["request_limit", "db.search"]},
+        "proof": {"finding_terms": ["db.search", "no enforcing maximum"], "source_terms": ["db.search", "no enforcing maximum"]}
+      }
+    },
+    {
+      "id": "BT-001",
+      "disposition": "benign",
+      "title": "Health metadata is intentionally public",
+      "location": "detection-fixture-source.txt:5",
+      "component": "health response",
+      "vulnerability_class": "none",
+      "mechanism": "the response contains an allowlisted build label and no secret or revision identifier",
+      "gate_expectations": {
+        "component": {"finding_terms": ["health"], "source_terms": ["health"]},
+        "class": {"finding_terms": ["metadata"], "source_terms": ["public label"]},
+        "keywords": {"finding_terms": ["build label"], "source_terms": ["build_label"]},
+        "proof": {"finding_terms": ["secret"], "source_terms": ["no secret"]}
+      }
+    },
+    {
+      "id": "BT-002",
+      "disposition": "benign",
+      "title": "Cache namespace is tenant-scoped",
+      "location": "detection-fixture-source.txt:6",
+      "component": "cache lookup",
+      "vulnerability_class": "none",
+      "mechanism": "the cache key includes the authenticated tenant identifier before the caller key",
+      "gate_expectations": {
+        "component": {"finding_terms": ["cache"], "source_terms": ["cache_get"]},
+        "class": {"finding_terms": ["tenant"], "source_terms": ["tenant-scoped"]},
+        "keywords": {"finding_terms": ["cache key"], "source_terms": ["caller_key"]},
+        "proof": {"finding_terms": ["tenant"], "source_terms": ["tenant_id", "caller_key"]}
+      }
+    }
+  ]
+}

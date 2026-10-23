@@ -135,6 +135,17 @@ python3 skills/security-scan/scripts/expert_audit.py out \
 The records prove the process was recorded, not that every vulnerability was
 found; the report never states a detection rate.
 
+### Detection benchmark evidence
+
+Maintainers can validate already-recorded, independently adjudicated static
+source-review runs with `make detection-benchmark`. The offline fixture models
+both vulnerable and reviewed benign source locations and emits sealed JSON plus
+a human TP/FP/FN/TN summary with precision, recall, F1, false-positive rate,
+spread across three runs, input/model/condition identity, and recorded cost.
+Unsettled findings stay non-scoring candidates. This is mechanism evidence for
+security-scan only: it does not run a target, call a provider, measure a public
+corpus, or establish ARTEX outcome parity. See `docs/detection-benchmark.md`.
+
 Report typography follows the shared *-scan report format, scan-report-kit
 (see `docs/report-design.md`): a journal-style assessment (numbered
 sections, captioned booktabs tables and listings, one mincho face for both

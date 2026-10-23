@@ -1,0 +1,6 @@
+orders.py: def order_detail(order_id, tenant_id): return db.order_by_id(order_id)  # tenant_id is available but the lookup has no tenant scope
+auth.py: def sign_in(return_url): return redirect(return_url)  # an absolute caller-controlled return_url is accepted
+export.py: def account_export(account): return json({"email": account.email, "recovery_value": account.recovery_value})
+search.py: def search(request_limit): return db.search(limit=request_limit)  # request_limit has no enforcing maximum
+health.py: def health(): return {"build_label": ALLOWLISTED_BUILD_LABEL}  # public label; no secret or revision identifier
+cache.py: def cache_get(tenant_id, caller_key): return cache.get(f"{tenant_id}:{caller_key}")  # tenant-scoped key
