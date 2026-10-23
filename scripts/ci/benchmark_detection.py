@@ -17,6 +17,7 @@ import stat
 import statistics
 import sys
 import tempfile
+import unicodedata
 
 
 METHOD_VERSION = "security-scan-detection-v3"
@@ -78,9 +79,13 @@ def read_json(path):
             parse_constant=lambda token: (_ for _ in ()).throw(
                 Refusal("invalid_json_number", f"{path}: non-finite number {token}")),
         )
+        # A \ud800-style escape decodes to a lone surrogate that sealing cannot encode.
+        canonical(value)
     except Refusal:
         raise
-    except (OSError, UnicodeError, json.JSONDecodeError, RecursionError) as error:
+    except (OSError, ValueError, RecursionError) as error:
+        # ValueError covers JSONDecodeError, Unicode errors and integer literals
+        # longer than the interpreter's int-string conversion limit.
         raise Refusal("unreadable_input", f"{path}: {error}") from None
     refuse(json_depth(value) > MAX_DEPTH, "input_too_deep", f"{path}: JSON nesting exceeds {MAX_DEPTH}")
     return value, raw
@@ -111,7 +116,16 @@ def read_source_artifact(source_root, relative_path):
         raise
     except (OSError, UnicodeError) as error:
         raise Refusal("missing_source_artifact", f"{target}: {error}") from None
-    return raw, rendered.splitlines()
+    return raw, source_lines(rendered)
+
+
+def source_lines(rendered):
+    # Number lines by LF (tolerating CRLF) like editors and file:line references;
+    # str.splitlines() would also split on FF, VT, NEL, and U+2028/U+2029.
+    lines = rendered.split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    return [line[:-1] if line.endswith("\r") else line for line in lines]
 
 
 def digest(raw):
@@ -149,10 +163,16 @@ def exact_keys(value, required, optional, where):
     refuse(bool(extra), "invalid_schema", f"{where}: unsupported keys {sorted(extra)}")
 
 
-def text(value, where, *, identifier=False):
+def control(character):
+    # C0/C1 controls and DEL, plus the line/paragraph separators that render as breaks.
+    return unicodedata.category(character) in ("Cc", "Zl", "Zp")
+
+
+def text(value, where, *, identifier=False, allow_tab=False):
     refuse(not isinstance(value, str) or not value.strip(), "invalid_schema", f"{where}: nonblank string required")
     refuse(len(value) > 4096, "invalid_schema", f"{where}: string is too long")
-    refuse(any(ord(character) < 32 for character in value), "invalid_schema", f"{where}: control characters are not allowed")
+    refuse(any(control(character) and not (allow_tab and character == "\t") for character in value),
+           "invalid_schema", f"{where}: control characters are not allowed")
     if identifier:
         refuse(not IDENTIFIER.fullmatch(value), "invalid_schema", f"{where}: invalid identifier")
     return value
@@ -164,8 +184,12 @@ def integer(value, where):
 
 
 def number(value, where):
-    refuse(type(value) not in (int, float) or not math.isfinite(value) or value < 0,
-           "invalid_schema", f"{where}: non-negative finite number required")
+    refuse(type(value) not in (int, float), "invalid_schema", f"{where}: non-negative finite number required")
+    try:
+        finite = math.isfinite(float(value))
+    except OverflowError:
+        finite = False
+    refuse(not finite or value < 0, "invalid_schema", f"{where}: non-negative finite number required")
     return value
 
 
@@ -340,13 +364,16 @@ def validate_findings(findings):
         title = finding.get("title", finding.get("name", ""))
         if title is not None:
             refuse(not isinstance(title, str), "invalid_schema", f"{where}.title: must be a string")
+            # The title is only a display label; fold control characters and
+            # whitespace runs so the sealed result passes its own validation.
+            title = " ".join("".join(" " if control(character) else character for character in title).split())
         evidence = finding_text(finding)
         if not evidence:
             invalid.append({"id": identifier, "reason": "no summary, report, impact, or request evidence"})
         else:
             valid[identifier] = {
                 "id": identifier,
-                "title": (title or "untitled")[:200],
+                "title": (title or "untitled")[:200].rstrip(),
                 "evidence": evidence,
             }
     return valid, invalid
@@ -361,7 +388,7 @@ def validate_source_evidence(evidence, case, artifact_lines, where, *, finding_t
     refuse(source_location != case["location"], "unrelated_evidence",
            f"{where}.source_location: does not match ground truth")
     line_number = int(source_location.rsplit(":", 1)[1])
-    source_excerpt = text(evidence["source_excerpt"], where + ".source_excerpt")
+    source_excerpt = text(evidence["source_excerpt"], where + ".source_excerpt", allow_tab=True)
     refuse(source_excerpt != artifact_lines[line_number - 1], "unrelated_evidence",
            f"{where}.source_excerpt: does not match verified source bytes")
     if finding_text_value is not None:
@@ -666,6 +693,16 @@ def spread(values):
     }
 
 
+def defined_spread(values):
+    # Precision is undefined for a run with no TP and no FP (or no findings at
+    # all for its lower bound). Such a run stays in the pooled totals; its
+    # per-run value is counted as undefined rather than blocking aggregation.
+    defined = [value for value in values if value is not None]
+    result = spread(defined) if defined else {"mean": None, "min": None, "max": None, "sample_stdev": None}
+    result["undefined_runs"] = len(values) - len(defined)
+    return result
+
+
 def validate_result(result, where):
     required = {
         "schema_version", "method_version", "status", "run_id", "input_identity", "target", "scanner",
@@ -755,7 +792,7 @@ def validate_result(result, where):
             exact_keys(record["evidence"], {"finding_excerpt", "source_location", "source_excerpt"}, set(),
                        record_where + ".evidence")
             for key in record["evidence"]:
-                text(record["evidence"][key], f"{record_where}.evidence.{key}")
+                text(record["evidence"][key], f"{record_where}.evidence.{key}", allow_tab=key == "source_excerpt")
         else:
             refuse(record["matched_finding_id"] is not None or record["evidence"] is not None or
                    any(record["gates"].values()), "invalid_result",
@@ -776,7 +813,7 @@ def validate_result(result, where):
                "invalid_result", record_where + ": outcome and matched findings disagree")
         exact_keys(record["evidence"], {"source_location", "source_excerpt"}, set(), record_where + ".evidence")
         for key in record["evidence"]:
-            text(record["evidence"][key], f"{record_where}.evidence.{key}")
+            text(record["evidence"][key], f"{record_where}.evidence.{key}", allow_tab=key == "source_excerpt")
         text(record["reason"], record_where + ".reason")
     comparable = result["comparability"]
     exact_keys(comparable, {"measured_modality", "artex_reference_modality", "artex_outcome_comparable",
@@ -868,7 +905,8 @@ def validate_result(result, where):
             exact_keys(item, keys, set(), f"{where}.score.{name}[{index}]")
             ids.append(text(item["id"], f"{where}.score.{name}[{index}].id", identifier=True))
             for key in keys - {"id"}:
-                text(item[key], f"{where}.score.{name}[{index}].{key}", identifier=key == "ground_truth_id")
+                text(item[key], f"{where}.score.{name}[{index}].{key}", identifier=key == "ground_truth_id",
+                     allow_tab=key == "evidence")
         refuse(len(ids) != len(set(ids)), "invalid_result", f"{where}.score.{name}: duplicate IDs")
         partition_ids[name] = set(ids)
     refuse(len(score["true_positive_findings"]) != tp or len(score["false_positive_findings"]) != fp or
@@ -929,12 +967,8 @@ def summary(results, min_runs):
         key: [result["score"]["metrics"][key] for result in results]
         for key in ("precision", "recall", "f1", "false_positive_rate")
     }
-    refuse(any(any(value is None for value in values) for values in metric_values.values()),
-           "incomparable_inputs", "all runs need defined precision, recall, F1, and false-positive rate")
     precision_low = [result["score"]["precision_bounds_until_candidates_verified"][0] for result in results]
     precision_high = [result["score"]["precision_bounds_until_candidates_verified"][1] for result in results]
-    refuse(any(value is None for value in precision_low + precision_high), "incomparable_inputs",
-           "all runs need defined precision bounds")
     totals = {
         key: sum(result["score"]["confusion_matrix"][key] for result in results)
         for key in ("true_positive", "false_positive", "false_negative", "true_negative")
@@ -961,10 +995,10 @@ def summary(results, min_runs):
         "aggregate": {
             "confusion_matrix_totals": totals,
             "micro_metrics": micro,
-            "per_run_metrics": {key: spread(values) for key, values in metric_values.items()},
+            "per_run_metrics": {key: defined_spread(values) for key, values in metric_values.items()},
             "detection_rate": spread(metric_values["recall"]),
-            "precision_lower_bound": spread(precision_low),
-            "precision_upper_bound": spread(precision_high),
+            "precision_lower_bound": defined_spread(precision_low),
+            "precision_upper_bound": defined_spread(precision_high),
             "discovery_candidate_count": spread([
                 len(result["score"]["discovery_candidates"]) for result in results]),
             "invalid_finding_count": spread([
