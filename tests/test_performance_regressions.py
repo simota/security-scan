@@ -36,6 +36,14 @@ class RedactionTests(unittest.TestCase):
         render.redact("password=" * 5000)
         self.assertLess(time.monotonic() - started, LIMIT)
 
+    def test_payload_and_secret_gates_are_linear(self):
+        # Workflow submissions and capture blobs have no line or string limit of their own.
+        import payloads
+        started = time.monotonic()
+        payloads.PAYLOAD.search("<svg " * 40000)
+        render.secret_in_source("a.js", "'password', " * 100000 + "define('DB_PASSWORD', `" * 50000)
+        self.assertLess(time.monotonic() - started, LIMIT)
+
 
 class DepsScanPathologicalTests(unittest.TestCase):
     def setUp(self):

@@ -318,7 +318,9 @@ def renumber(data, mapping):
             return CODE_REF.sub(lambda m: mapping.get(m.group(0), m.group(0)), value)
         if isinstance(value, dict):
             dep = isinstance(value.get("id"), str) and value["id"].startswith("D-")
-            return {k: v if k in NOT_REFERENCES or dep and k not in DEP_REVIEW else rewrite(v)
+            return {k: v if k in NOT_REFERENCES or dep and k not in DEP_REVIEW
+                    else [r if isinstance(r, str) else rewrite(r) for r in v]
+                    if k == "references" and isinstance(v, list) else rewrite(v)  # a bare string is a URL
                     for k, v in value.items()}
         if isinstance(value, list):
             return [rewrite(v) for v in value]

@@ -269,7 +269,8 @@ class SecretGateFormsTests(unittest.TestCase):
                 ("src/keys.py", 'private_key_pem = "MIIEvQIBADANBgkqhkiG9w0BAQEF"\n'),
                 ("wp-config.php", "define( 'DB_PASSWORD', 'Xk9vQ2mLp7Rt' );\n"),
                 ("settings.py", 'os.environ.setdefault("SECRET_KEY", "Xk9vQ2mLp7Rt8z")\n'),
-                ("src/db.js", "const password = `Xk9vQ2mLp7Rt`;\n")):
+                ("src/db.js", "const password = `Xk9vQ2mLp7Rt`;\n"),
+                ("src/db.ts", "const password = `Xk9vQ2mLp7Rt`;\n")):
             with self.subTest(rel=rel):
                 self.assertTrue(render.secret_in_source(rel, text))
 
@@ -282,7 +283,19 @@ class SecretGateFormsTests(unittest.TestCase):
                 ("src/db.js", "const password = `${process.env.DB_PASSWORD}`;\n"),
                 ("src/form.js", "const passwordLabel = `Enter your password`;\n"),
                 ("src/auth.py", 'token_url = "https://auth.example.com/oauth/token"\n'),
-                ("src/pem.py", 'HEADER = "-----BEGIN PRIVATE KEY-----"\n')):
+                ("src/pem.py", 'HEADER = "-----BEGIN PRIVATE KEY-----"\n'),
+                # A second argument that names another variable, flag, field or code.
+                ("settings.py", 'for var in ("SECRET_KEY", "DATABASE_URL"):\n'),
+                ("cli.py", 'parser.add_argument("--token", "--github-token", help="GitHub token")\n'),
+                ("app.py", 'raise AuthError("invalid_token", "TOKEN_EXPIRED")\n'),
+                ("app.py", 'os.environ.get("API_TOKEN", "API_TOKEN_NOT_SET")\n'),
+                ("forms.py", 'fields = ("password", "password2")\n'),
+                ("i18n.js", 't("auth", "loginPage_title")\n'),
+                # Outside JS/TS a backtick runs a command; its text is not the value.
+                ("deploy.sh", "GITHUB_TOKEN=`cat ~/.config/gh/token`\n"),
+                ("deploy.sh", "TOKEN=`vault kv get -field=token secret/app`\n"),
+                ("Rakefile.rb", "secret = `openssl rand -hex 32`.strip\n"),
+                ("build.pl", "my $token = `git config --get app.token`;\n")):
             with self.subTest(rel=rel, text=text):
                 self.assertFalse(render.secret_in_source(rel, text))
 

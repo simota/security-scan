@@ -1383,8 +1383,11 @@ _SECRET_NAME = re.compile(r"(?i)(?:^|[_.-])(?:token|secret|password|passwd|api[_
                           r"(?:[_.-](?:base|pem|value|b64|base64|hex|raw))?$")
 _LITERAL_TAIL = re.compile(r"""(?:(?P<comma>['"][ \t]*,)|(?:['"](?:[ \t]*\])?)?[ \t]*(?::[ \t]*[A-Za-z_][\w.\[\], |]{0,40}?[ \t]*(?==))?(?:=>|:=|[:=]))[ \t]*"""
                            r"""(?:(?P<q>['"`])(?P<v>(?:\\.|(?!(?P=q))[^\\\n]){0,1024})(?P=q)|(?P<bare>[^'"`\s,;)#]{1,1024}))""")
-# A second argument naming another field ("password", "csrf_token") is not a value.
-_FIELD_NAME = re.compile(r"[a-z]+(?:[_.-][a-z]+)*")
+# A second argument naming another field, variable, flag or code ("csrf_token", "DATABASE_URL",
+# "--github-token", "password2") is not a value.
+_FIELD_NAME = re.compile(r"-{0,2}[A-Za-z]+(?:[_.-][A-Za-z]+)*[0-9]?")
+# A backtick quotes a template literal here; in shell, Ruby or Perl it runs a command.
+TEMPLATE_SUFFIXES = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".vue", ".svelte"}
 _NOT_SECRET = re.compile(r"[$<{%]|process\.env|os\.environ|[A-Za-z_][\w.]*\(")
 _PLAIN_VALUE = re.compile(r"[\^~<>=].*|v?\d+(?:\.\d+)+[\w.+-]*|(?:~|\.{1,2})?(?:/[a-z0-9_.{}:-]*)+"
                           r"|[a-z][a-z0-9+.-]*://[^?#@\s]*|[A-Za-z][A-Za-z ]*[.!?:]?")
@@ -1453,8 +1456,8 @@ def secret_in_source(rel, text):
             m = _SECRET_NAME.search(name) and _LITERAL_TAIL.match(line, run.end())
             if not m or m["comma"] and (not m["q"] or _FIELD_NAME.fullmatch(m["v"])):
                 continue
-            if m["q"] == "`" and "${" in m["v"]:
-                continue  # an interpolated template literal is an expression
+            if m["q"] == "`" and (Path(rel).suffix.lower() not in TEMPLATE_SUFFIXES or "${" in m["v"]):
+                continue  # a command substitution, or an interpolated template literal: an expression
             if secret_value(m["v"] if m["q"] else m["bare"] if config else ""):
                 return True
         # Userinfo, including a password with '/', '?' or '#', a quoted or

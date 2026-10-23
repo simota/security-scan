@@ -157,7 +157,8 @@ class DepsSourcesReviewTests(unittest.TestCase):
             'tokio.workspace = true',
             'serde.version = "1"',
             'serde.features = ["derive"]',
-            '"quoted".git = "https://example.com/q.git"', '')))
+            '"quoted".git = "https://example.com/q.git"',
+            'field."git" = "https://example.com/f.git"', '')))
         self.write("Pipfile", "\n".join((
             '[packages]',
             'archive = {file = "https://example.com/archive/main.zip"}',
@@ -176,6 +177,7 @@ class DepsSourcesReviewTests(unittest.TestCase):
         found = [f for f in self.findings() if "has no lockfile" not in f[1]]
         self.assertEqual(sorted(found), [
             ("Cargo.toml:11", "cargo dependency quoted is fetched outside the registry (git)"),
+            ("Cargo.toml:12", "cargo dependency field is fetched outside the registry (git)"),
             ("Cargo.toml:5", "cargo dependency evil is fetched outside the registry (git)"),
             ("Cargo.toml:6", "cargo dependency star floats to any version (*)"),
             ("Cargo.toml:7", "cargo dependency outside is fetched outside the registry (path outside the checkout)"),

@@ -114,7 +114,7 @@ class FindingsMergeTests(unittest.TestCase):
     def test_renumber_leaves_paths_urls_and_scanner_fields_alone(self):
         ref = {"type": "report", "url": "https://tracker.example/browse/F-001", "title": "F-001 in last year's test"}
         findings = [dict(FINDING, id="F-001", severity="Low", location="src/forms/F-002/view.py:4",
-                         impact="same root as F-002", references=[ref]),
+                         impact="same root as F-002", references=[ref, "https://tracker.example/browse/F-002"]),
                     dict(FINDING, id="F-002", location="a.py:1")]
         self.assertEqual(self.merge(self.fragment("a.json", {"meta": META, "findings": findings})), 0)
         self.assertEqual(self.renumber(), 0)
@@ -122,6 +122,7 @@ class FindingsMergeTests(unittest.TestCase):
         self.assertEqual((low["id"], low["location"], low["impact"]), ("F-002", "src/forms/F-002/view.py:4",
                                                                        "same root as F-001"))
         self.assertEqual(low["references"][0]["url"], ref["url"])
+        self.assertEqual(low["references"][1], "https://tracker.example/browse/F-002")  # a bare-string URL
         # meta.source_url and a D-* finding's scanner fields are not references; its review is.
         data = {"meta": {"source_url": "https://git.example/F-001/app"},
                 "findings": [{"id": "D-001", "title": "F-001 helper advisory", "validation": {"evidence": "see F-001"}}]}

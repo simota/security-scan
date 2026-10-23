@@ -1073,10 +1073,11 @@ def check_toml_deps(c, p):
                 array = None
             continue
         # A bare key has no dots: name.git = "..." is the dotted form of name = { git = "..." }.
-        entry = re.match(r"""(?:"([^"]+)"|'([^']+)'|([\w-]+))(?:\s*\.\s*([\w-]+))?\s*=\s*(.*)$""", code)
+        entry = re.match(r"""(?:"([^"]+)"|'([^']+)'|([\w-]+))(?:\s*\.\s*(?:"([^"]+)"|'([^']+)'|([\w-]+)))?"""
+                         r"""\s*=\s*(.*)$""", code)
         if not entry:
             continue
-        key, field, value = entry[1] or entry[2] or entry[3], entry[4], entry[5].strip()
+        key, field, value = entry[1] or entry[2] or entry[3], entry[4] or entry[5] or entry[6], entry[7].strip()
         if named is not None:  # [<table>.<name>]: one field of that dependency per line
             if field is None:
                 source(named, {key: value.strip("\"'")}, i)
