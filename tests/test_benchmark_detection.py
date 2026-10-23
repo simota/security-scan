@@ -30,7 +30,7 @@ def measured(path):
         ground_truth, benchmark.digest(gt_raw), run, benchmark.digest(run_raw), GROUND_TRUTH.parent)
 
 
-def measured_with_source(directory, source, change=None):
+def measured_with_source(directory, source, change=None, offset=0):
     """Measure run 1 against the fixture cases rebased onto other source bytes."""
     ground_truth, _ = fixture(GROUND_TRUTH)
     run, _ = fixture(RUNS[0])
@@ -40,10 +40,10 @@ def measured_with_source(directory, source, change=None):
                                   revision=benchmark.digest(source))
     run["manifest"]["source_revision"] = ground_truth["source"]["revision"]
     for case in ground_truth["cases"]:
-        case["location"] = "source.txt:" + case["location"].rsplit(":", 1)[1]
+        case["location"] = f"source.txt:{int(case['location'].rsplit(':', 1)[1]) + offset}"
     for record in run["adjudications"] + run["benign_adjudications"]:
         if record["evidence"]:
-            line = int(record["evidence"]["source_location"].rsplit(":", 1)[1])
+            line = int(record["evidence"]["source_location"].rsplit(":", 1)[1]) + offset
             record["evidence"].update(source_location=f"source.txt:{line}", source_excerpt=lines[line - 1])
     if change:
         change(ground_truth, run)
@@ -304,13 +304,14 @@ class DetectionBenchmarkTests(unittest.TestCase):
 
     def test_source_lines_are_lf_numbered_and_tab_indented_excerpts_are_accepted(self):
         source = (ROOT / "examples" / "detection-fixture-source.txt").read_bytes()
-        # U+2028 and NEL on line 1 must not shift later lines; tabs are ordinary source text.
-        source = source.replace(b"# tenant_id is available", "# tenant_id\u2028\x85 is available".encode())
+        # A form feed, NEL and U+2028 on an unreviewed first line must not shift later
+        # lines; tabs are ordinary source text.
+        source = "# header\x0c\x85\u2028\u2029 notes\n".encode() + source
         source = source.replace(b"health.py: def", b"health.py:\tdef").replace(b"cache.py: def", b"\tcache.py: def")
         source = source.replace(b"orders.py: def", b"orders.py:\tdef")
         for name, variant in (("lf", source), ("crlf", source.replace(b"\n", b"\r\n"))):
             with self.subTest(line_endings=name), tempfile.TemporaryDirectory() as directory:
-                result = measured_with_source(directory, variant)
+                result = measured_with_source(directory, variant, offset=1)
                 self.assertEqual(result["score"]["confusion_matrix"], {
                     "true_positive": 3, "false_positive": 2, "false_negative": 1, "true_negative": 1,
                 })
@@ -318,14 +319,13 @@ class DetectionBenchmarkTests(unittest.TestCase):
                 self.assertIn("\t", result["adjudications"]["vulnerable"][0]["evidence"]["source_excerpt"])
                 benchmark.validate_result(round_trip(result), "tabbed")
 
-        with tempfile.TemporaryDirectory() as directory:
-            def other_control(ground_truth, run):
-                run["benign_adjudications"][0]["evidence"]["source_excerpt"] += "\x1b"
-
-            self.assertRefused("invalid_schema", measured_with_source, directory, source, other_control)
+        for character in ("\x1b", "\x7f", "\x85", "\u2028"):
+            with self.subTest(control=repr(character)), tempfile.TemporaryDirectory() as directory:
+                quoted = source.replace(b"no secret or revision", f"no{character}secret or revision".encode())
+                self.assertRefused("invalid_schema", measured_with_source, directory, quoted, None, 1)
 
     def test_finding_titles_are_folded_so_sealed_results_revalidate(self):
-        for title, expected in (("Candidate:\ttiming\nvariance", "Candidate: timing variance"),
+        for title, expected in (("Candidate:\ttiming\x85variance\u2028", "Candidate: timing variance"),
                                 ("  \t ", "untitled"), ("x" * 199 + " tail", "x" * 199)):
             def change(ground_truth, run, title=title):
                 run["findings"][5]["title"] = title

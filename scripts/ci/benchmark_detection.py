@@ -17,6 +17,7 @@ import stat
 import statistics
 import sys
 import tempfile
+import unicodedata
 
 
 METHOD_VERSION = "security-scan-detection-v3"
@@ -162,10 +163,15 @@ def exact_keys(value, required, optional, where):
     refuse(bool(extra), "invalid_schema", f"{where}: unsupported keys {sorted(extra)}")
 
 
+def control(character):
+    # C0/C1 controls and DEL, plus the line/paragraph separators that render as breaks.
+    return unicodedata.category(character) in ("Cc", "Zl", "Zp")
+
+
 def text(value, where, *, identifier=False, allow_tab=False):
     refuse(not isinstance(value, str) or not value.strip(), "invalid_schema", f"{where}: nonblank string required")
     refuse(len(value) > 4096, "invalid_schema", f"{where}: string is too long")
-    refuse(any(ord(character) < 32 and not (allow_tab and character == "\t") for character in value),
+    refuse(any(control(character) and not (allow_tab and character == "\t") for character in value),
            "invalid_schema", f"{where}: control characters are not allowed")
     if identifier:
         refuse(not IDENTIFIER.fullmatch(value), "invalid_schema", f"{where}: invalid identifier")
@@ -360,7 +366,7 @@ def validate_findings(findings):
             refuse(not isinstance(title, str), "invalid_schema", f"{where}.title: must be a string")
             # The title is only a display label; fold control characters and
             # whitespace runs so the sealed result passes its own validation.
-            title = " ".join("".join(" " if ord(character) < 32 else character for character in title).split())
+            title = " ".join("".join(" " if control(character) else character for character in title).split())
         evidence = finding_text(finding)
         if not evidence:
             invalid.append({"id": identifier, "reason": "no summary, report, impact, or request evidence"})

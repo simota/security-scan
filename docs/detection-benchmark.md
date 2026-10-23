@@ -83,8 +83,8 @@ The findings input is a run envelope containing:
   to 200 characters;
 - exactly one independent detection adjudication per vulnerable case, including
   all four gates, a reason, an exact excerpt from the matched finding, and an
-  exact source line from the verified artifact (tabs included; other control
-  characters cannot be quoted). A passed gate must contain all
+  exact source line from the verified artifact (tabs included; other C0/C1
+  controls, DEL, and U+2028/U+2029 cannot be quoted). A passed gate must contain all
   ground-truth finding/source terms; arbitrary booleans or unrelated excerpts
   are refused. The reason, gates, and structured evidence survive in the sealed
   result;
