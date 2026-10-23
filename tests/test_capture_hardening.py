@@ -224,6 +224,68 @@ class CaptureHardeningTests(unittest.TestCase):
         self.assertEqual(self.findings.read_bytes(), before)
         self.assertFalse((self.out / "evidence/source/src/other.py").exists())
 
+    def commit_file(self, rel, data):
+        path = self.repo / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        self.git("add", rel)
+        self.git("commit", "-qm", "add " + rel)
+
+    def test_utf16_source_is_secret_checked_in_its_own_encoding(self):
+        text = '$env:AWS_ACCESS_KEY_ID = "AKIA' + 'IOSFODNN7EXAMPLE"\r\n'
+        for codec in ("utf-16", "utf-16-le", "utf-16-be", "utf-32"):
+            with self.subTest(codec=codec):
+                rel = "deploy-%s.ps1" % codec
+                self.commit_file(rel, text.encode(codec))
+                with self.assertRaisesRegex(capture.CaptureError, "secret-looking"):
+                    capture.capture(self.repo, self.findings, [rel])
+        self.assertFalse((self.out / "evidence").exists())
+        # A UTF-16 file without a secret is still captured.
+        self.commit_file("notes.ps1", 'Write-Host "hello"\r\n'.encode("utf-16"))
+        self.assertEqual(capture.capture(self.repo, self.findings, ["notes.ps1"]), {"notes.ps1": "SRC-001"})
+
+    def test_capture_refuses_objects_the_verifier_cannot_snapshot(self):
+        # git clone of a local path hardlinks the object files; the verifier refuses hardlinks.
+        clone = self.root / "clone"
+        subprocess.run([capture.GIT_BINARY, "clone", "-q", "--local", str(self.repo), str(clone)],
+                       env=capture.GIT_ENV, stdin=subprocess.DEVNULL, capture_output=True, check=True, timeout=10)
+        objects = [p for p in (clone / ".git/objects").rglob("*") if p.is_file()]
+        if not any(p.stat().st_nlink > 1 for p in objects):
+            self.skipTest("filesystem did not hardlink the clone's objects")
+        before = self.findings.read_bytes()
+        with self.assertRaisesRegex(capture.CaptureError, "hardlinked_file.*--no-hardlinks"):
+            capture.capture(clone, self.findings, ["src/app.py"])
+        self.assertEqual(self.findings.read_bytes(), before)
+        self.assertFalse((self.out / "evidence").exists())
+
+
+class SecretGateFormsTests(unittest.TestCase):
+    def test_secret_forms_that_must_be_refused(self):
+        for rel, text in (
+                ("src/tls.py", 'TLS = "-----BEGIN PRIVATE KEY-----\\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\\n"\n'),
+                ("src/tls.go", 'k := "-----BEGIN EC PRIVATE KEY-----\\nProc-Type: 4,ENCRYPTED\\nMIIEvQIBADANBgkqhkiG9w0B"\n'),
+                ("config/initializers/secret_token.rb",
+                 "Rails.application.config.secret_key_base = '" + "a3f9" * 32 + "'\n"),
+                ("src/keys.py", 'private_key_pem = "MIIEvQIBADANBgkqhkiG9w0BAQEF"\n'),
+                ("wp-config.php", "define( 'DB_PASSWORD', 'Xk9vQ2mLp7Rt' );\n"),
+                ("settings.py", 'os.environ.setdefault("SECRET_KEY", "Xk9vQ2mLp7Rt8z")\n'),
+                ("src/db.js", "const password = `Xk9vQ2mLp7Rt`;\n")):
+            with self.subTest(rel=rel):
+                self.assertTrue(render.secret_in_source(rel, text))
+
+    def test_non_secret_forms_stay_capturable(self):
+        for rel, text in (
+                ("config/initializers/secret_token.rb", "config.secret_key_base = ENV['SECRET_KEY_BASE']\n"),
+                ("wp-config.php", "define( 'DB_PASSWORD', getenv('DB_PASSWORD') );\n"),
+                ("wp-config.php", "define( 'DB_NAME', 'wordpress_production' );\n"),
+                ("settings.py", 'os.environ.setdefault("DJANGO_SETTINGS_MODULE", "mysite.settings")\n'),
+                ("src/db.js", "const password = `${process.env.DB_PASSWORD}`;\n"),
+                ("src/form.js", "const passwordLabel = `Enter your password`;\n"),
+                ("src/auth.py", 'token_url = "https://auth.example.com/oauth/token"\n'),
+                ("src/pem.py", 'HEADER = "-----BEGIN PRIVATE KEY-----"\n')):
+            with self.subTest(rel=rel, text=text):
+                self.assertFalse(render.secret_in_source(rel, text))
+
 
 if __name__ == "__main__":
     unittest.main()
