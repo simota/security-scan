@@ -78,6 +78,9 @@ class DepsScanPathologicalTests(unittest.TestCase):
         (self.root / "requirements.txt").write_text("a" + " " * 100000 + "!\n-e a" + " " * 100000 + "!\n")
         (self.root / "pyproject.toml").write_text('[project]\ndependencies = ["a' + " " * 100000 + '!"]\n'
                                                   "[" + " " * 100000 + "x\n")
+        # Dotted keys and an unclosed Poetry constraint array that never closes.
+        (self.root / "Pipfile").write_text("[packages]\na" + " " * 100000 + "." + " " * 100000 + "b!\n"
+                                           "x = [" + "{" * 200000 + "\n" + '{ git = "a' * 100000 + "\n")
         self.timed_scan()
 
     def test_many_dependencies_and_hosts(self):

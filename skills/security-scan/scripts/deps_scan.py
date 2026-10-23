@@ -1022,9 +1022,17 @@ def check_toml_deps(c, p):
     deps = re.compile(r"(%s)(?:\.(.+))?" % TOML_DEP_TABLES[p.name])
     table, named = None, None  # the dependency table, and the dependency a [<table>.<name>] subtable holds
     pep508 = False  # inside a PEP 621 / PEP 735 table
+    array = None  # the dependency whose multi-line Poetry constraint array is open
+    keys = ("git", "url", "path", "version", "file")
+
+    def tables(name, value, line):  # each { ... } of a Poetry multiple-constraints array
+        for inline in re.findall(r"\{[^{}]*\}", value):
+            source(name, {k: toml_string(inline, k) for k in keys}, line)
 
     def source(name, fields, line):
-        git, url, path, version = (fields.get(k) for k in ("git", "url", "path", "version"))
+        git, url, path, version, file = (fields.get(k) for k in keys)
+        if file is not None:  # Pipfile: file = "<URL or local path>"
+            url, path = (file, path) if re.match(r"[A-Za-z][\w+.-]*://", file) else (url, file)
         found = "git" if git is not None else "URL" if url is not None else \
             "path outside the checkout" if path is not None and outside_checkout(c, p, path) else None
         if found:
@@ -1045,6 +1053,7 @@ def check_toml_deps(c, p):
             table = m[1] if m else None
             named = m[2].strip("\"'") if m and m[2] else None
             pep508 = bool(re.fullmatch(PEP508_TABLES, name)) and p.name == "pyproject.toml"
+            array = None
             continue
         if p.name == "pyproject.toml" and pep508:
             for ref in PEP508_URL.finditer(code):
@@ -1057,14 +1066,27 @@ def check_toml_deps(c, p):
                       fix="Depend on a published, version-pinned release")
         if table is None:
             continue
-        entry = re.match(r"""(?:"([^"]+)"|'([^']+)'|([\w.-]+))\s*=\s*(.*)$""", code)
+        if array is not None:
+            tables(array, code, i)
+            if "]" in re.sub(r"\{[^{}]*\}", "", code):
+                array = None
+            continue
+        # A bare key has no dots: name.git = "..." is the dotted form of name = { git = "..." }.
+        entry = re.match(r"""(?:"([^"]+)"|'([^']+)'|([\w-]+))(?:\s*\.\s*([\w-]+))?\s*=\s*(.*)$""", code)
         if not entry:
             continue
-        key, value = entry[1] or entry[2] or entry[3], entry[4].strip()
+        key, field, value = entry[1] or entry[2] or entry[3], entry[4], entry[5].strip()
         if named is not None:  # [<table>.<name>]: one field of that dependency per line
-            source(named, {key: value.strip("\"'")}, i)
+            if field is None:
+                source(named, {key: value.strip("\"'")}, i)
+        elif field is not None:
+            source(key, {field: value.strip("\"'")}, i)
         elif value.startswith("{"):  # name = { git = "...", ... }
-            source(key, {k: toml_string(value, k) for k in ("git", "url", "path", "version")}, i)
+            source(key, {k: toml_string(value, k) for k in keys}, i)
+        elif value.startswith("["):  # name = [ { version = ..., python = ... }, { git = ... } ]
+            tables(key, value, i)
+            if "]" not in re.sub(r"\{[^{}]*\}", "", value):
+                array = key
         else:  # name = "<version requirement>"
             source(key, {"version": value.strip("\"'")}, i)
 

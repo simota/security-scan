@@ -146,6 +146,45 @@ class DepsSourcesReviewTests(unittest.TestCase):
             ("pyproject.toml:6", "python dependency evil is fetched outside the registry (URL)"),
             ("pyproject.toml:9", "python dependency tool is fetched outside the registry (URL)")])
 
+    def test_toml_dotted_keys_pipfile_file_and_poetry_constraint_arrays(self):
+        (self.root / "dist").mkdir()
+        self.write("Cargo.toml", "\n".join((
+            '[package]', 'name = "app"', '',
+            '[dependencies]',
+            'evil.git = "https://github.com/attacker/evil"',
+            'star.version = "*"',
+            'outside.path = "../../elsewhere"',
+            'tokio.workspace = true',
+            'serde.version = "1"',
+            'serde.features = ["derive"]',
+            '"quoted".git = "https://example.com/q.git"', '')))
+        self.write("Pipfile", "\n".join((
+            '[packages]',
+            'archive = {file = "https://example.com/archive/main.zip"}',
+            'wheel = {file = "./dist/pkg.whl"}',
+            'far = {file = "/opt/elsewhere/pkg.whl"}', '')))
+        self.write("pyproject.toml", "\n".join((
+            '[project]', 'name = "x"', '',
+            '[tool.uv.sources]', 'foo.git = "https://github.com/a/foo"', '',
+            '[tool.poetry.dependencies]',
+            'multi = [',
+            '  { version = "1.0", python = "<3.8" },',
+            '  { git = "https://github.com/a/multi.git", python = ">=3.8" },',
+            ']',
+            'one = [{ version = "1.0", python = "<3.8" }, { version = "*", python = ">=3.8" }]',
+            'after = "1.2"', '')))
+        found = [f for f in self.findings() if "has no lockfile" not in f[1]]
+        self.assertEqual(sorted(found), [
+            ("Cargo.toml:11", "cargo dependency quoted is fetched outside the registry (git)"),
+            ("Cargo.toml:5", "cargo dependency evil is fetched outside the registry (git)"),
+            ("Cargo.toml:6", "cargo dependency star floats to any version (*)"),
+            ("Cargo.toml:7", "cargo dependency outside is fetched outside the registry (path outside the checkout)"),
+            ("Pipfile:2", "python dependency archive is fetched outside the registry (URL)"),
+            ("Pipfile:4", "python dependency far is fetched outside the registry (path outside the checkout)"),
+            ("pyproject.toml:10", "python dependency multi is fetched outside the registry (git)"),
+            ("pyproject.toml:12", "python dependency one floats to any version (*)"),
+            ("pyproject.toml:5", "python dependency foo is fetched outside the registry (git)")])
+
     def test_piped_shell_forms_and_arg_defaults_in_dockerfiles(self):
         self.write("Dockerfile", "\n".join((
             "ARG BASE", "ARG NODE=node:20",
