@@ -47,7 +47,10 @@ and a license. The adapter reads that regular file, rejects links, recomputes
 its digest, and verifies that every case `location` identifies an existing,
 nonblank line in those exact bytes. Lines are numbered by LF, as editors and
 `file:line` references count them; a CRLF ending is not part of the line, and
-form feeds, NEL, or U+2028 inside a line do not start a new one. The bundled fixture uses the single
+a lone CR, form feed, NEL, or U+2028 inside a line does not start a new one.
+Results sealed before this rule are unaffected unless their source contains one
+of those characters; re-run `validate` for such sources rather than pooling
+old and new results. The bundled fixture uses the single
 committed `examples/detection-fixture-source.txt`; its `sha256:` revision is
 the digest of that file, not a self-declared label. Each case has a `vulnerable`
 or `benign` disposition, source `location`, component, class, mechanism, and

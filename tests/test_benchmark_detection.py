@@ -307,6 +307,7 @@ class DetectionBenchmarkTests(unittest.TestCase):
         # U+2028 and NEL on line 1 must not shift later lines; tabs are ordinary source text.
         source = source.replace(b"# tenant_id is available", "# tenant_id\u2028\x85 is available".encode())
         source = source.replace(b"health.py: def", b"health.py:\tdef").replace(b"cache.py: def", b"\tcache.py: def")
+        source = source.replace(b"orders.py: def", b"orders.py:\tdef")
         for name, variant in (("lf", source), ("crlf", source.replace(b"\n", b"\r\n"))):
             with self.subTest(line_endings=name), tempfile.TemporaryDirectory() as directory:
                 result = measured_with_source(directory, variant)
@@ -314,6 +315,7 @@ class DetectionBenchmarkTests(unittest.TestCase):
                     "true_positive": 3, "false_positive": 2, "false_negative": 1, "true_negative": 1,
                 })
                 self.assertIn("\t", result["score"]["true_negative_cases"][0]["evidence"])
+                self.assertIn("\t", result["adjudications"]["vulnerable"][0]["evidence"]["source_excerpt"])
                 benchmark.validate_result(round_trip(result), "tabbed")
 
         with tempfile.TemporaryDirectory() as directory:
@@ -431,6 +433,11 @@ class DetectionBenchmarkTests(unittest.TestCase):
 
         self.assertRefused("input_bytes_mismatch", self.altered_measurement, changed_configuration_bytes)
 
+        def float_overflowing_cost(ground_truth, run):
+            run["manifest"]["resources"]["estimated_cost_usd"] = 10 ** 401
+
+        self.assertRefused("invalid_schema", self.altered_measurement, float_overflowing_cost)
+
     def test_json_reader_rejects_duplicate_keys_and_nonfinite_values(self):
         with tempfile.TemporaryDirectory() as directory:
             duplicate = Path(directory) / "duplicate.json"
@@ -442,6 +449,9 @@ class DetectionBenchmarkTests(unittest.TestCase):
             oversized = Path(directory) / "oversized.json"
             oversized.write_text('{"value": ' + "9" * 5000 + "}", encoding="utf-8")
             self.assertRefused("unreadable_input", benchmark.read_json, oversized)
+            surrogate = Path(directory) / "surrogate.json"
+            surrogate.write_text('{"title": "\\ud800x"}', encoding="utf-8")
+            self.assertRefused("unreadable_input", benchmark.read_json, surrogate)
 
 
 if __name__ == "__main__":

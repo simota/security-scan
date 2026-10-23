@@ -78,10 +78,12 @@ def read_json(path):
             parse_constant=lambda token: (_ for _ in ()).throw(
                 Refusal("invalid_json_number", f"{path}: non-finite number {token}")),
         )
+        # A \ud800-style escape decodes to a lone surrogate that sealing cannot encode.
+        canonical(value)
     except Refusal:
         raise
     except (OSError, ValueError, RecursionError) as error:
-        # ValueError covers JSONDecodeError, UnicodeDecodeError and integer literals
+        # ValueError covers JSONDecodeError, Unicode errors and integer literals
         # longer than the interpreter's int-string conversion limit.
         raise Refusal("unreadable_input", f"{path}: {error}") from None
     refuse(json_depth(value) > MAX_DEPTH, "input_too_deep", f"{path}: JSON nesting exceeds {MAX_DEPTH}")
@@ -176,8 +178,12 @@ def integer(value, where):
 
 
 def number(value, where):
-    refuse(type(value) not in (int, float) or not math.isfinite(value) or value < 0,
-           "invalid_schema", f"{where}: non-negative finite number required")
+    refuse(type(value) not in (int, float), "invalid_schema", f"{where}: non-negative finite number required")
+    try:
+        finite = math.isfinite(float(value))
+    except OverflowError:
+        finite = False
+    refuse(not finite or value < 0, "invalid_schema", f"{where}: non-negative finite number required")
     return value
 
 
