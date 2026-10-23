@@ -36,6 +36,14 @@ class RedactionTests(unittest.TestCase):
         render.redact("password=" * 5000)
         self.assertLess(time.monotonic() - started, LIMIT)
 
+    def test_payload_and_secret_gates_are_linear(self):
+        # Workflow submissions and capture blobs have no line or string limit of their own.
+        import payloads
+        started = time.monotonic()
+        payloads.PAYLOAD.search("<svg " * 40000)
+        render.secret_in_source("a.js", "'password', " * 100000 + "define('DB_PASSWORD', `" * 50000)
+        self.assertLess(time.monotonic() - started, LIMIT)
+
 
 class DepsScanPathologicalTests(unittest.TestCase):
     def setUp(self):
@@ -78,6 +86,9 @@ class DepsScanPathologicalTests(unittest.TestCase):
         (self.root / "requirements.txt").write_text("a" + " " * 100000 + "!\n-e a" + " " * 100000 + "!\n")
         (self.root / "pyproject.toml").write_text('[project]\ndependencies = ["a' + " " * 100000 + '!"]\n'
                                                   "[" + " " * 100000 + "x\n")
+        # Dotted keys and an unclosed Poetry constraint array that never closes.
+        (self.root / "Pipfile").write_text("[packages]\na" + " " * 100000 + "." + " " * 100000 + "b!\n"
+                                           "x = [" + "{" * 200000 + "\n" + '{ git = "a' * 100000 + "\n")
         self.timed_scan()
 
     def test_many_dependencies_and_hosts(self):

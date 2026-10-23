@@ -516,6 +516,7 @@ skills/security-scan/
   scripts/three_pass.py        three-pass coverage profile checks
   scripts/invariant_ledger.py  opt-in invariant ledger and static-reproduction checks
   scripts/url_redaction.py     URL credential, query and fragment redaction for reports
+  scripts/payloads.py          literal attack strings refused by merges and workflow submissions
   scripts/scan_report_kit/     vendored scan-report-kit: shared stylesheets, PDF engine, safe writes
   templates/issue.{ja,en}.md     one finding as one issue
   templates/report.{ja,en}.md    findings report to an owner or security contact

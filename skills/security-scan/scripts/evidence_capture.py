@@ -17,10 +17,14 @@ Symlinks, hardlinks and non-regular children are refused, and so is a file
 holding a secret-looking value (a credential file, a private-key block, a known
 token format such as provider key prefixes, Slack/Discord/Telegram webhook and
 bot URLs or a Bearer/Basic Authorization value, a literal assigned to a
-secret-named key including subscripts such as cfg["SECRET_KEY"] = "...", a
-literal key passed to jwt.sign/encode/verify/decode, or URL credentials),
-since evidence/ is shareable output; reads, Git output and elapsed time are
-bounded. Repeated captures recheck their existing artifacts (without the secret check).
+secret-named key including subscripts such as cfg["SECRET_KEY"] = "...",
+define('DB_PASSWORD', '...') and secret_key_base, a literal key passed to
+jwt.sign/encode/verify/decode, or URL credentials; UTF-16/32 text is checked
+in its own encoding), since evidence/ is shareable output; reads, Git output
+and elapsed time are bounded. New blobs are read back through
+evidence_integrity.py's object snapshot, so a repository the verifier cannot
+read (hardlinked objects, a store over its limits) is refused instead of pinned.
+Repeated captures recheck their existing artifacts (without the secret check).
 
 Exit codes: 0 done, 2 bad input or a path differs from / is missing at the commit.
 """
@@ -39,7 +43,8 @@ import sys
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from evidence_integrity import EvidenceError, _Root, _parts, _deadline, _json_object, require_self_contained_git
+from evidence_integrity import (EvidenceError, _GitSnapshot, _Root, _parts, _deadline, _json_object,
+                                require_self_contained_git)
 from render import SchemaError, derive_expert, secret_in_source, validate_data
 
 GIT_BINARY = "/usr/bin/git"  # Never resolve a program through target PATH/config.
@@ -192,6 +197,14 @@ def capture(repo, findings_path, paths, commit="HEAD"):
             out_root.close()
 
 
+def _decodings(blob):
+    """The texts a secret check must see: UTF-8, and UTF-16/32 when a BOM or NUL bytes say so."""
+    texts = [blob.decode("utf-8", "replace")]
+    if b"\0" in blob:  # a leading BOM decodes to U+FEFF, which no secret pattern needs
+        texts += [blob.decode(codec, "replace") for codec in ("utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be")]
+    return texts
+
+
 def _capture(repo, out_root, source_root, findings_name, paths, commit, until):
     original, identity = out_root.read(findings_name, MAX_FILE_BYTES, with_identity=True)
     try:
@@ -294,7 +307,7 @@ def _capture(repo, out_root, source_root, findings_name, paths, commit, until):
             continue
         # evidence/ is shareable output: a copied secret would break "never print the value".
         # Checked for new paths only, so rechecking an earlier capture keeps working.
-        if secret_in_source(rel, blob.decode("utf-8", "replace")):
+        if any(secret_in_source(rel, text) for text in _decodings(blob)):
             raise CaptureError(f"{rel}: contains a secret-looking value; cite it by location "
                                "instead (location and kind only, never the value)")
         if out_root.exists(location) and out_root.read(location, MAX_FILE_BYTES, budget=budget) != blob:
@@ -305,6 +318,20 @@ def _capture(repo, out_root, source_root, findings_name, paths, commit, until):
 
     if len(evidence) + len(new) > MAX_PATHS:
         raise CaptureError(f"capture exceeds {MAX_PATHS} evidence records")
+    # Read each new blob back the way evidence_integrity.py will (hardlinked objects,
+    # object-count and snapshot-size limits): never pin evidence the verifier can only fail.
+    if new:
+        try:
+            snapshot = _GitSnapshot(repo, len(oid), until)
+            try:
+                for rel, _, blob in new:
+                    if snapshot.source(oid, rel) != blob:
+                        raise EvidenceError("git_source_bytes_mismatch")
+            finally:
+                snapshot.close()
+        except EvidenceError as e:
+            raise CaptureError(f"evidence_integrity.py cannot verify REPO's objects ({e.reason}); capture from "
+                               "a full, standalone clone (git clone --no-hardlinks)") from None
 
     source_root.check()
     out_root.check()

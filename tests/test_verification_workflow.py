@@ -96,6 +96,33 @@ class WorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(workflow.WorkflowError, 'missing stage output'):
             workflow.submit(self.data, self.identifier, output)
 
+    def test_literal_attack_strings_are_refused_in_every_stage(self):
+        # The same rule as a findings.py merge: submissions and event reasons reach the report too.
+        with self.assertRaisesRegex(workflow.WorkflowError, 'event.reason: contains a literal attack string'):
+            workflow.initialize(self.data, self.identifier, 'coordinator', 'Probe with <script>alert(1)</script>')
+        self.assertNotIn('verification_workflow', self.finding)
+        self.init()
+        payload = "q=' OR '1'='1 returns other rows"
+        for stage, place in (('conditions', lambda o: o['claims'][workflow.CLAIMS[0]].update(reason=payload)),
+                             ('falsification', lambda o: o['checks'][0].update(check=payload)),
+                             ('decision', lambda o: o['validation'].update(evidence=payload)),
+                             ('decision', lambda o: o.update(summary='Sent <script>alert(1)</script>'))):
+            with self.subTest(stage=stage):
+                while self.state()['next_stage'] != stage:
+                    self.advance()
+                before = copy.deepcopy(self.finding)
+                output = self.output(stage)
+                place(output)
+                with self.assertRaisesRegex(workflow.WorkflowError, 'literal attack string'):
+                    workflow.submit(self.data, self.identifier, output)
+                self.assertEqual(self.finding, before)
+        self.advance()
+        self.assertEqual(self.state()['status'], 'complete')
+        before = copy.deepcopy(self.finding)
+        with self.assertRaisesRegex(workflow.WorkflowError, 'event.reason'):
+            workflow.invalidate(self.data, self.identifier, 'coordinator', 'retest with ../../../etc/passwd')
+        self.assertEqual(self.finding, before)
+
     def test_same_actor_is_not_independent_even_with_case_and_whitespace(self):
         self.init()
         self.advance()

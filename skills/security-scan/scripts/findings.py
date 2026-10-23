@@ -30,8 +30,9 @@ method, path and parameter names, with placeholders such as `<other tenant's
 order id>`. Literal payload strings in a finding's prose fields are refused, so
 the report never carries a working exploit.
 
-A fragment adds at most five new findings (updates to recorded ones are not
-counted), so a refused write loses at most that batch.
+A fragment, and so one merge of several fragments, adds at most five new
+findings (updates to recorded ones are not counted), so a refused write loses
+at most that batch.
 
 `D-*` findings belong to deps_scan.py: a fragment may only add `validation` or
 `verification` to an existing `D-*` ID, never create one or change its other fields.
@@ -39,13 +40,16 @@ counted), so a refused write loses at most that batch.
 `renumber` gives the F-* findings the order the run contract asks for, once
 severities are final: F-001.. by severity, then path and line, with
 FalsePositive / NotApplicable findings after the rest. Every F-* reference in
-the record (ids, profile lists, prose) follows the new numbers. It refuses,
+the record (ids, profile lists, prose) follows the new numbers; locations,
+URLs and D-* scanner fields are not references and keep their text. It refuses,
 writing nothing, when an F- id is not F-NNN, once a finding holds a
 verification_workflow journal, or when the move would change captured
 evidence, test runs or the integrity policy, since their digests pin the old IDs.
 
 Exit codes: 0 merged or renumbered, 1 a fragment was refused or the record
-cannot be renumbered (reason on stderr), 2 unreadable input or schema error.
+cannot be renumbered (reason on stderr), 2 unreadable input or schema error,
+including a fragment that must wait for evidence_capture.py (profiles,
+test_runs, verification, evidence).
 """
 import argparse
 import copy
@@ -61,6 +65,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import render  # noqa: E402
 from contract_check import order_key, read_regular  # noqa: E402
 from expert import derive_expert  # noqa: E402
+from payloads import PAYLOAD  # noqa: E402
 
 LISTS = ("perspectives", "checked_ok", "decisions", "limitations", "next_steps")
 REMOVABLE = LISTS[1:]  # `remove` deletes exact entries from these lists
@@ -80,22 +85,6 @@ MAX_NEW_FINDINGS = 5
 # Merged finding ids match contract_check.py CODE_ID / DEP_ID (ASCII digits, no padding or case variants).
 FINDING_ID = re.compile(r"[FD]-[0-9]{3}")
 PROSE = ("title", "actor", "request", "impact", "fix")
-# Literal attack strings, not descriptions of them. Prose names the weakness
-# and the parameter; the payload itself never belongs in the report.
-PAYLOAD = re.compile(
-    r"<script\b|<(?:svg|img|iframe|body|details|video|audio|input|object)\b[^>]*\bon[a-z]+\s*=|"
-    r"\bon(?:error|load)\s*=|javascript:(?!\s|$)|"
-    # SQL tautologies (' OR '1'='1, " or "a"="a, OR 1=1), not prose such as "'admin' or 'member'".
-    r"\b(?:or|and)\s+(['\"]?)(\w+)\1\s*=\s*['\"]?\2\b|union\s+(?:all\s+)?select\b|"
-    # Traversal: repeated ../ or ..\\, or any URL-encoded segment; a single "../" is prose.
-    r"(?:\.\.[/\\]){2,}|\.\.(?:%2f|%5c)|%2e%2e(?:%2f|%5c|[/\\])|"
-    r";\s*(?:rm|curl|wget|nc|bash|sh)\s|[;|]\s*(?:id|whoami)\s*(?:$|[;&`])|\$\(\s*(?:curl|wget|id|cat)\b|"
-    # Template and expression probes.
-    r"\{\{\s*\d+\s*\*\s*\d+\s*\}\}|[$#]\{\s*\d+\s*\*\s*\d+\s*\}|"
-    r"\{\{\s*(?:config|self|request|settings|lipsum|cycler)\b|\$\{\s*(?:jndi|env|java|script):|"
-    r"169\.254\.169\.254|/etc/(?:passwd|shadow)\b",
-    re.IGNORECASE,
-)
 
 
 def read_json(path, raw=None):
@@ -316,13 +305,23 @@ def renumber_map(findings):
     return {f["id"]: f"F-{n:03d}" for n, f in enumerate(active + excluded, 1)}
 
 
+# Values that name a file or a URL, not a finding: src/F-002/view.py and .../browse/F-001 keep their text.
+NOT_REFERENCES = {"location", "url", "source_url"}
+
+
 def renumber(data, mapping):
-    """Rewrite every F-* reference in data's strings at once, then order the F-* records by id."""
+    """Rewrite every F-* reference in data's strings at once, then order the F-* records by id.
+    Paths and URLs are left as they are, and so are a D-* finding's scanner fields:
+    only its merged validation/verification can cite an F-* finding."""
     def rewrite(value):
         if isinstance(value, str):
             return CODE_REF.sub(lambda m: mapping.get(m.group(0), m.group(0)), value)
         if isinstance(value, dict):
-            return {k: rewrite(v) for k, v in value.items()}
+            dep = isinstance(value.get("id"), str) and value["id"].startswith("D-")
+            return {k: v if k in NOT_REFERENCES or dep and k not in DEP_REVIEW
+                    else [r if isinstance(r, str) else rewrite(r) for r in v]
+                    if k == "references" and isinstance(v, list) else rewrite(v)  # a bare string is a URL
+                    for k, v in value.items()}
         if isinstance(value, list):
             return [rewrite(v) for v in value]
         return value
@@ -409,12 +408,19 @@ def main(argv=None):
     refused = []
     known = {f.get("id") for f in base.get("findings", []) if isinstance(f, dict) and isinstance(f.get("id"), str)} \
         if isinstance(base, dict) and isinstance(base.get("findings"), list) else set()
+    added = set()  # new finding ids across every fragment of this merge: one batch per invocation
     for name, fragment in fragments:
         refused += fragment_problems(fragment, name, base)
-        if isinstance(fragment, dict) and isinstance(fragment.get("findings"), list):
-            refused += [f"{name}: {f['id']}: D-* findings are created only by deps_scan.py --into"
-                        for f in fragment["findings"] if isinstance(f, dict) and isinstance(f.get("id"), str)
-                        and f["id"].startswith("D-") and f["id"] not in known]
+        if not isinstance(fragment, dict):
+            continue
+        records = fragment.get("findings") if isinstance(fragment.get("findings"), list) else []
+        refused += [f"{name}: {f['id']}: D-* findings are created only by deps_scan.py --into"
+                    for f in records if isinstance(f, dict) and isinstance(f.get("id"), str)
+                    and f["id"].startswith("D-") and f["id"] not in known]
+        added |= {f["id"] for f in records if isinstance(f, dict) and isinstance(f.get("id"), str)} - known
+    if len(added) > MAX_NEW_FINDINGS and len(fragments) > 1:
+        refused.append(f"{len(added)} new findings across {len(fragments)} fragments; merge at most "
+                       f"{MAX_NEW_FINDINGS} per invocation and merge each batch before writing the next")
     if refused:
         print("\n".join(refused), file=sys.stderr)
         return 1

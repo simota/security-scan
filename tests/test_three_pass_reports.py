@@ -2,6 +2,7 @@
 
 No provider API, target scan, application test or recorded command is executed.
 """
+import contextlib
 import copy
 import importlib
 import json
@@ -20,6 +21,12 @@ HOSTILE = "</script><svg onload='window.THREE_PASS_INJECTED=1'>日本語 & \"sco
 SECRET = (" password=THREE_PASS_SECRET https://three-pass-user:THREE_PASS_URL_SECRET@example.invalid/scope"
           "?token=THREE_PASS_QUERY_SECRET#THREE_PASS_FRAGMENT_SECRET")
 OPAQUE = "THREE_PASS_PRIVATE_EXTENSION_MUST_NOT_RENDER"
+
+
+def record(workflow, hostile, action, *args):
+    """A journal call, past its payload gate for hostile text: the reports must stay inert for records written any other way."""
+    with patch.object(workflow, "_refuse_payloads", lambda *_: None) if hostile else contextlib.nullcontext():
+        return getattr(workflow, action)(*args)
 
 
 def fixture(workflow, *, stop_after="decision", hostile=False, missing_scope=False, challenge_result="clear"):
@@ -75,7 +82,7 @@ def fixture(workflow, *, stop_after="decision", hostile=False, missing_scope=Fal
     ]
     for output in outputs:
         output["input_digest"] = workflow.derive_workflow(data, finding)["input_digest"]
-        workflow.submit(data, finding["id"], output)
+        record(workflow, hostile, "submit", data, finding["id"], output)
         if stop_after == output["stage"]:
             break
     return data

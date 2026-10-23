@@ -1373,13 +1373,21 @@ def mask_multiline(text):
 
 MAX_SOURCE_BYTES = 16 * 1024 * 1024
 # secret_in_source: a key whose last name segment (snake, kebab, dotted, camel or
-# SCREAMING case) is a secret name, assigned a value that is not a placeholder,
-# version, path, URL or plain words. Values are bounded so an unterminated quote
-# costs at most 1 KiB per key.
+# SCREAMING case) is a secret name, optionally followed by an encoding suffix
+# (secret_key_base, private_key_pem), assigned a value that is not a placeholder,
+# version, path, URL or plain words. A quoted secret name passed with a quoted
+# value (define('DB_PASSWORD', '...'), setdefault("SECRET_KEY", "...")) is an
+# assignment too. Values are bounded so an unterminated quote costs at most 1 KiB per key.
 _SECRET_NAME = re.compile(r"(?i)(?:^|[_.-])(?:token|secret|password|passwd|api[_-]?key|access[_-]?key"
-                          r"|private[_-]?key|secret[_-]?key|client[_-]?secret|auth|credentials?)$")
-_LITERAL_TAIL = re.compile(r"""(?:['"](?:[ \t]*\])?)?[ \t]*(?::[ \t]*[A-Za-z_][\w.\[\], |]{0,40}?[ \t]*(?==))?(?:=>|:=|[:=])[ \t]*"""
-                           r"""(?:(['"])((?:\\.|(?!\1)[^\\\n]){0,1024})\1|([^'"\s,;)#]{1,1024}))""")
+                          r"|private[_-]?key|secret[_-]?key|client[_-]?secret|auth|credentials?)"
+                          r"(?:[_.-](?:base|pem|value|b64|base64|hex|raw))?$")
+_LITERAL_TAIL = re.compile(r"""(?:(?P<comma>['"][ \t]*,)|(?:['"](?:[ \t]*\])?)?[ \t]*(?::[ \t]*[A-Za-z_][\w.\[\], |]{0,40}?[ \t]*(?==))?(?:=>|:=|[:=]))[ \t]*"""
+                           r"""(?:(?P<q>['"`])(?P<v>(?:\\.|(?!(?P=q))[^\\\n]){0,1024})(?P=q)|(?P<bare>[^'"`\s,;)#]{1,1024}))""")
+# A second argument naming another field, variable, flag or code ("csrf_token", "DATABASE_URL",
+# "--github-token", "password2") is not a value.
+_FIELD_NAME = re.compile(r"-{0,2}[A-Za-z]+(?:[_.-][A-Za-z]+)*[0-9]?")
+# A backtick quotes a template literal here; in shell, Ruby or Perl it runs a command.
+TEMPLATE_SUFFIXES = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".vue", ".svelte"}
 _NOT_SECRET = re.compile(r"[$<{%]|process\.env|os\.environ|[A-Za-z_][\w.]*\(")
 _PLAIN_VALUE = re.compile(r"[\^~<>=].*|v?\d+(?:\.\d+)+[\w.+-]*|(?:~|\.{1,2})?(?:/[a-z0-9_.{}:-]*)+"
                           r"|[a-z][a-z0-9+.-]*://[^?#@\s]*|[A-Za-z][A-Za-z ]*[.!?:]?")
@@ -1418,8 +1426,8 @@ JWT_KEY_LITERAL = re.compile(r"""(?i)(\b(?:jwt|jsonwebtoken|jose|jws)\.(?:sign|e
                              r"""(?:(?:[^\s,(){}]|%s)(?:[^,(){}\n]|%s){0,199},\s{0,40}(?:(?:%s){0,4}%s)?|%s)(?:[rbfu]{1,2}(?=['"]))?)"""
                              r"""(['"`])(?!(?<=`)[^`\n]{0,1024}\$\{)((?:\\.|(?!\2)[^\\\n]){1,1024})\2""" % (_GROUP, _GROUP, _KWARG, _JWT_KW, _JWT_KW))
 # A private key block: the header followed by a base64 body line (raw or \n-escaped).
-PEM_BODY_RE = re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[ \t]*(?:\r?\n|\\r?\\n)"
-                         r"(?:[\w-]+:[^\n\\]*(?:\r?\n|\\r?\\n))*[ \t]*[A-Za-z0-9+/]{16,}")
+PEM_BODY_RE = re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[ \t]*(?:\r?\n|(?:\\r)?\\n)"
+                         r"(?:[\w-]+:[^\n\\]*(?:\r?\n|(?:\\r)?\\n))*[ \t]*[A-Za-z0-9+/]{16,}")
 CONFIG_SUFFIXES = {".yml", ".yaml", ".ini", ".cfg", ".conf", ".properties", ".toml", ".sh", ".bash", ".zsh"}
 
 
@@ -1446,7 +1454,11 @@ def secret_in_source(rel, text):
         for run in _KEY_RUN.finditer(line):
             name = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", run.group())
             m = _SECRET_NAME.search(name) and _LITERAL_TAIL.match(line, run.end())
-            if m and secret_value(m.group(2) if m.group(1) else m.group(3) if config else ""):
+            if not m or m["comma"] and (not m["q"] or _FIELD_NAME.fullmatch(m["v"])):
+                continue
+            if m["q"] == "`" and (Path(rel).suffix.lower() not in TEMPLATE_SUFFIXES or "${" in m["v"]):
+                continue  # a command substitution, or an interpolated template literal: an expression
+            if secret_value(m["v"] if m["q"] else m["bare"] if config else ""):
                 return True
         # Userinfo, including a password with '/', '?' or '#', a quoted or
         # percent-encoded one, and scheme-relative //user:pw@host URLs.
