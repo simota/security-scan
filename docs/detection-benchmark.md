@@ -45,7 +45,9 @@ an immutable `git:<40 lowercase hex>` or `sha256:<64 lowercase hex>` revision,
 an exact source-artifact SHA-256, a safe local `artifact_path`, a source URI,
 and a license. The adapter reads that regular file, rejects links, recomputes
 its digest, and verifies that every case `location` identifies an existing,
-nonblank line in those exact bytes. The bundled fixture uses the single
+nonblank line in those exact bytes. Lines are numbered by LF, as editors and
+`file:line` references count them; a CRLF ending is not part of the line, and
+form feeds, NEL, or U+2028 inside a line do not start a new one. The bundled fixture uses the single
 committed `examples/detection-fixture-source.txt`; its `sha256:` revision is
 the digest of that file, not a self-declared label. Each case has a `vulnerable`
 or `benign` disposition, source `location`, component, class, mechanism, and
@@ -73,10 +75,13 @@ The findings input is a run envelope containing:
   binds those bytes to the method, ground truth, source artifact, subject, and
   condition;
 - the scanner's findings; a record without summary, report, impact, or request
-  evidence is named as invalid and excluded;
+  evidence is named as invalid and excluded. A title is only a display label:
+  control characters and whitespace runs fold to single spaces, and it is cut
+  to 200 characters;
 - exactly one independent detection adjudication per vulnerable case, including
   all four gates, a reason, an exact excerpt from the matched finding, and an
-  exact source line from the verified artifact. A passed gate must contain all
+  exact source line from the verified artifact (tabs included; other control
+  characters cannot be quoted). A passed gate must contain all
   ground-truth finding/source terms; arbitrary booleans or unrelated excerpts
   are refused. The reason, gates, and structured evidence survive in the sealed
   result;
@@ -157,7 +162,10 @@ TP/FP/FN/TN, all four point metrics, candidate/invalid counts, and the ARTEX
 non-comparability label. The aggregate line reports pooled confusion-derived
 metrics; JSON additionally retains mean, range, and sample standard deviation
 across runs, candidate/invalid counts, gate observations, and total estimated
-cost.
+cost. A run with no true or false positive has undefined precision; it still
+counts in the pooled totals, and each precision spread names it in
+`undefined_runs` instead of refusing the summary, so the weakest run cannot be
+left out to make the aggregate look better.
 For real evidence, retain the sealed run results and summary under a new
 versioned evidence directory, together with the immutable corpus checkout and
 the independent adjudication record. Review discovery candidates separately;

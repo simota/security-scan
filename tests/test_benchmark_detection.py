@@ -30,6 +30,33 @@ def measured(path):
         ground_truth, benchmark.digest(gt_raw), run, benchmark.digest(run_raw), GROUND_TRUTH.parent)
 
 
+def measured_with_source(directory, source, change=None):
+    """Measure run 1 against the fixture cases rebased onto other source bytes."""
+    ground_truth, _ = fixture(GROUND_TRUTH)
+    run, _ = fixture(RUNS[0])
+    (Path(directory) / "source.txt").write_bytes(source)
+    lines = source.decode("utf-8").replace("\r\n", "\n").split("\n")
+    ground_truth["source"].update(artifact_path="source.txt", artifact_sha256=benchmark.digest(source),
+                                  revision=benchmark.digest(source))
+    run["manifest"]["source_revision"] = ground_truth["source"]["revision"]
+    for case in ground_truth["cases"]:
+        case["location"] = "source.txt:" + case["location"].rsplit(":", 1)[1]
+    for record in run["adjudications"] + run["benign_adjudications"]:
+        if record["evidence"]:
+            line = int(record["evidence"]["source_location"].rsplit(":", 1)[1])
+            record["evidence"].update(source_location=f"source.txt:{line}", source_excerpt=lines[line - 1])
+    if change:
+        change(ground_truth, run)
+    gt_raw = benchmark.canonical(ground_truth)
+    run["manifest"]["ground_truth_sha256"] = benchmark.digest(gt_raw)
+    return benchmark.measurement(ground_truth, benchmark.digest(gt_raw), run,
+                                 benchmark.digest(benchmark.canonical(run)), Path(directory))
+
+
+def round_trip(result):
+    return json.loads(json.dumps(result, ensure_ascii=False))
+
+
 class DetectionBenchmarkTests(unittest.TestCase):
     def assertRefused(self, code, function, *args):
         with self.assertRaises(benchmark.Refusal) as raised:
@@ -275,6 +302,63 @@ class DetectionBenchmarkTests(unittest.TestCase):
         boolean_metric[1] = benchmark.sealed(payload)
         self.assertRefused("invalid_result", benchmark.summary, boolean_metric, 3)
 
+    def test_source_lines_are_lf_numbered_and_tab_indented_excerpts_are_accepted(self):
+        source = (ROOT / "examples" / "detection-fixture-source.txt").read_bytes()
+        # U+2028 and NEL on line 1 must not shift later lines; tabs are ordinary source text.
+        source = source.replace(b"# tenant_id is available", "# tenant_id\u2028\x85 is available".encode())
+        source = source.replace(b"health.py: def", b"health.py:\tdef").replace(b"cache.py: def", b"\tcache.py: def")
+        for name, variant in (("lf", source), ("crlf", source.replace(b"\n", b"\r\n"))):
+            with self.subTest(line_endings=name), tempfile.TemporaryDirectory() as directory:
+                result = measured_with_source(directory, variant)
+                self.assertEqual(result["score"]["confusion_matrix"], {
+                    "true_positive": 3, "false_positive": 2, "false_negative": 1, "true_negative": 1,
+                })
+                self.assertIn("\t", result["score"]["true_negative_cases"][0]["evidence"])
+                benchmark.validate_result(round_trip(result), "tabbed")
+
+        with tempfile.TemporaryDirectory() as directory:
+            def other_control(ground_truth, run):
+                run["benign_adjudications"][0]["evidence"]["source_excerpt"] += "\x1b"
+
+            self.assertRefused("invalid_schema", measured_with_source, directory, source, other_control)
+
+    def test_finding_titles_are_folded_so_sealed_results_revalidate(self):
+        for title, expected in (("Candidate:\ttiming\nvariance", "Candidate: timing variance"),
+                                ("  \t ", "untitled"), ("x" * 199 + " tail", "x" * 199)):
+            def change(ground_truth, run, title=title):
+                run["findings"][5]["title"] = title
+
+            with self.subTest(title=title):
+                result = self.altered_measurement(change)
+                self.assertEqual(result["score"]["discovery_candidates"][0]["title"], expected)
+                benchmark.validate_result(round_trip(result), "folded")
+
+    def test_summary_keeps_runs_with_undefined_precision(self):
+        ground_truth, gt_raw = fixture(GROUND_TRUTH)
+        run, _ = fixture(RUNS[0])
+        run["manifest"]["run_id"] = "fixture-run-empty"
+        run["findings"] = []
+        for record in run["adjudications"]:
+            record.update(detected=False, matched_finding_id=None, evidence=None,
+                          gates={gate: False for gate in benchmark.GATES})
+        for record in run["benign_adjudications"]:
+            record.update(outcome="true_negative", matched_finding_ids=[])
+        empty = benchmark.measurement(ground_truth, benchmark.digest(gt_raw), run,
+                                      benchmark.digest(benchmark.canonical(run)), GROUND_TRUTH.parent)
+        self.assertIsNone(empty["score"]["metrics"]["precision"])
+        result = benchmark.summary([round_trip(measured(RUNS[0])), round_trip(measured(RUNS[1])),
+                                    round_trip(empty)], 3)
+        self.assertEqual(result["aggregate"]["confusion_matrix_totals"], {
+            "true_positive": 5, "false_positive": 2, "false_negative": 7, "true_negative": 5,
+        })
+        self.assertEqual(result["aggregate"]["micro_metrics"]["precision"], 0.7143)
+        self.assertEqual(result["aggregate"]["detection_rate"]["min"], 0.0)
+        precision = result["aggregate"]["per_run_metrics"]["precision"]
+        self.assertEqual((precision["mean"], precision["undefined_runs"]), (0.8, 1))
+        self.assertEqual(result["aggregate"]["precision_lower_bound"]["undefined_runs"], 1)
+        self.assertEqual(result["aggregate"]["per_run_metrics"]["recall"]["undefined_runs"], 0)
+        self.assertIn("precision=0.7143", benchmark.human_summary(result))
+
     def test_cli_creates_results_refuses_overwrite_and_summarizes(self):
         with tempfile.TemporaryDirectory() as directory:
             outputs = [Path(directory) / f"run-{number}.json" for number in (1, 2, 3)]
@@ -355,6 +439,9 @@ class DetectionBenchmarkTests(unittest.TestCase):
             nonfinite = Path(directory) / "nonfinite.json"
             nonfinite.write_text('{"value": NaN}', encoding="utf-8")
             self.assertRefused("invalid_json_number", benchmark.read_json, nonfinite)
+            oversized = Path(directory) / "oversized.json"
+            oversized.write_text('{"value": ' + "9" * 5000 + "}", encoding="utf-8")
+            self.assertRefused("unreadable_input", benchmark.read_json, oversized)
 
 
 if __name__ == "__main__":
