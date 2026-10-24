@@ -99,6 +99,15 @@ it is not retried through another tool or wording. The skill reports the action
 and the stated reason. These instructions reduce avoidable interruptions; they
 do not change host permissions or guarantee that a host will accept every call.
 
+For a concrete execution command, use `scan_run.py` (POSIX, standard library
+only). It creates a private run, gives every child command a deadline, records
+checkpoints, and publishes only successful staged outputs. An interrupted
+process cannot leave its partial report or writer lock in the published output.
+PDF failures preserve HTML with an explicit limitation; online advisory queries
+remain opt-in. See [the execution guide](docs/execution-runner.md) for commands,
+exit codes and recovery. The skill uses this command for its mechanical steps;
+source review and the existing evidence/contract checks remain necessary.
+
 ### Same result on every host
 
 Claude Code, Codex and Antigravity load the same `SKILL.md`, whose *Run
@@ -530,6 +539,7 @@ skills/security-scan/
   reference/invariants.md      invariant ledger, path trace, close-check, static reproduction
   reference/coverage-trace.md  ASVS / API Top 10 / CWE Top 25 mapped to perspectives and hunt steps
   scripts/deps_scan.py         dependency inventory, supply-chain checks, audits (stdlib only)
+  scripts/scan_run.py          private checkpoints, command deadlines and staged publication (POSIX)
   scripts/findings.py          merges JSON fragments into findings.json; refuses literal attack strings;
                                renumber restores the F-* severity order
   scripts/evidence_capture.py  assessed-revision source -> evidence/ and schema-2 records

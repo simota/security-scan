@@ -43,7 +43,7 @@ script (those embed finding text in a shell command, which host safety checks
 can refuse and which leaves no reviewable record):
 
 ```
-# 1. end of RECON, file-write tool: <scratch>/frag-001.json = {"meta": {...}}
+# 1. initialize (or update after RECON), file-write tool: <scratch>/frag-001.json = {"meta": {...}}
 python3 scripts/findings.py merge <out>/findings.json <scratch>/frag-001.json
 # 2. end of REVIEW: <scratch>/frag-002.json = {"findings": [...]}  (one to five settled F-NNN, severity order)
 python3 scripts/findings.py merge <out>/findings.json <scratch>/frag-002.json

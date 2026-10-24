@@ -19,6 +19,52 @@ executes or changes the assessed application.
 
 Phases: `RECON → CHECKLIST → REVIEW → VERIFY → REPORT`.
 
+## Execution command
+
+Use `scripts/scan_run.py` on POSIX hosts for the mechanical operations below.
+It prepares private, physical output/scratch paths, bounds each child command
+to 60 seconds by default (`--timeout` changes it), and publishes a stage only
+after it succeeds. Failed attempts and their locks stay in isolated scratch;
+the last published outputs remain available. It never performs the source
+review, runs the target application, authorizes a host-rejected action, or
+retries failed work automatically.
+
+From the installed skill directory, first write a meta-only JSON fragment with
+the host's file-write tool. `init` prints the fresh `<run>` path and `<run>/out`:
+
+```sh
+python3 scripts/scan_run.py init <repo> --meta <metadata-fragment> --parent <writable-parent> --lang ja
+python3 scripts/scan_run.py preflight <run>
+python3 scripts/scan_run.py inventory <run>
+python3 scripts/scan_run.py merge <run> <scratch-fragment>
+python3 scripts/scan_run.py capture <run> <repo-relative-source-path>
+python3 scripts/scan_run.py render <run>
+python3 scripts/scan_run.py check <run>
+python3 scripts/scan_run.py status <run>
+```
+
+Use `<run>/scratch` for finding fragments; `<run>/out` is the contract's `<out>`.
+The first metadata merge is performed by `init`; update scope metadata after
+RECON rather than initializing the record again. Continue the ordinary review
+phases between commands. Inventory is offline unless `inventory --audit` is
+explicitly requested and its package-list disclosure authorized; a later
+inventory replaces `D-*` reviews just as `deps_scan.py --into` does. Use
+`renumber <run>` before capture if required. PDF failure or timeout publishes
+HTML with an explicit limitation; `render --no-pdf` also records its intentional
+omission. These commands return `3` for incomplete optional work, `124` for a
+deadline, and preserve other tools' failure codes. Inspect the result and
+continue independent phases; do not treat these as verified completion or
+blindly rerun an action refused by the host. `check` must still pass before
+claiming the run contract holds. State is in `<run>/state.json`, outside the
+report; no successful status record replaces a fresh contract check.
+
+The underlying scripts remain available on other hosts and for opt-in profiles.
+Once using the runner, use its commands for these operations rather than
+editing its published outputs concurrently. The runner owns only its control
+records and fixed PDF-limitation fragments; finding prose still comes from
+file-written fragments. Checkpoint history is operational data, never evidence
+that a finding is true.
+
 ## Before starting
 
 - **State scope and authorization in one line.** A request to review the
@@ -74,8 +120,8 @@ checklist-only runs, which write no files).
 | `meta.assessor` | Host and model, e.g. `Claude Code (<model>)`, `Codex (<model>)`, `Antigravity (<model>)` |
 | Budget | When the budget runs short, close units in risk order (non-admin reach and crown jewels first) instead of thinning every unit. Each unreached ledger entry is `holds on N/M, rest not read`; `limitations` gives the count of unreached units, entry points and entries |
 | Scratch | A new, empty directory for working records (recon map, ledger, trace rows, fragments), outside both the audited repository and the output directory: the host's session scratch or temp directory when it names one (Claude Code: the scratchpad directory; Codex and Antigravity: a fresh directory under the system temp directory, e.g. `$TMPDIR`), otherwise a sibling of the output directory. Name its path in the chat summary |
-| Writing the record | Never build `findings.json` or any scratch record with a shell heredoc, `echo`/`printf` redirection, an inline `python -c` or a generated script. Write each batch of results as a JSON fragment with the host's file-write tool into scratch (not the output directory), then `scripts/findings.py merge <out>/findings.json <fragment>…`. Keep a batch to one to five findings and merge each batch before writing the next, so a refused write loses at most that batch. On a host without a `Write` tool, its file-edit tool (e.g. `apply_patch` adding a new file) is the file-write tool. The first fragment carries only `meta` and is merged at the end of RECON, so `findings.json` exists for `deps_scan.py --into` and `scripts/evidence_capture.py`; capture then pins the record, and later fragments add `verification`, `test_runs` and requested `three_pass`/`expert`/`evidence_integrity`/`invariant_ledger` profiles. Nested profile lists/objects replace whole values; see `reference/findings-schema.md`. Workflow journals are written only by `scripts/verification_workflow.py` |
-| Read-only | `allowed-tools` above is enforced by Claude Code only. Elsewhere keep to it yourself: read, search and run this skill's scripts; the file-write tool is for scratch records and finding fragments only (at expert grade, also the `<out>/run/` records `reference/expert-mode.md` names); write nothing inside the audited repository |
+| Writing the record | Never build `findings.json` or any scratch record with a shell heredoc, `echo`/`printf` redirection, an inline `python -c` or a generated script. Write each batch of results as a JSON fragment with the host's file-write tool into scratch (not the output directory), then `scripts/findings.py merge <out>/findings.json <fragment>…`. Keep a batch to one to five findings and merge each batch before writing the next, so a refused write loses at most that batch. On a host without a `Write` tool, its file-edit tool (e.g. `apply_patch` adding a new file) is the file-write tool. The first fragment carries only `meta` and is merged before the first `deps_scan.py --into` or `scripts/evidence_capture.py` (`scan_run.py init` performs this merge; standalone runs can do it at the end of RECON). Capture then pins the record, and later fragments add `verification`, `test_runs` and requested `three_pass`/`expert`/`evidence_integrity`/`invariant_ledger` profiles. Nested profile lists/objects replace whole values; see `reference/findings-schema.md`. Workflow journals are written only by `scripts/verification_workflow.py` |
+| Read-only | `allowed-tools` above is enforced by Claude Code only. Elsewhere keep to it yourself: read, search and run this skill's scripts; the file-write tool is for scratch records and finding fragments only (at expert grade, also the `<out>/run/` records `reference/expert-mode.md` names). `scripts/scan_run.py` also owns its private control directory outside `<out>` and the audited repository; write nothing inside the audited repository |
 
 | Severity | When |
 |---|---|
@@ -116,7 +162,7 @@ remaining authorized work can be done, and identify the exact dependency.
 
 | Phase | Do | Reference |
 |---|---|---|
-| RECON | Build the attack-surface map: stack, every entry point with its auth and role guard, how tenancy is enforced and which models escape it, data sinks, config, and the rules the app enforces (role matrix, ownership chain, state machines, quantities); run `scripts/deps_scan.py` for the dependency inventory and supply-chain checks. End by deriving the invariant ledger and merging the `meta`-only first fragment, which creates `findings.json` | `reference/recon.md`, `reference/invariants.md`, `reference/dependencies.md` |
+| RECON | Build the attack-surface map: stack, every entry point with its auth and role guard, how tenancy is enforced and which models escape it, data sinks, config, and the rules the app enforces (role matrix, ownership chain, state machines, quantities); run the dependency inventory and supply-chain checks. End by deriving the invariant ledger and merging a `meta`-only fragment with the mapped scope (create `findings.json` if not initialized by `scan_run.py init`) | `reference/recon.md`, `reference/invariants.md`, `reference/dependencies.md` |
 | CHECKLIST | Ledger first, seeded with each applicable family's `baseline` entry: each invariant with its source and every path that touches it. Then the perspectives that apply, as a coverage check, keeping only hunt steps no ledger entry covers; attach early suspicions marked unverified | `reference/invariants.md`, `reference/perspectives.md`, `reference/coverage-trace.md`, `reference/report.md` |
 | REVIEW | One pass (or one independent reviewer) per review unit from the *Run contract*. Hunt each owned invariant on every path that touches it ("enforced on N of M paths" — the rest are candidates), with one path-trace row per ledger path and per record-naming input, citing the callee chain to the fetch; every control cell names the enforcing check, inherited ones included, as `path:line`, or `NONE` / `N/A` / `UNKNOWN` / `ASSUMED` (a check that does not dominate the fetch) with its reason — never "the framework handles it". Then the sink-backward pass (every statement on a protected model maps to an inventory row; unmapped ones become new rows), the multi-step chains, the variants of each confirmed finding, then sweep every applicable perspective's hunt steps; anything new about the app's rules goes back into the ledger. Handlers a low-privilege actor can reach first, admin-only handlers for the severe classes only. Once the candidate list is settled, merge the findings as `F-NNN` in severity order, in batches; then `deps_scan.py --audit --into` for known-vulnerable and malicious packages | `reference/invariants.md`, `reference/perspectives.md`, `reference/dependencies.md` |
 | VERIFY | First capture the cited source with `scripts/evidence_capture.py`; its `SRC-…` IDs are what `verification` cites (capture again for paths cited later). Record evidence-linked reachability, preconditions, defenses and impact as `verification` fragments; try to falsify the claim; preserve unknown conditions and independent reviewer findings; distinguish static support from isolated runtime evidence | `reference/validation.md` |
