@@ -59,6 +59,33 @@ python3 scripts/scan_run.py check <run>
 python3 scripts/scan_run.py status <run>
 ```
 
+After source review and capture, finish the report with one command:
+
+```sh
+python3 scripts/scan_run.py finish <run>
+```
+
+`finish` performs an offline inventory only if no inventory has yet been
+attempted or recorded, then renders and checks the report. An incomplete or
+failed stage does not prevent independent stages from running. It preserves
+existing dependency results and manual package reviews, never enables online
+audits, and never automatically retries a previously failed inventory. A failed
+inventory refresh remains visible even if an older inventory is available.
+Missing inventory adds a report limitation before rendering. After an explicit,
+permitted inventory succeeds, a later `finish` removes that obsolete limitation.
+An interruption of the current command stops subsequent stages; an old
+interruption does not stop a newly requested report generation.
+
+`--no-pdf`, `--timeout` and `--allow NAME` are also accepted by `finish`. Its
+stdout is one JSON summary with every attempted or retained stage's outcome;
+details remain in the ordinary checkpoint history. Exit `0` requires all
+selected operations and the contract check to succeed, `3` reports optional
+omissions, `2` reports any failed/deadline stage, and `130` reports a current
+interruption. A successful contract check alone cannot hide an earlier failed
+stage. Standalone operation exit codes are unchanged. Finishing the mechanical
+report work does not perform or certify source review, independent verification
+or the separate optional-profile gates.
+
 Merge still enforces the five-new-findings bound, source capture still requires
 the assessed revision and safe source files, and renumbering still refuses
 already-pinned references. `capture` supports `--commit`; `check` supports
@@ -91,7 +118,12 @@ deadline. Large runs need enough disk space for an output copy per attempt.
 
 `status` does not execute tools or retry anything. It acquires the same lock,
 repairs an interrupted publication if needed, marks abandoned operations as
-interrupted, and shows history with the current output digest. Checkpoint
+interrupted, and shows history with the current output digest.
+When another operation owns the lock, it instead returns a read-only journal
+snapshot with `busy: true`, exit `3`, and no current output digest. It never
+marks that live work interrupted or reads a possibly changing output tree.
+Running stage records include their owner's PID for diagnosis; a recorded PID
+alone is not authority to terminate a process or clear a lock. Checkpoint
 digests refer to whole output snapshots. A historical successful check whose
 digest no longer matches is not a check of the current report. Always invoke
 `check` again after changing the report.

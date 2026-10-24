@@ -30,6 +30,7 @@ from scan_report_kit.output import write_output
 
 STEPS = ("merge", "inventory", "capture", "renumber", "render", "check")
 PDF_LIMIT = "assessment.pdf not produced"
+FINISH_LIMIT = "Runner finish: dependency inventory unavailable"
 
 
 def stamp():
@@ -213,14 +214,14 @@ def report_limits(stage, attempt, addition, run):
     return run("findings.py", ["merge", findings, fragment])
 
 
-def operation(args, root, state, fd):
+def operation(args, root, state, fd, emit=True):
     recover(root, state)
     out = root / "out"
     original = tree_digest(out)
     attempt = Path(tempfile.mkdtemp(prefix="attempt-", dir=root / "scratch"))
     stage = attempt / "out"
     shutil.copytree(out, stage)
-    event = {"step": args.step, "started": stamp(), "status": "running",
+    event = {"step": args.step, "started": stamp(), "status": "running", "owner_pid": os.getpid(),
              "attempt": attempt.name, "commands": []}
     state["history"].append(event)
     save(root, state)
@@ -289,8 +290,84 @@ def operation(args, root, state, fd):
     finally:
         event.update(finished=stamp(), exit_code=code if code else (3 if incomplete else 0))
         save(root, state)
-    print(json.dumps({"run": str(root), "out": str(out), **event}, ensure_ascii=False))
+    if emit:
+        print(json.dumps({"run": str(root), "out": str(out), **event}, ensure_ascii=False))
     return event["exit_code"]
+
+
+def finish(args, root, state, fd):
+    """Deliver independent reporting work without retrying a failed operation."""
+    recover(root, state)
+    started, steps = stamp(), []
+
+    def run_step(name, **options):
+        child = argparse.Namespace(step=name, timeout=args.timeout, **options)
+        try:
+            code = operation(child, root, state, fd, emit=False)
+        except (OSError, ValueError) as error:
+            print(f"scan_run.py: {name}: {error}", file=sys.stderr)
+            code = 2
+            state["history"].append({"step": name, "status": "failed", "exit_code": code,
+                                     "finished": stamp()})
+            save(root, state)
+        event = state["history"][-1]
+        steps.append({"step": name, "status": event["status"], "exit_code": code})
+        return code
+
+    data = read_record(root / "out/findings.json")
+    if not isinstance(data, dict):
+        raise ValueError("findings must be a JSON object")
+    inventory = data.get("dependency_scan")
+    previous = next((event for event in reversed(state["history"])
+                     if event.get("step") == "inventory"), None)
+    interrupted = False
+    if previous is not None and previous.get("status") not in ("complete", "incomplete"):
+        inventory_code = previous.get("exit_code")
+        if type(inventory_code) is not int or inventory_code in (0, 3):
+            inventory_code = 2
+        steps.append({"step": "inventory", "status": "not_retried", "exit_code": inventory_code})
+    elif (isinstance(inventory, dict) and inventory.get("tool") == "deps_scan.py"
+            and (root / "out/deps.json").is_file()):
+        inventory_code = 3 if inventory.get("not_run") else 0
+        steps.append({"step": "inventory", "status": "already_recorded", "exit_code": inventory_code})
+    elif previous is not None:
+        # A later finish must not silently retry an earlier failed/refused step.
+        inventory_code = 2
+        steps.append({"step": "inventory", "status": "not_retried", "exit_code": inventory_code})
+    else:
+        inventory_code = run_step("inventory", audit=False)
+        interrupted = inventory_code == 130
+
+    if not interrupted:
+        old = [text for text in data.get("limitations", [])
+               if isinstance(text, str) and text.startswith(FINISH_LIMIT)]
+        note = ([f"{FINISH_LIMIT} (exit {inventory_code}); this static report is partial."]
+                if inventory_code not in (0, 3) else [])
+        if old or note:
+            fragment = root / "scratch" / ("finish-limits-" + os.urandom(8).hex() + ".json")
+            write_output(fragment, json.dumps({"remove": {"limitations": old}, "limitations": note}))
+            interrupted = run_step("merge", fragments=[str(fragment)]) == 130
+    if not interrupted:
+        interrupted = run_step("render", no_pdf=args.no_pdf) == 130
+    if not interrupted:
+        interrupted = run_step("check", allow=args.allow) == 130
+
+    codes = [step["exit_code"] for step in steps]
+    if interrupted:
+        code, status = 130, "interrupted"
+    elif any(value not in (0, 3) for value in codes):
+        code, status = 2, "failed"
+    elif 3 in codes:
+        code, status = 3, "incomplete"
+    else:
+        code, status = 0, "complete"
+    event = {"step": "finish", "started": started, "finished": stamp(), "steps": steps,
+             "status": status, "exit_code": code,
+             "output_sha256": tree_digest(root / "out")}
+    state["history"].append(event)
+    save(root, state)
+    print(json.dumps({"run": str(root), "out": str(root / "out"), **event}, ensure_ascii=False))
+    return code
 
 
 def positive_seconds(value):
@@ -312,6 +389,11 @@ def main(argv=None):
     for name in ("status", "preflight"):
         inspect = sub.add_parser(name, help="inspect the run without executing or retrying tools")
         inspect.add_argument("run", type=Path)
+    final = sub.add_parser("finish", help="finish independent report operations despite incomplete steps")
+    final.add_argument("run", type=Path)
+    final.add_argument("--timeout", type=positive_seconds, default=60)
+    final.add_argument("--no-pdf", action="store_true")
+    final.add_argument("--allow", action="append", default=[])
     for name in STEPS:
         child = sub.add_parser(name)
         child.add_argument("run", type=Path)
@@ -351,6 +433,8 @@ def main(argv=None):
         with run_lock(root) as fd:
             # Re-read under the lock; concurrent invocations cannot lose history.
             state = load(root)
+            if args.step == "finish":
+                return finish(args, root, state, fd)
             if args.step == "preflight":
                 recover(root, state)
                 state["preflight"] = preflight(root, state)
@@ -361,11 +445,20 @@ def main(argv=None):
             if args.step == "status":
                 recover(root, state)
                 current = tree_digest(root / "out")
-                print(json.dumps({"run": str(root), "out": str(root / "out"),
+                print(json.dumps({"run": str(root), "out": str(root / "out"), "busy": False,
                                   "output_sha256": current, **state}, ensure_ascii=False, indent=2))
                 return 0
             return operation(args, root, state, fd)
     except BlockingIOError as error:
+        if args.step == "status":
+            # Read the atomic journal only: outputs may be between publication
+            # renames, and a live operation must not be marked interrupted.
+            try:
+                snapshot = load(root)
+            except (OSError, ValueError):
+                snapshot = {"state_unavailable": True}
+            print(json.dumps({**snapshot, "run": str(root), "out": str(root / "out"),
+                              "busy": True, "output_sha256": None}, ensure_ascii=False, indent=2))
         print(f"scan_run.py: {error}", file=sys.stderr)
         return 3
     except (OSError, ValueError) as error:

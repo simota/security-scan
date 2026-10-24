@@ -108,6 +108,13 @@ remain opt-in. See [the execution guide](docs/execution-runner.md) for commands,
 exit codes and recovery. The skill uses this command for its mechanical steps;
 source review and the existing evidence/contract checks remain necessary.
 
+After reviewing and recording findings, `scan_run.py finish <run>` performs
+the remaining report operations without stopping at an incomplete optional
+step: first-time offline inventory, rendering, then the contract check. It
+reports all outcomes together, preserves existing dependency review, and leaves
+failed inventory for an explicit permitted retry. `status <run>` also exposes
+a read-only snapshot while another operation is running.
+
 ### Same result on every host
 
 Claude Code, Codex and Antigravity load the same `SKILL.md`, whose *Run

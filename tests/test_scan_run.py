@@ -55,6 +55,153 @@ class ScanRunTests(unittest.TestCase):
     def state(self):
         return json.loads((self.root / "state.json").read_text())
 
+    def prepare_report(self):
+        from contract_check import perspective_names
+        captured = self.cli("capture", self.root, "app.py")
+        self.assertEqual(captured.returncode, 0, captured.stderr)
+        fragment = self.fragment("report-ready.json", {
+            "perspectives": [{"name": name, "result": "Not checked - runner integration fixture"}
+                             for name in perspective_names()],
+            "limitations": ["invariant ledger and close-check not machine-checked (no invariant_ledger opt-in)"]})
+        self.assertEqual(self.cli("merge", self.root, fragment).returncode, 0)
+
+    def test_finish_continues_after_offline_and_pdf_omissions_through_contract_check(self):
+        self.prepare_report()
+        finished = self.cli("finish", self.root, "--no-pdf")
+        self.assertEqual(finished.returncode, 3, finished.stderr)
+        result = json.loads(finished.stdout)
+        self.assertEqual([(s["step"], s["exit_code"]) for s in result["steps"]],
+                         [("inventory", 3), ("render", 3), ("check", 0)])
+        self.assertEqual(result["status"], "incomplete")
+        self.assertEqual(self.state()["history"][-1]["step"], "finish")
+        self.assertTrue((self.out / "dashboard.html").is_file())
+        data = json.loads((self.out / "findings.json").read_text())
+        self.assertFalse(data["dependency_scan"]["audit"])
+
+    def test_finish_preserves_existing_inventory_without_scanning_again(self):
+        self.prepare_report()
+        self.assertEqual(self.cli("inventory", self.root).returncode, 3)
+        before = (self.out / "deps.json").read_bytes()
+        execute = runner.execute
+
+        def no_rescan(script, argv, timeout, fd):
+            self.assertNotEqual(script, "deps_scan.py", "finish must preserve recorded per-package review")
+            return execute(script, argv, timeout, fd)
+
+        with patch.object(runner, "execute", side_effect=no_rescan):
+            code, result = self.invoke("finish", self.root, "--no-pdf")
+        self.assertEqual(code, 3)
+        self.assertEqual(result["steps"][0]["status"], "already_recorded")
+        self.assertEqual((self.out / "deps.json").read_bytes(), before)
+
+    def test_finish_returns_zero_when_every_selected_operation_and_contract_passes(self):
+        self.prepare_report()
+        # Model an already-recorded complete advisory result, without a provider call.
+        scanner = import_module(SCRIPTS / "deps_scan.py", "finish_fixture_deps")
+        deps = {"inventory": [], "findings": [], "not_run": []}
+        scanner.merge_into(self.out / "findings.json", deps, audit=True)
+        (self.out / "deps.json").write_text(json.dumps(deps))
+        execute = runner.execute
+
+        def successful_pdf(script, argv, timeout, fd):
+            if script == "render.py" and "--no-pdf" not in argv:
+                (Path(argv[argv.index("--out") + 1]) / "assessment.pdf").write_bytes(b"%PDF-fixture\n%%EOF")
+                return 0
+            return execute(script, argv, timeout, fd)
+
+        with patch.object(runner, "execute", side_effect=successful_pdf):
+            code, summary = self.invoke("finish", self.root)
+        self.assertEqual(code, 0)
+        self.assertEqual(summary["status"], "complete")
+        self.assertTrue(all(step["exit_code"] == 0 for step in summary["steps"]))
+        self.assertEqual(summary["steps"][-1]["step"], "check")
+
+    def test_finish_records_inventory_deadline_and_still_renders_without_automatically_retrying(self):
+        self.prepare_report()
+        execute, calls = runner.execute, []
+
+        def inventory_timeout(script, argv, timeout, fd):
+            if script == "deps_scan.py":
+                calls.append(script)
+                self.assertEqual(len(calls), 1, "failed inventory must not be retried by another finish")
+                return 124
+            return execute(script, argv, timeout, fd)
+
+        with patch.object(runner, "execute", side_effect=inventory_timeout):
+            code, result = self.invoke("finish", self.root, "--no-pdf")
+            self.assertEqual(code, 2)
+            self.assertEqual(result["steps"][0]["status"], "timed_out")
+            self.assertEqual(result["steps"][-1]["step"], "check")
+            self.assertNotEqual(result["steps"][-1]["exit_code"], 0)
+            self.assertIn(runner.FINISH_LIMIT, (self.out / "assessment.html").read_text())
+            code, resumed = self.invoke("finish", self.root, "--no-pdf")
+            self.assertEqual(code, 2)
+            self.assertEqual(resumed["steps"][0]["status"], "not_retried")
+        self.assertEqual(len(calls), 1)
+        # An explicit successful inventory makes a later finish remove the stale limit.
+        self.assertEqual(self.cli("inventory", self.root).returncode, 3)
+        completed = self.cli("finish", self.root, "--no-pdf")
+        self.assertEqual(completed.returncode, 3, completed.stderr)
+        self.assertEqual(json.loads(completed.stdout)["steps"][-1]["exit_code"], 0)
+        self.assertNotIn(runner.FINISH_LIMIT, (self.out / "assessment.html").read_text())
+
+    def test_finish_keeps_contract_check_failure_and_render_failure_visible(self):
+        self.prepare_report()
+        self.assertEqual(self.cli("inventory", self.root).returncode, 3)
+        execute = runner.execute
+
+        def render_error(script, argv, timeout, fd):
+            return 2 if script == "render.py" else execute(script, argv, timeout, fd)
+
+        with patch.object(runner, "execute", side_effect=render_error):
+            code, result = self.invoke("finish", self.root, "--no-pdf")
+        self.assertEqual(code, 2)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual([s["step"] for s in result["steps"]], ["inventory", "render", "check"])
+        self.assertEqual(result["steps"][1]["exit_code"], 2)
+        self.assertNotEqual(result["steps"][2]["exit_code"], 0)
+
+    def test_finish_does_not_hide_failed_refresh_behind_a_previous_inventory(self):
+        self.prepare_report()
+        self.assertEqual(self.cli("inventory", self.root).returncode, 3)
+        with patch.object(runner, "execute", return_value=124):
+            code, _ = self.invoke("inventory", self.root, "--audit")
+        self.assertEqual(code, 124)
+        result = self.cli("finish", self.root, "--no-pdf")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        summary = json.loads(result.stdout)
+        self.assertEqual(summary["steps"][0], {"step": "inventory", "status": "not_retried", "exit_code": 124})
+        self.assertEqual(summary["steps"][-1]["exit_code"], 0)
+        self.assertIn(runner.FINISH_LIMIT, (self.out / "assessment.html").read_text())
+
+    def test_finish_respects_current_interruption_but_not_previous_interruption(self):
+        self.prepare_report()
+        with patch.object(runner, "execute", side_effect=KeyboardInterrupt):
+            code, result = self.invoke("finish", self.root, "--no-pdf")
+        self.assertEqual(code, 130)
+        self.assertEqual([s["step"] for s in result["steps"]], ["inventory"])
+        resumed = self.cli("finish", self.root, "--no-pdf")
+        self.assertEqual(resumed.returncode, 2, resumed.stderr)
+        summary = json.loads(resumed.stdout)
+        self.assertEqual(summary["steps"][0]["status"], "not_retried")
+        self.assertEqual(summary["steps"][-1]["step"], "check")
+        self.assertTrue((self.out / "assessment.html").is_file())
+
+    def test_busy_status_is_readable_without_marking_live_work_interrupted(self):
+        state = self.state()
+        state["history"].append({"step": "render", "status": "running", "owner_pid": os.getpid()})
+        runner.save(self.root, state)
+        before = (self.root / "state.json").read_bytes()
+        with runner.run_lock(self.root):
+            result = self.cli("status", self.root)
+        self.assertEqual(result.returncode, 3)
+        snapshot = json.loads(result.stdout)
+        self.assertTrue(snapshot["busy"])
+        self.assertIsNone(snapshot["output_sha256"])
+        self.assertEqual(snapshot["history"][-1]["status"], "running")
+        self.assertEqual(snapshot["history"][-1]["owner_pid"], os.getpid())
+        self.assertEqual((self.root / "state.json").read_bytes(), before)
+
     def test_init_uses_private_physical_directories_outside_repo(self):
         for path in (self.root, self.out, self.root / "scratch"):
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o700)

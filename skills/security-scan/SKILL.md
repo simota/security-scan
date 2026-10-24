@@ -38,8 +38,7 @@ python3 scripts/scan_run.py preflight <run>
 python3 scripts/scan_run.py inventory <run>
 python3 scripts/scan_run.py merge <run> <scratch-fragment>
 python3 scripts/scan_run.py capture <run> <repo-relative-source-path>
-python3 scripts/scan_run.py render <run>
-python3 scripts/scan_run.py check <run>
+python3 scripts/scan_run.py finish <run>
 python3 scripts/scan_run.py status <run>
 ```
 
@@ -49,20 +48,32 @@ RECON rather than initializing the record again. Continue the ordinary review
 phases between commands. Inventory is offline unless `inventory --audit` is
 explicitly requested and its package-list disclosure authorized; a later
 inventory replaces `D-*` reviews just as `deps_scan.py --into` does. Use
-`renumber <run>` before capture if required. PDF failure or timeout publishes
-HTML with an explicit limitation; `render --no-pdf` also records its intentional
-omission. These commands return `3` for incomplete optional work, `124` for a
-deadline, and preserve other tools' failure codes. Inspect the result and
+`renumber <run>` before capture if required. After source review, `finish <run>`
+performs any first-time offline inventory, renders the report, then runs the
+contract check even if a preceding operation was incomplete or failed. It
+preserves an existing inventory and per-package reviews, never starts an online
+audit, and does not retry a previously failed inventory. A missing inventory
+is recorded as a report limitation. Explicitly repair/re-run inventory only
+when permitted. Current user interruption stops the remaining operations.
+Use standalone `render` and `check` when only that operation is wanted.
+PDF failure or timeout publishes HTML with an explicit limitation;
+`render --no-pdf` also records its intentional omission. Standalone operations
+return `3` for incomplete optional work, `124` for a deadline, and preserve
+other tools' failure codes. After continuing its remaining stages, `finish`
+returns `3` for optional omissions or `2` for a failed/deadline stage, with all
+individual results in its JSON summary. Inspect the result and
 continue independent phases; do not treat these as verified completion or
 blindly rerun an action refused by the host. `check` must still pass before
 claiming the run contract holds. State is in `<run>/state.json`, outside the
-report; no successful status record replaces a fresh contract check.
+report; no successful status record replaces a fresh contract check. While
+another operation owns the lock, `status` returns a read-only journal snapshot
+with `busy: true` (exit `3`), without recovering or editing the live operation.
 
 The underlying scripts remain available on other hosts and for opt-in profiles.
 Once using the runner, use its commands for these operations rather than
 editing its published outputs concurrently. The runner owns only its control
-records and fixed PDF-limitation fragments; finding prose still comes from
-file-written fragments. Checkpoint history is operational data, never evidence
+records and fixed PDF/inventory-limitation fragments; finding prose still comes
+from file-written fragments. Checkpoint history is operational data, never evidence
 that a finding is true.
 
 ## Before starting
