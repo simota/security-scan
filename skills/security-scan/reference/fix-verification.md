@@ -11,9 +11,13 @@ regression test plus evidence of what ran, not an attack tool.
   production or third-party system
 - Stay in the repository's own test framework and synthetic fixtures; do not
   use real data or credentials, send email, take payments or call external APIs
-- Confirm the target, permitted actions, isolation, resource limits and stop
-  conditions before writing or running tests; a report-rendering request alone
-  does not authorize executing tests or changing the assessed application
+- Establish the target, permitted actions, isolation, resource limits and stop
+  conditions from the request and existing session decisions before writing or
+  running tests. An explicit request to verify a fix on that local code is the
+  authorization; do not require a separate confirmation of the same work. Ask
+  only for a missing fact that materially changes scope or side effects. A
+  report-rendering request alone does not authorize executing tests or changing
+  the assessed application
 
 ## What a good verification test is
 

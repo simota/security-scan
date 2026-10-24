@@ -23,7 +23,8 @@ Use `scripts/verification_workflow.py` when the review needs enforced stage orde
 conditions, independent falsification, then the evidence-based decision. The
 workflow accepts stage results and records their lineage; it does not call a
 reviewer or execute a test. Changing relevant input requires a fresh round.
-Unknown, conflicting, failed or unfinished work stays blocked. See
+Unknown, conflicting, failed or unfinished work stays blocked in that workflow;
+it does not block unrelated findings or delivery of the static report. See
 `reference/verification-workflow.md` for the CLI and exact handoff contract.
 
 ## Verdicts
@@ -109,8 +110,11 @@ successful execution support the claim. A runtime method label or a passing
 command is not enough. Unknown deployment conditions stay explicit; a local
 fixture does not prove production has the same state or configuration.
 
-The review remains static by default. Runtime work needs an explicit go-ahead
-for the requester's owned local or throwaway environment. Never extend it to a
+The review remains static by default. An explicit request to reproduce a case
+or verify a fix authorizes that work within its stated owned local or throwaway
+scope; reuse an established scope and do not ask for the same go-ahead again.
+Ask only for missing facts that determine the target, permitted actions or
+isolation. A static review alone does not authorize runtime work. Never extend it to a
 shared, staging, production or third-party system. Use synthetic data and
 inert inputs, preserve the controls being tested, and stub unrelated external
 services. Do not use or validate real credentials. Agree resource limits and

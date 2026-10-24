@@ -21,9 +21,11 @@ Phases: `RECON → CHECKLIST → REVIEW → VERIFY → REPORT`.
 
 ## Before starting
 
-- **Confirm scope and authorization in one line.** The repository is the
-  requester's, the review is static, and no deployed system is touched. If the
-  request implies live testing, see the dynamic row in *Decide first*
+- **State scope and authorization in one line.** A request to review the
+  requester's local repository authorizes the static review and its local
+  reports; use authorization already established in the session without asking
+  for it again. Ask only if the target or authority is genuinely unclear.
+  If the request implies live testing, see the dynamic row in *Decide first*
 - **Name the actors before reading handlers**: anonymous, each role, each
   tenant within a role, and the actors who lost or borrow access — a removed or
   former member, a demoted role, a suspended account, a share-link or token
@@ -38,7 +40,19 @@ Phases: `RECON → CHECKLIST → REVIEW → VERIFY → REPORT`.
   violations of these rules on some path; default scanners cannot see them
   because the rules exist only in this app
 - **Create a new, empty output directory** outside the audited repository and
-  follow the *Run contract* below; it is the same on every host
+  inside a host-declared writable root. Prefer a fresh system-temp directory
+  when it is writable; resolve its physical path (macOS temp paths may be
+  symlinks). Choose scratch the same way, separate from output. Do not default
+  to an unwritable repository sibling or ask to expand permissions when an
+  authorized location suffices. Name the output path so the requester can find
+  it, and follow the *Run contract* below
+- **Keep the initial review static.** Read bounded source ranges and record
+  actor, parameter names, missing control, expected/actual behavior and fix.
+  Use placeholders for values; do not generate executable demonstrations,
+  request scripts or real credentials to establish a static finding. Use the
+  host's file-write/edit tool for JSON fragments from the first batch, rather
+  than putting finding prose inside shell commands. Run skill scripts from
+  the installed skill directory, with explicit input and output paths
 
 ## Run contract
 
@@ -82,28 +96,21 @@ one condition of the Medium row. Name the condition in both cases.
 
 ## When the host refuses an action
 
-A host safety check or permission prompt may refuse one tool call. That refusal
-covers that action, not the assessment: this skill exists to close holes, and
-the run continues.
+Classify the observed failure before deciding what to do; do not infer a safety
+refusal from a nonzero exit code alone.
 
-1. Do not resend the same call, and never disguise it (encoding, splitting,
-   renaming, moving the content elsewhere). The aim is a different, defensive
-   shape of the work, not a way past the check
-2. Find what made the call look offensive. Almost always it is one of: finding
-   text inside a shell command or generated script, a literal attack string,
-   or something resembling an exploit or traffic generator. Switch to the
-   sanctioned shape: a JSON fragment written with the file-write tool and
-   `scripts/findings.py merge`; the request shape as method, path and parameter
-   names with placeholders (`<other tenant's id>`); the fix direction instead of
-   a demonstration
-3. If the sanctioned shape is refused too, drop that step only: add it to
-   `limitations` (what was not recorded and why), continue every phase that does
-   not depend on it, and name the blocked step and the exact command in the chat
-   summary so the requester can run it themselves. When the refused step is one
-   finding's record, list that finding's `path:line` alone in `limitations` and
-   move on to the next finding; do not retry it in other words
-4. Never end the run silently on a refusal. "Cannot proceed in this session" is
-   only a valid report when no remaining phase can be done
+| Observed failure | Next action |
+|---|---|
+| Host safety or automatic approval review rejects an action | Stop that action. Do not retry through another tool, rewording, encoding, splitting, a generated script or another agent. Explain the rejected action and the stated reason. Continue independent, permitted source reading and report work; record the missing step and its effect on coverage in `limitations`. Do not reproduce refused content in the limitation or offer the rejected command as a workaround |
+| Sandbox permission or network access is required | Follow the host's escalation mechanism when the step is necessary and authorized. Existing approval remains applicable within its scope. A denial is not permission to use another channel. If the step is optional, record it as not run and continue the static review |
+| Local CLI rejects a record (schema, literal attack string, stale pin or unsafe path) | Read the field-specific error and correct the input according to that tool's contract, without disabling its checks. Use descriptive prose and placeholders for a literal attack string; never encode it to pass validation. This is input validation, not authorization to retry a host-rejected action |
+| Missing audit tool, unavailable advisory service, PDF engine failure or missing independent reviewer | Use the documented fallback in the relevant phase or *Decide first*. Record the unmet check and preserve its incomplete state; continue phases that do not depend on it |
+
+Never present an unrecorded finding as verified or an unavailable check as a
+pass. A refused finding record can be noted by `path:line` alone, when permitted.
+An incomplete optional check does not by itself prevent delivering the static
+assessment with explicit limitations. End the run as blocked only when no
+remaining authorized work can be done, and identify the exact dependency.
 
 ## Phases
 

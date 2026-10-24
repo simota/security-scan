@@ -10,10 +10,16 @@ binary or model; porting is an edit here.
 |---|---|---|
 | `claude-code` | the `Agent` tool; `run_in_background: true` for parallel workers | completion notification; the worker also writes its return file |
 | `codex` | `spawn_agent(prompt)` | `wait_agent(id)`; keep spawns foreground — a detached TTY can fail silently |
-| `agy` | `/agent <name> "<task>"` in the TUI, or `agy -p "<prompt>" --dangerously-skip-permissions` headless | stdout is unreliable: have the worker write its return to an absolute path and read the file. Pass files as `@<path>` |
+| `agy` | `/agent <name> "<task>"` in the TUI, or `agy -p "<prompt>"` headless | stdout is unreliable: have the worker write its return to an absolute path and read the file. Pass files as `@<path>` |
 
 A second reply in the same context is not a worker. Every role in
 `reference/expert-mode.md` needs a separate context.
+
+Workers inherit the host's permission boundaries. Use approved writable paths
+for their return files; do not disable permission checks to make a preflight
+pass. An unavailable worker is recorded by the existing degraded/held gates,
+not replaced with an invented independent review. Already approved engines,
+data boundaries and worker ceilings do not need renewed consent unless changed.
 
 ## E0 spawn preflight (host)
 
@@ -36,7 +42,7 @@ excerpts under another provider's terms.
 codex exec "Reply with exactly ENGINE-OK." > <out>/run/engine-codex.txt 2>&1
 grep -qx ENGINE-OK <out>/run/engine-codex.txt; echo "engine codex exit=$?" >> <out>/run/gate.md
 
-agy -p "Reply with exactly ENGINE-OK." --dangerously-skip-permissions > <out>/run/engine-agy.txt 2>&1
+agy -p "Reply with exactly ENGINE-OK." > <out>/run/engine-agy.txt 2>&1
 grep -qx ENGINE-OK <out>/run/engine-agy.txt; echo "engine agy exit=$?" >> <out>/run/gate.md
 
 claude -p "Reply with exactly ENGINE-OK." > <out>/run/engine-claude.txt 2>&1

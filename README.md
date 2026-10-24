@@ -81,6 +81,24 @@ make unlink
 
 Then invoke `security-scan` (or `/security-scan`).
 
+### Avoiding unnecessary interruptions
+
+A request to review your local repository is sufficient to start the static
+review and write its local reports; the skill reuses authorization already
+given in the session. Output and scratch directories are fresh directories in
+host-declared writable locations outside the audited checkout, with physical
+paths resolved for symlinked temp directories. Findings are descriptive JSON
+fragments written through the file-edit tool, not executable demonstrations or
+finding text embedded in shell commands.
+
+Failures are handled by their actual cause: local record-validation errors are
+corrected, necessary sandbox requests use the host's approval mechanism, and
+unavailable optional checks remain visible as limitations while independent
+review work continues. A host safety or approval rejection stops that action;
+it is not retried through another tool or wording. The skill reports the action
+and the stated reason. These instructions reduce avoidable interruptions; they
+do not change host permissions or guarantee that a host will accept every call.
+
 ### Same result on every host
 
 Claude Code, Codex and Antigravity load the same `SKILL.md`, whose *Run

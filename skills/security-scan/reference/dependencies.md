@@ -62,11 +62,18 @@ implying the audit was complete. Only files directly in a `.github/workflows/`
 directory are workflows (GitHub runs nothing in its subdirectories or in look-alike
 directories such as `.github/workflows-archive/`); `uses:` text inside block
 scalars is data, not a step. A UTF-8 byte-order mark is ignored in every input. Audits query public advisory databases with
-the package list, so they need network access; ask before running them if the
-dependency list itself is confidential. osv-scanner is given each lockfile with
+the package list, so they need network access; announce this before the query
+and reuse any approval already given for that disclosure. Ask before running
+them if the dependency list itself is confidential and disclosure has not been
+authorized. osv-scanner is given each lockfile with
 `-L` rather than a directory. A sandboxed shell whose proxy re-signs TLS makes
-osv-scanner fail certificate checks; that appears in `not_run`, and the scan
-needs rerunning outside the sandbox with the requester's agreement.
+osv-scanner fail certificate checks; that appears in `not_run`. Do not disable
+TLS verification. Use the host's approval mechanism for a necessary, authorized
+retry; if unavailable or declined, keep advisory coverage incomplete and
+continue the source review and report. Do not install missing audit tools,
+generate lockfiles or run project install scripts just to unblock an audit
+unless that additional work was requested. Static dependency inventory and
+supply-chain findings remain useful without online advisory results.
 
 ## 2. Judge what the scanner cannot
 
