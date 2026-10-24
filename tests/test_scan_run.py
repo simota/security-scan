@@ -279,6 +279,51 @@ class ScanRunTests(unittest.TestCase):
         with runner.run_lock(self.root):
             pass
 
+    def assert_descendant_lock_released(self, mode, expected):
+        ready, release = self.base / "descendant-ready", self.base / "descendant-release"
+        script = self.base / "descendant.py"
+        script.write_text(
+            "import os, pathlib, signal, sys, time\n"
+            f"ready = pathlib.Path({str(ready)!r})\n"
+            f"release = pathlib.Path({str(release)!r})\n"
+            "signal.signal(signal.SIGINT, lambda *_: sys.exit(0))\n"
+            "if os.fork() == 0:\n"
+            "    signal.signal(signal.SIGINT, signal.SIG_IGN)\n"
+            "    ready.write_text(str(os.getpid()))\n"
+            "    while not release.exists(): time.sleep(0.01)\n"
+            "    os._exit(0)\n"
+            "while not ready.exists(): time.sleep(0.01)\n"
+            f"mode = {mode!r}\n"
+            "if mode == 'timeout': time.sleep(30)\n"
+            "sys.exit(2 if mode == 'failed' else 0)\n")
+        try:
+            with runner.run_lock(self.root) as fd, patch.object(runner, "SCRIPTS", self.base):
+                code = runner.execute(script.name, [], 0.5, fd)
+            self.assertEqual(code, expected)
+            self.assertTrue(ready.exists(), "descendant did not reach its lock-holding state")
+            until = time.monotonic() + 2
+            while True:
+                result = self.cli("status", self.root)
+                if result.returncode != 3 or time.monotonic() >= until:
+                    break
+                time.sleep(0.02)
+            self.assertEqual(result.returncode, 0, "a surviving descendant still holds the run lock")
+        finally:
+            # Release an intentionally surviving fixture even when an assertion fails.
+            release.touch()
+            until = time.monotonic() + 3
+            while self.cli("status", self.root).returncode == 3 and time.monotonic() < until:
+                time.sleep(0.02)
+
+    def test_successful_leader_does_not_leave_descendant_holding_lock(self):
+        self.assert_descendant_lock_released("success", 0)
+
+    def test_failed_leader_does_not_leave_descendant_holding_lock(self):
+        self.assert_descendant_lock_released("failed", 2)
+
+    def test_timeout_cleans_descendant_when_leader_exits_on_interrupt(self):
+        self.assert_descendant_lock_released("timeout", 124)
+
     def test_timeout_validation_rejects_nonfinite_and_nonpositive_values(self):
         for value in ("nan", "inf", "0", "-1", "3601"):
             with self.subTest(value=value):

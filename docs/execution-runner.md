@@ -106,9 +106,13 @@ exits; never remove `.lock` based on its filename or age. A still-running child
 inherits the lock even if its parent is terminated.
 
 If a child times out, the runner interrupts its process group, allows one
-second for cleanup, and force-stops it if necessary. It records a timeout even
-if the child's interrupt handler returns zero. Failed attempts remain private
-in scratch for inspection; they are never scanned for findings or promoted
+second for cleanup, and force-stops any remaining members of that group. Group
+cleanup also runs after normal or error exits: a launcher finishing does not
+mean that its descendants have finished or released the inherited run lock.
+It records a timeout even if the child's interrupt handler returns zero. This
+cleanup covers the process group the runner created; tools that start separate
+sessions remain responsible for their own process cleanup. Failed attempts
+remain private in scratch for inspection; they are never scanned for findings or promoted
 automatically. They can be removed with the rest of the run when no operation
 is active and its outputs are no longer needed.
 
@@ -142,7 +146,8 @@ make check
 
 The regressions run metadata → offline inventory → source capture → merge →
 HTML → contract check in a synthetic committed repository. They also exercise
-real process deadlines, lock contention, partial-writer isolation, interrupted
+real process deadlines, descendant cleanup after success/error/timeout, lock
+contention, partial-writer isolation, interrupted
 publication, stale check digests, and PDF fallback with controlled engine
 outcomes. They validate execution behavior, not vulnerability detection quality
 or an assurance that a host will approve every tool call.

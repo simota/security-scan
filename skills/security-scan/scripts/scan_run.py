@@ -168,14 +168,21 @@ def execute(script, args, timeout, lock_fd):
         try:
             process.wait(timeout=1)
         except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait(timeout=5)
+            pass
         if isinstance(error, KeyboardInterrupt):
             raise
         return 124
+    finally:
+        # A launcher can exit while descendants still hold the run lock. Clean
+        # its whole group on every outcome, including a successful early exit.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            raise OSError("child did not exit after forced stop; inspect the live operation") from None
 
 
 def publish(root, stage, original):
