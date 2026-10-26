@@ -100,8 +100,8 @@ def held_fixture(workflow, *, status="held", hostile=False, finding_id="F-001"):
     finding = data["findings"][0]
     finding.pop("verification_workflow")
     suffix = " " + HOSTILE + SECRET if hostile else ""
-    workflow.initialize(data, finding_id, "synthetic-coordinator" + suffix,
-                        "Synthetic additional verification round." + suffix)
+    record(workflow, hostile, "initialize", data, finding_id, "synthetic-coordinator" + suffix,
+           "Synthetic additional verification round." + suffix)
     output = {"stage": "conditions", "actor": "synthetic-author" + suffix, "status": status,
               "summary": "NEW_ROUND_HOLD: earlier evidence needs a fresh manual check." + suffix,
               "evidence_ids": [data["evidence"][0]["id"]],
@@ -190,6 +190,14 @@ class WorkflowReportTests(unittest.TestCase):
                     self.assertTrue(view["gaps"])
                     self.assertEqual(view["status"], self.renderer.LABELS[lang]["w_" + status])
                     self.assertIn(view["status"], assessment.text())
+
+    def test_hostile_held_round_fixture_builds_without_a_browser(self):
+        # The opt-in browser test uses this fixture; build it in every CI job too.
+        data = self.load_data(held_fixture(self.workflow, hostile=True))
+        self.assertEqual(self.renderer.report_model(data)["workflows"]["F-001"]["status"], "held")
+        for lang in ("en", "ja"):
+            dashboard, _ = self.output(data, lang)
+            self.assertNotIn("WORKFLOW_SECRET", json.dumps(self.payload(dashboard), ensure_ascii=False))
 
     def test_stale_complete_workflow_stays_visible_but_is_not_fix_ready(self):
         source = fixture(self.workflow)
