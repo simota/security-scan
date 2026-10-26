@@ -100,8 +100,8 @@ def held_fixture(workflow, *, status="held", hostile=False, finding_id="F-001"):
     finding = data["findings"][0]
     finding.pop("verification_workflow")
     suffix = " " + HOSTILE + SECRET if hostile else ""
-    workflow.initialize(data, finding_id, "synthetic-coordinator" + suffix,
-                        "Synthetic additional verification round." + suffix)
+    record(workflow, hostile, "initialize", data, finding_id, "synthetic-coordinator" + suffix,
+           "Synthetic additional verification round." + suffix)
     output = {"stage": "conditions", "actor": "synthetic-author" + suffix, "status": status,
               "summary": "NEW_ROUND_HOLD: earlier evidence needs a fresh manual check." + suffix,
               "evidence_ids": [data["evidence"][0]["id"]],
