@@ -25,12 +25,16 @@ sys.path.insert(0, str(SCRIPTS))
 from contract_check import read_regular
 from evidence_capture import GIT_BINARY
 from findings import read_json as read_record
+from render import SchemaError
 from scan_report_kit.pdf import CHROME_CANDIDATES
 from scan_report_kit.output import write_output
 
 STEPS = ("merge", "inventory", "capture", "renumber", "render", "check")
 PDF_LIMIT = "assessment.pdf not produced"
 FINISH_LIMIT = "Runner finish: dependency inventory unavailable"
+# Interrupted tools get this long to stop their own sessions before the group is
+# killed; render.py allows a PDF engine 10 seconds to exit before forcing it.
+CLEANUP_GRACE = 15
 
 
 def stamp():
@@ -45,6 +49,17 @@ def document(path):
         return json.loads(raw)
     except RecursionError:
         raise ValueError("run metadata is nested too deeply") from None
+
+
+def record(path):
+    """Read a tool's JSON record; an unreadable or non-object record is a ValueError."""
+    try:
+        data = read_record(path)
+    except SchemaError as error:
+        raise ValueError(str(error)) from None
+    if not isinstance(data, dict):
+        raise ValueError(f"{path.name} must be a JSON object")
+    return data
 
 
 def directory(path):
@@ -160,14 +175,19 @@ def execute(script, args, timeout, lock_fd):
                                stdout=sys.stderr, stderr=sys.stderr, start_new_session=True,
                                pass_fds=(lock_fd,))
     try:
-        return process.wait(timeout=timeout)
+        code = process.wait(timeout=timeout)
+        if code < 0:
+            # A signal (for example an out-of-memory kill) is a failed command.
+            print(f"scan_run.py: {script} stopped by signal {-code}", file=sys.stderr)
+            return 2
+        return code
     except (subprocess.TimeoutExpired, KeyboardInterrupt) as error:
         try:
             os.killpg(process.pid, signal.SIGINT)
         except ProcessLookupError:
             pass
         try:
-            process.wait(timeout=1)
+            process.wait(timeout=CLEANUP_GRACE)
         except subprocess.TimeoutExpired:
             pass
         if isinstance(error, KeyboardInterrupt):
@@ -187,10 +207,12 @@ def execute(script, args, timeout, lock_fd):
 
 
 def publish(root, stage, original):
+    """Swap the staged outputs in and return their digest; the rollback copy is
+    left for the caller to discard once the publication is recorded."""
     out, previous = root / "out", root / ".previous-out"
     if tree_digest(out) != original:
         raise ValueError("published outputs changed during this operation; nothing replaced")
-    tree_digest(stage)
+    digest = tree_digest(stage)
     if previous.exists() or previous.is_symlink():
         raise ValueError("unfinished publication requires recovery first")
     out.rename(previous)
@@ -199,13 +221,13 @@ def publish(root, stage, original):
     except BaseException:
         previous.rename(out)
         raise
-    shutil.rmtree(previous)
+    return digest
 
 
 def report_limits(stage, attempt, addition, run):
     findings = stage / "findings.json"
     # Findings can be much larger than control metadata; use the existing reader.
-    data = read_record(findings)
+    data = record(findings)
     old = [value for value in data.get("limitations", [])
            if isinstance(value, str) and value.lower().startswith(PDF_LIMIT)]
     patch = {"remove": {"limitations": old}, "limitations": [addition] if addition else []}
@@ -217,12 +239,8 @@ def report_limits(stage, attempt, addition, run):
 def operation(args, root, state, fd, emit=True):
     recover(root, state)
     out = root / "out"
-    original = tree_digest(out)
-    attempt = Path(tempfile.mkdtemp(prefix="attempt-", dir=root / "scratch"))
-    stage = attempt / "out"
-    shutil.copytree(out, stage)
     event = {"step": args.step, "started": stamp(), "status": "running", "owner_pid": os.getpid(),
-             "attempt": attempt.name, "commands": []}
+             "commands": []}
     state["history"].append(event)
     save(root, state)
 
@@ -232,9 +250,14 @@ def operation(args, root, state, fd, emit=True):
         save(root, state)
         return code
 
-    findings = stage / "findings.json"
-    code, incomplete = 0, False
+    code, incomplete, published = 0, False, None
     try:
+        original = tree_digest(out)
+        attempt = Path(tempfile.mkdtemp(prefix="attempt-", dir=root / "scratch"))
+        event["attempt"] = attempt.name
+        stage = attempt / "out"
+        shutil.copytree(out, stage)
+        findings = stage / "findings.json"
         if args.step == "merge":
             code = run("findings.py", ["merge", findings, *[Path(p).resolve() for p in args.fragments]])
         elif args.step == "inventory":
@@ -243,20 +266,31 @@ def operation(args, root, state, fd, emit=True):
                 argv.append("--audit")
             code = run("deps_scan.py", argv)
             if code == 0:
-                incomplete = bool(read_record(stage / "deps.json").get("not_run"))
+                incomplete = bool(record(stage / "deps.json").get("not_run"))
         elif args.step == "capture":
             code = run("evidence_capture.py", [state["repo"], *args.paths, "--findings", findings,
                                                 "--commit", args.commit])
         elif args.step == "renumber":
             code = run("findings.py", ["renumber", findings])
         elif args.step == "render":
-            argv = [findings, "--out", stage, "--repo", state["repo"], "--lang", state["lang"]]
+            def render(where, *extra):
+                return run("render.py", [where / "findings.json", "--out", where, "--repo", state["repo"],
+                                         "--lang", state["lang"], *extra])
+
             # HTML is prepared independently of the optional PDF engine.
             code = report_limits(stage, attempt, None, run)
             if code == 0:
-                code = run("render.py", [*argv, "--no-pdf"])
+                code = render(stage, "--no-pdf")
             if code == 0:
-                pdf = None if args.no_pdf else run("render.py", argv)
+                pdf = None
+                if not args.no_pdf:
+                    # A stopped engine can leave its staging behind or keep
+                    # writing: print on a private copy, used only on success.
+                    trial = attempt / "pdf-out"
+                    shutil.copytree(stage, trial)
+                    pdf = render(trial)
+                    if pdf == 0:
+                        stage = trial
                 if pdf in (None, 3, 124):
                     incomplete = True
                     reason = ("PDF intentionally skipped (--no-pdf)" if pdf is None else
@@ -264,7 +298,7 @@ def operation(args, root, state, fd, emit=True):
                               "PDF engine unavailable or failed (render.py exit 3)")
                     code = report_limits(stage, attempt, PDF_LIMIT + ": " + reason, run)
                     if code == 0:
-                        code = run("render.py", [*argv, "--no-pdf"])
+                        code = render(stage, "--no-pdf")
                 elif pdf != 0:
                     code = pdf
         elif args.step == "check":
@@ -275,9 +309,10 @@ def operation(args, root, state, fd, emit=True):
                 argv += ["--allow", name]
             code = run("contract_check.py", argv)
         if code == 0:
-            publish(root, stage, original)
-            event.update(status="incomplete" if incomplete else "complete",
-                         output_sha256=tree_digest(out))
+            digest = publish(root, stage, original)
+            # Only now is the rollback copy disposable; a failed swap keeps it.
+            published = stage
+            event.update(status="incomplete" if incomplete else "complete", output_sha256=digest)
         else:
             event["status"] = "timed_out" if code == 124 else "failed"
     except KeyboardInterrupt:
@@ -288,8 +323,16 @@ def operation(args, root, state, fd, emit=True):
         event["status"] = "failed"
         code = 2
     finally:
+        if event["status"] == "running":
+            # An unexpected error must not leave a successful-looking record.
+            event["status"], code = "failed", code or 2
         event.update(finished=stamp(), exit_code=code if code else (3 if incomplete else 0))
         save(root, state)
+    if published is not None:
+        # Recorded already; a leftover copy is removed by the next recovery.
+        shutil.rmtree(root / ".previous-out", ignore_errors=True)
+        if published != attempt / "out":
+            shutil.rmtree(attempt / "out", ignore_errors=True)
     if emit:
         print(json.dumps({"run": str(root), "out": str(out), **event}, ensure_ascii=False))
     return event["exit_code"]
@@ -314,9 +357,12 @@ def finish(args, root, state, fd):
         steps.append({"step": name, "status": event["status"], "exit_code": code})
         return code
 
-    data = read_record(root / "out/findings.json")
-    if not isinstance(data, dict):
-        raise ValueError("findings must be a JSON object")
+    try:
+        data = record(root / "out/findings.json")
+    except ValueError as error:
+        # Every stage reports its own failure; the summary stays complete.
+        print(f"scan_run.py: finish: {error}", file=sys.stderr)
+        data = {}
     inventory = data.get("dependency_scan")
     previous = next((event for event in reversed(state["history"])
                      if event.get("step") == "inventory"), None)
@@ -449,6 +495,9 @@ def main(argv=None):
                                   "output_sha256": current, **state}, ensure_ascii=False, indent=2))
                 return 0
             return operation(args, root, state, fd)
+    except KeyboardInterrupt:
+        print("scan_run.py: interrupted", file=sys.stderr)
+        return 130
     except BlockingIOError as error:
         if args.step == "status":
             # Read the atomic journal only: outputs may be between publication

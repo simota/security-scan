@@ -105,7 +105,8 @@ Each child command has a 60-second default deadline; set `--timeout SECONDS`
 on an operation to change it, up to 3600 seconds. A render operation uses
 separate bounded child commands for HTML, PDF and the limitation fallback.
 Copying and publishing local output files are not covered by this child-process
-deadline. Large runs need enough disk space for an output copy per attempt.
+deadline. Large runs need enough disk space for an output copy per attempt,
+and a second copy for a render attempt that tries a PDF.
 
 | Result | Exit | Published output |
 |---|---|---|
@@ -113,6 +114,7 @@ deadline. Large runs need enough disk space for an output copy per attempt.
 | Offline/incomplete advisory coverage or PDF omitted/unavailable/timed out | `3` | Useful results plus explicit limitations; not an all-clear |
 | Another process still holds this run's OS lock | `3` | Unchanged; inspect that process instead of retrying blindly |
 | Record or contract rejected | Tool's `1` or `2` | Last published checkpoint retained |
+| Unreadable run record, or child stopped by a signal | `2` | Last published checkpoint retained |
 | Child command exceeds its deadline | `124` | Last published checkpoint retained, except the explicit PDF/HTML fallback |
 | Keyboard interruption | `130` | Last published checkpoint retained; interruption recorded |
 
@@ -133,12 +135,17 @@ termination can leave partial files or a child writer lock only in that attempt,
 so a later permitted operation starts from the published checkpoint. Successful
 publication replaces the output directory with a rollback copy available until
 the replacement completes. A later command repairs a publication interrupted
-between renames. The OS run lock releases when the last process holding it
+between renames. The publication is recorded before the rollback copy is
+deleted; if that deletion fails or is interrupted, the operation keeps its
+recorded result and a later command removes the leftover copy. The OS run lock releases when the last process holding it
 exits; never remove `.lock` based on its filename or age. A still-running child
 inherits the lock even if its parent is terminated.
 
-If a child times out, the runner interrupts its process group, allows one
-second for cleanup, and force-stops any remaining members of that group. Group
+If a child times out, the runner interrupts its process group, allows 15
+seconds for cleanup, and force-stops any remaining members of that group. A
+child that exits on the interrupt ends the wait at once; the allowance lets
+`render.py` stop a PDF engine, which it gives 10 seconds to exit before forcing
+it. Group
 cleanup also runs after normal or error exits: a launcher finishing does not
 mean that its descendants have finished or released the inherited run lock.
 It records a timeout even if the child's interrupt handler returns zero. This
@@ -151,7 +158,10 @@ is active and its outputs are no longer needed.
 PDF generation is optional work within rendering: HTML is prepared first. A
 missing/failed/timed-out PDF engine adds a missing-PDF limitation through the
 ordinary merge tool, then regenerates the HTML with that limitation. An
-intentional `render <run> --no-pdf` records that reason. A later successful PDF
+intentional `render <run> --no-pdf` records that reason. The PDF is printed on
+a private copy of the staged output and that copy is used only when printing
+succeeds, so a stopped engine's staging or late writes stay in the failed
+attempt and never reach `out`. A later successful PDF
 attempt removes the outdated missing-PDF limitation. Invalid input or an HTML
 rendering error is still a failed operation, not a PDF fallback.
 
