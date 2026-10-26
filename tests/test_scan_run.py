@@ -404,6 +404,75 @@ class ScanRunTests(unittest.TestCase):
         self.assertEqual(self.cli("status", self.root).returncode, 0)
         self.assertFalse((self.root / ".previous-out").exists())
 
+    def test_termination_during_publication_waits_until_the_result_is_recorded(self):
+        fragment = self.fragment("limit.json", {"limitations": ["published before termination"]})
+        real = runner.publish
+
+        def publish_then_terminate(*args):
+            digest = real(*args)
+            os.kill(os.getpid(), signal.SIGTERM)
+            return digest
+
+        with patch.object(runner, "publish", side_effect=publish_then_terminate):
+            code, event = self.invoke("merge", self.root, fragment)
+        self.assertEqual(code, 130)
+        self.assertEqual(self.history()[-1], ("merge", "complete", 0))
+        self.assertTrue(self.state()["history"][-1]["interrupted_after_record"])
+        self.assertEqual(event["output_sha256"], runner.tree_digest(self.out))
+        self.assertIn("published before termination",
+                      json.loads((self.out / "findings.json").read_text())["limitations"])
+        self.assertEqual(self.cli("status", self.root).returncode, 0)
+        self.assertEqual(self.state()["history"][-1]["output_sha256"], runner.tree_digest(self.out))
+
+    def test_finish_stops_after_a_publication_that_was_held_and_recorded(self):
+        self.prepare_report()
+        real = runner.publish
+
+        def publish_then_terminate(*args):
+            digest = real(*args)
+            os.kill(os.getpid(), signal.SIGTERM)
+            return digest
+
+        with patch.object(runner, "publish", side_effect=publish_then_terminate):
+            code, result = self.invoke("finish", self.root, "--no-pdf")
+        self.assertEqual((code, result["status"]), (130, "interrupted"))
+        self.assertEqual([(s["step"], s["status"]) for s in result["steps"]], [("inventory", "incomplete")])
+        inventory = [e for e in self.state()["history"] if e["step"] == "inventory"][-1]
+        self.assertEqual((inventory["status"], inventory["exit_code"]), ("incomplete", 3))
+        self.assertEqual(result["output_sha256"], inventory["output_sha256"])
+        self.assertTrue((self.out / "deps.json").is_file())
+
+    def test_killed_runner_never_leaves_an_unrecorded_publication(self):
+        # The on-disk state after a SIGKILL between the swap and its record.
+        recorded = runner.tree_digest(self.out)
+        import shutil
+        shutil.copytree(self.out, self.root / ".previous-out")
+        (self.out / "late.txt").write_text("never recorded")
+        state = self.state()
+        state["history"].append({"step": "merge", "status": "running"})
+        runner.save(self.root, state)
+        recovered = self.cli("status", self.root)
+        self.assertEqual(recovered.returncode, 0, recovered.stderr)
+        self.assertEqual(runner.tree_digest(self.out), recorded)
+        self.assertEqual(json.loads(recovered.stdout)["output_sha256"], recorded)
+        self.assertFalse((self.root / ".previous-out").exists())
+        self.assertEqual([p.read_text() for p in (self.root / "scratch").glob("unrecorded-*/out/late.txt")],
+                         ["never recorded"])
+        self.assertEqual(self.state()["history"][-1]["status"], "interrupted")
+
+    def test_malformed_limitations_are_rejected_by_the_tools_not_a_traceback(self):
+        data = json.loads((self.out / "findings.json").read_text())
+        data["limitations"] = None
+        (self.out / "findings.json").write_text(json.dumps(data))
+        rendered = self.cli("render", self.root, "--no-pdf")
+        self.assertEqual(rendered.returncode, 2, rendered.stderr)
+        self.assertNotIn("Traceback", rendered.stderr)
+        self.assertEqual(self.history()[-1], ("render", "failed", 2))
+        finished = self.cli("finish", self.root, "--no-pdf")
+        self.assertEqual(finished.returncode, 2, finished.stderr)
+        self.assertNotIn("Traceback", finished.stderr)
+        self.assertEqual(json.loads(finished.stdout)["status"], "failed")
+
     def test_failed_swap_keeps_the_only_rollback_copy_for_recovery(self):
         before = runner.tree_digest(self.out)
 
