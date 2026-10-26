@@ -31,6 +31,9 @@ from scan_report_kit.output import write_output
 STEPS = ("merge", "inventory", "capture", "renumber", "render", "check")
 PDF_LIMIT = "assessment.pdf not produced"
 FINISH_LIMIT = "Runner finish: dependency inventory unavailable"
+# Interrupted tools get this long to stop their own sessions before the group is
+# killed; render.py allows a PDF engine 10 seconds to exit before forcing it.
+CLEANUP_GRACE = 15
 
 
 def stamp():
@@ -167,7 +170,7 @@ def execute(script, args, timeout, lock_fd):
         except ProcessLookupError:
             pass
         try:
-            process.wait(timeout=1)
+            process.wait(timeout=CLEANUP_GRACE)
         except subprocess.TimeoutExpired:
             pass
         if isinstance(error, KeyboardInterrupt):
@@ -250,13 +253,24 @@ def operation(args, root, state, fd, emit=True):
         elif args.step == "renumber":
             code = run("findings.py", ["renumber", findings])
         elif args.step == "render":
-            argv = [findings, "--out", stage, "--repo", state["repo"], "--lang", state["lang"]]
+            def render(where, *extra):
+                return run("render.py", [where / "findings.json", "--out", where, "--repo", state["repo"],
+                                         "--lang", state["lang"], *extra])
+
             # HTML is prepared independently of the optional PDF engine.
             code = report_limits(stage, attempt, None, run)
             if code == 0:
-                code = run("render.py", [*argv, "--no-pdf"])
+                code = render(stage, "--no-pdf")
             if code == 0:
-                pdf = None if args.no_pdf else run("render.py", argv)
+                pdf = None
+                if not args.no_pdf:
+                    # A stopped engine can leave its staging behind or keep
+                    # writing: print on a private copy, used only on success.
+                    trial = attempt / "pdf-out"
+                    shutil.copytree(stage, trial)
+                    pdf = render(trial)
+                    if pdf == 0:
+                        stage = trial
                 if pdf in (None, 3, 124):
                     incomplete = True
                     reason = ("PDF intentionally skipped (--no-pdf)" if pdf is None else
@@ -264,7 +278,7 @@ def operation(args, root, state, fd, emit=True):
                               "PDF engine unavailable or failed (render.py exit 3)")
                     code = report_limits(stage, attempt, PDF_LIMIT + ": " + reason, run)
                     if code == 0:
-                        code = run("render.py", [*argv, "--no-pdf"])
+                        code = render(stage, "--no-pdf")
                 elif pdf != 0:
                     code = pdf
         elif args.step == "check":

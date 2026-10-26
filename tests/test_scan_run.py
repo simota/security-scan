@@ -300,6 +300,52 @@ class ScanRunTests(unittest.TestCase):
         self.assertIn("assessment.pdf not produced: PDF engine failed (runner deadline)", data["limitations"])
         self.assertIn("runner deadline", (self.out / "assessment.html").read_text())
 
+    def test_forced_pdf_attempt_leftovers_are_never_published(self):
+        real = runner.execute
+
+        def killed_mid_pdf(script, argv, timeout, fd):
+            if script == "render.py" and "--no-pdf" not in argv:
+                # A forcibly stopped renderer leaves its private engine staging behind.
+                stray = Path(argv[argv.index("--out") + 1]) / ".scan-report-pdf-killed"
+                stray.mkdir()
+                (stray / "report.pdf").write_bytes(b"%PDF-partial")
+                return 124
+            return real(script, argv, timeout, fd)
+
+        with patch.object(runner, "execute", side_effect=killed_mid_pdf):
+            code, event = self.invoke("render", self.root)
+        self.assertEqual(code, 3)
+        self.assertEqual(event["status"], "incomplete")
+        self.assertEqual(sorted(p.name for p in self.out.iterdir()),
+                         ["assessment.html", "dashboard.html", "findings.json"])
+
+    def test_pdf_deadline_lets_renderer_stop_its_engine_before_fallback(self):
+        # The engine runs in its own session, outside the runner's group cleanup;
+        # only render.py can stop it, and it needs more than an instant to do so.
+        marker = self.base / "engine.pid"
+        chrome = self.base / "fake-chrome"
+        chrome.write_text(
+            f"#!{sys.executable}\n"
+            "import os, pathlib, signal, time\n"
+            f"pathlib.Path({str(marker)!r}).write_text(str(os.getpid()))\n"
+            "signal.signal(signal.SIGTERM, lambda *_: (time.sleep(2), os._exit(0)))\n"
+            "time.sleep(60)\n")
+        chrome.chmod(0o700)
+        try:
+            with patch.dict(os.environ, {"CHROME": str(chrome)}):
+                code, event = self.invoke("render", self.root, "--timeout", "4")
+            self.assertEqual(code, 3)
+            self.assertEqual(event["status"], "incomplete")
+            self.assertIn({"tool": "render.py", "exit_code": 124}, event["commands"])
+            pid = int(marker.read_text())
+            with self.assertRaises(ProcessLookupError, msg="PDF engine outlived the operation"):
+                os.kill(pid, 0)
+            self.assertEqual(sorted(p.name for p in self.out.iterdir()),
+                             ["assessment.html", "dashboard.html", "findings.json"])
+        finally:
+            with contextlib.suppress(ValueError, OSError):
+                os.kill(int(marker.read_text()), signal.SIGKILL)
+
     def test_successful_pdf_removes_old_missing_pdf_limitation(self):
         self.assertEqual(self.cli("render", self.root, "--no-pdf").returncode, 3)
         real = runner.execute
@@ -418,9 +464,11 @@ class ScanRunTests(unittest.TestCase):
     def test_child_timeout_is_real_and_never_counts_as_success(self):
         fake = self.base / "deadline.py"
         fake.write_text("import signal, time\nsignal.signal(signal.SIGINT, signal.SIG_IGN)\ntime.sleep(30)\n")
-        with runner.run_lock(self.root) as fd, patch.object(runner, "SCRIPTS", self.base):
+        with runner.run_lock(self.root) as fd, patch.object(runner, "SCRIPTS", self.base), \
+                patch.object(runner, "CLEANUP_GRACE", 0.5):
             start = time.monotonic()
             self.assertEqual(runner.execute("deadline.py", [], 0.1, fd), 124)
+            # An ignored interrupt is followed by a forced stop after the grace.
             self.assertLess(time.monotonic() - start, 3)
         # The child inherited the lock and must be gone for this to succeed.
         with runner.run_lock(self.root):
