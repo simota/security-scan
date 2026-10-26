@@ -116,7 +116,7 @@ and a second copy for a render attempt that tries a PDF.
 | Record or contract rejected | Tool's `1` or `2` | Last published checkpoint retained |
 | Unreadable run record, or child stopped by a signal | `2` | Last published checkpoint retained |
 | Child command exceeds its deadline | `124` | Last published checkpoint retained, except the explicit PDF/HTML fallback |
-| Keyboard interruption, or `SIGTERM`/`SIGHUP` to the runner | `130` | Last published checkpoint retained; interruption recorded |
+| Keyboard interruption, or `SIGTERM`/`SIGHUP` to the runner | `130` | Last published checkpoint retained; interruption recorded. A stop during publication is held until the new output is recorded |
 
 `status` does not execute tools or retry anything. It acquires the same lock,
 repairs an interrupted publication if needed, marks abandoned operations as
@@ -137,7 +137,14 @@ publication replaces the output directory with a rollback copy available until
 the replacement completes. A later command repairs a publication interrupted
 between renames. The publication is recorded before the rollback copy is
 deleted; if that deletion fails or is interrupted, the operation keeps its
-recorded result and a later command removes the leftover copy. The OS run lock releases when the last process holding it
+recorded result and a later command removes the leftover copy. A Ctrl-C,
+`SIGTERM` or `SIGHUP` that arrives while outputs are being swapped in is held
+until the outcome is recorded: the operation keeps its published result,
+marked `interrupted_after_record: true`, and the runner then exits `130`
+(`finish` stops before its next stage). If the runner is killed after the swap
+but before the record, the next command restores the last recorded output and
+leaves the unrecorded copy in `scratch/unrecorded-*` for inspection, so the
+published output always matches a recorded checkpoint. The OS run lock releases when the last process holding it
 exits; never remove `.lock` based on its filename or age. A still-running child
 inherits the lock even if its parent is terminated.
 
@@ -194,6 +201,6 @@ The regressions run metadata → offline inventory → source capture → merge 
 HTML → contract check in a synthetic committed repository. They also exercise
 real process deadlines, host SIGTERM/SIGHUP, descendant cleanup after success/error/timeout, lock
 contention, partial-writer isolation, interrupted
-publication, stale check digests, and PDF fallback with controlled engine
+publication, stops held until a publication is recorded, stale check digests, and PDF fallback with controlled engine
 outcomes. They validate execution behavior, not vulnerability detection quality
 or an assurance that a host will approve every tool call.

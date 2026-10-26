@@ -35,6 +35,8 @@ FINISH_LIMIT = "Runner finish: dependency inventory unavailable"
 # Interrupted tools get this long to stop their own sessions before the group is
 # killed; render.py allows a PDF engine 10 seconds to exit before forcing it.
 CLEANUP_GRACE = 15
+# Held while outputs are swapped in and recorded, so a stop cannot land between.
+TERMINATION = {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
 
 
 def stamp():
@@ -60,6 +62,12 @@ def record(path):
     if not isinstance(data, dict):
         raise ValueError(f"{path.name} must be a JSON object")
     return data
+
+
+def limitations(data):
+    """The limitation list, or none: the tools themselves reject a malformed value."""
+    value = data.get("limitations")
+    return value if isinstance(value, list) else []
 
 
 def directory(path):
@@ -137,6 +145,13 @@ def recover(root, state):
     if previous.exists() or previous.is_symlink():
         tree_digest(previous)
         if not out.exists() and not out.is_symlink():
+            previous.rename(out)
+        elif any(event.get("status") == "running" for event in state["history"]):
+            # Swapped in, but the runner was killed before recording it: keep
+            # the recorded checkpoint and leave the unrecorded copy in scratch.
+            tree_digest(out)
+            aside = Path(tempfile.mkdtemp(prefix="unrecorded-", dir=root / "scratch"))
+            out.rename(aside / "out")
             previous.rename(out)
         else:
             tree_digest(out)
@@ -228,7 +243,7 @@ def report_limits(stage, attempt, addition, run):
     findings = stage / "findings.json"
     # Findings can be much larger than control metadata; use the existing reader.
     data = record(findings)
-    old = [value for value in data.get("limitations", [])
+    old = [value for value in limitations(data)
            if isinstance(value, str) and value.lower().startswith(PDF_LIMIT)]
     patch = {"remove": {"limitations": old}, "limitations": [addition] if addition else []}
     fragment = attempt / "pdf-limit.json"
@@ -250,7 +265,7 @@ def operation(args, root, state, fd, emit=True):
         save(root, state)
         return code
 
-    code, incomplete, published = 0, False, None
+    code, incomplete, published, held, stopped = 0, False, None, None, False
     try:
         original = tree_digest(out)
         attempt = Path(tempfile.mkdtemp(prefix="attempt-", dir=root / "scratch"))
@@ -310,6 +325,8 @@ def operation(args, root, state, fd, emit=True):
                 argv += ["--allow", name]
             code = run("contract_check.py", argv)
         if code == 0:
+            # Pending stops are delivered once the outcome below is saved.
+            held = signal.pthread_sigmask(signal.SIG_BLOCK, TERMINATION)
             digest = publish(root, stage, original)
             # Only now is the rollback copy disposable; a failed swap keeps it.
             published = stage
@@ -324,10 +341,21 @@ def operation(args, root, state, fd, emit=True):
         event["status"] = "failed"
         code = 2
     finally:
-        if event["status"] == "running":
-            # An unexpected error must not leave a successful-looking record.
-            event["status"], code = "failed", code or 2
-        event.update(finished=stamp(), exit_code=code if code else (3 if incomplete else 0))
+        try:
+            if event["status"] == "running":
+                # An unexpected error must not leave a successful-looking record.
+                event["status"], code = "failed", code or 2
+            event.update(finished=stamp(), exit_code=code if code else (3 if incomplete else 0))
+            save(root, state)
+        finally:
+            if held is not None:
+                try:
+                    signal.pthread_sigmask(signal.SIG_SETMASK, held)
+                except KeyboardInterrupt:
+                    stopped = True
+    if stopped:
+        # The publication stands as recorded; the runner itself still stops.
+        event["interrupted_after_record"] = True
         save(root, state)
     if published is not None:
         # Recorded already; a leftover copy is removed by the next recovery.
@@ -336,7 +364,7 @@ def operation(args, root, state, fd, emit=True):
             shutil.rmtree(attempt / "out", ignore_errors=True)
     if emit:
         print(json.dumps({"run": str(root), "out": str(out), **event}, ensure_ascii=False))
-    return event["exit_code"]
+    return 130 if stopped else event["exit_code"]
 
 
 def finish(args, root, state, fd):
@@ -386,7 +414,7 @@ def finish(args, root, state, fd):
         interrupted = inventory_code == 130
 
     if not interrupted:
-        old = [text for text in data.get("limitations", [])
+        old = [text for text in limitations(data)
                if isinstance(text, str) and text.startswith(FINISH_LIMIT)]
         note = ([f"{FINISH_LIMIT} (exit {inventory_code}); this static report is partial."]
                 if inventory_code not in (0, 3) else [])
