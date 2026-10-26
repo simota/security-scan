@@ -116,7 +116,7 @@ and a second copy for a render attempt that tries a PDF.
 | Record or contract rejected | Tool's `1` or `2` | Last published checkpoint retained |
 | Unreadable run record, or child stopped by a signal | `2` | Last published checkpoint retained |
 | Child command exceeds its deadline | `124` | Last published checkpoint retained, except the explicit PDF/HTML fallback |
-| Keyboard interruption | `130` | Last published checkpoint retained; interruption recorded |
+| Keyboard interruption, or `SIGTERM`/`SIGHUP` to the runner | `130` | Last published checkpoint retained; interruption recorded |
 
 `status` does not execute tools or retry anything. It acquires the same lock,
 repairs an interrupted publication if needed, marks abandoned operations as
@@ -150,7 +150,11 @@ cleanup also runs after normal or error exits: a launcher finishing does not
 mean that its descendants have finished or released the inherited run lock.
 It records a timeout even if the child's interrupt handler returns zero. This
 cleanup covers the process group the runner created; tools that start separate
-sessions remain responsible for their own process cleanup. Failed attempts
+sessions remain responsible for their own process cleanup. A host that stops
+the runner with `SIGTERM` or `SIGHUP` gets the same interrupt, grace and forced
+stop as Ctrl-C, so the child cannot outlive its deadline holding the lock; a
+signal the caller already ignores (for example under `nohup`) stays ignored.
+Only an uncatchable `SIGKILL` of the runner leaves a child to finish on its own. Failed attempts
 remain private in scratch for inspection; they are never scanned for findings or promoted
 automatically. They can be removed with the rest of the run when no operation
 is active and its outputs are no longer needed.
@@ -188,7 +192,7 @@ make check
 
 The regressions run metadata → offline inventory → source capture → merge →
 HTML → contract check in a synthetic committed repository. They also exercise
-real process deadlines, descendant cleanup after success/error/timeout, lock
+real process deadlines, host SIGTERM/SIGHUP, descendant cleanup after success/error/timeout, lock
 contention, partial-writer isolation, interrupted
 publication, stale check digests, and PDF fallback with controlled engine
 outcomes. They validate execution behavior, not vulnerability detection quality
