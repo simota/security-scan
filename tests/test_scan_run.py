@@ -506,6 +506,72 @@ class ScanRunTests(unittest.TestCase):
         self.assertEqual(runner.tree_digest(self.out), before)
         self.assertEqual(self.state()["history"][-1]["status"], "interrupted")
 
+    def test_host_termination_stops_child_and_records_interruption(self):
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            with self.subTest(signal=sig.name):
+                scripts = self.base / f"term-tools-{sig.name}"
+                scripts.mkdir()
+                pid_file = scripts / "child.pid"
+                (scripts / "deps_scan.py").write_text(
+                    "import os, pathlib, time\n"
+                    f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()))\n"
+                    "time.sleep(30)\n")
+                launcher = scripts / "launcher.py"
+                launcher.write_text(
+                    "import sys\nfrom pathlib import Path\n"
+                    f"sys.path.insert(0, {str(SCRIPTS)!r})\nimport scan_run\n"
+                    f"scan_run.SCRIPTS = Path({str(scripts)!r})\n"
+                    f"raise SystemExit(scan_run.main(['inventory', {str(self.root)!r}]))\n")
+                before = runner.tree_digest(self.out)
+                with tempfile.TemporaryFile() as diagnostics:
+                    parent = subprocess.Popen([sys.executable, "-I", "-B", str(launcher)],
+                                              stdout=diagnostics, stderr=diagnostics)
+                    try:
+                        until = time.monotonic() + 5
+                        while not pid_file.exists() and time.monotonic() < until:
+                            time.sleep(0.02)
+                        self.assertTrue(pid_file.exists(), "child failed to start")
+                        child = int(pid_file.read_text())
+                        parent.send_signal(sig)
+                        # A host stop is an interruption, not an abandoned child.
+                        self.assertEqual(parent.wait(timeout=10), 130)
+                    finally:
+                        if parent.poll() is None:
+                            parent.kill()
+                            parent.wait(timeout=5)
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(child, 0)
+                self.assertEqual(self.history()[-1], ("inventory", "interrupted", 130))
+                self.assertEqual(self.cli("status", self.root).returncode, 0)
+                self.assertEqual(runner.tree_digest(self.out), before)
+
+    def test_runner_keeps_ignored_hangup_and_restores_signal_handlers(self):
+        previous_hup = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        self.addCleanup(signal.signal, signal.SIGHUP, previous_hup)
+        term = signal.getsignal(signal.SIGTERM)
+        observed = {}
+        real = runner.preflight
+
+        def observe(root, state):
+            observed.update(hup=signal.getsignal(signal.SIGHUP), term=signal.getsignal(signal.SIGTERM))
+            return real(root, state)
+
+        with patch.object(runner, "preflight", side_effect=observe):
+            self.assertEqual(self.invoke("preflight", self.root)[0], 0)
+        self.assertIs(observed["hup"], signal.SIG_IGN)
+        self.assertIsNot(observed["term"], term)
+        self.assertIs(signal.getsignal(signal.SIGHUP), signal.SIG_IGN)
+        self.assertIs(signal.getsignal(signal.SIGTERM), term)
+
+    def test_capture_accepts_source_path_beginning_with_dash(self):
+        (self.repo / "-tool.py").write_text("def tool():\n    return 1\n")
+        git(self.repo, "add", "--", "-tool.py")
+        git(self.repo, "commit", "-q", "-m", "dash-named source")
+        result = self.cli("capture", self.root, "--", "-tool.py")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads((self.out / "findings.json").read_text())
+        self.assertIn("-tool.py", json.dumps(data["evidence"]))
+
     def test_preflight_does_not_execute_optional_tools_or_retry_history(self):
         with patch.object(runner, "execute") as execute:
             code, result = self.invoke("preflight", self.root)

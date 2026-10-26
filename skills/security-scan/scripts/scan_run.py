@@ -268,8 +268,9 @@ def operation(args, root, state, fd, emit=True):
             if code == 0:
                 incomplete = bool(record(stage / "deps.json").get("not_run"))
         elif args.step == "capture":
-            code = run("evidence_capture.py", [state["repo"], *args.paths, "--findings", findings,
-                                                "--commit", args.commit])
+            # Options first, then "--": a source path may begin with "-".
+            code = run("evidence_capture.py", ["--findings", findings, "--commit", args.commit,
+                                                "--", state["repo"], *args.paths])
         elif args.step == "renumber":
             code = run("findings.py", ["renumber", findings])
         elif args.step == "render":
@@ -416,6 +417,28 @@ def finish(args, root, state, fd):
     return code
 
 
+@contextmanager
+def termination_as_interrupt():
+    """A host stopping the runner gets the same child cleanup as Ctrl-C.
+
+    Without this, SIGTERM or SIGHUP ends the runner at once and its child keeps
+    running past its deadline while holding the run lock. A signal the caller
+    chose to ignore (for example under nohup) stays ignored.
+    """
+    def interrupt(signum, frame):
+        raise KeyboardInterrupt
+
+    previous = {}
+    try:
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            if signal.getsignal(sig) is not signal.SIG_IGN:
+                previous[sig] = signal.signal(sig, interrupt)
+        yield
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
 def positive_seconds(value):
     seconds = float(value)
     if not math.isfinite(seconds) or seconds <= 0 or seconds > 3600:
@@ -457,6 +480,15 @@ def main(argv=None):
             child.add_argument("--allow", action="append", default=[])
     args = parser.parse_args(argv)
     try:
+        with termination_as_interrupt():
+            return dispatch(args)
+    except KeyboardInterrupt:
+        print("scan_run.py: interrupted", file=sys.stderr)
+        return 130
+
+
+def dispatch(args):
+    try:
         if args.step == "init":
             repo = args.repo.resolve(strict=True)
             parent = args.parent.resolve(strict=True)
@@ -495,9 +527,6 @@ def main(argv=None):
                                   "output_sha256": current, **state}, ensure_ascii=False, indent=2))
                 return 0
             return operation(args, root, state, fd)
-    except KeyboardInterrupt:
-        print("scan_run.py: interrupted", file=sys.stderr)
-        return 130
     except BlockingIOError as error:
         if args.step == "status":
             # Read the atomic journal only: outputs may be between publication
