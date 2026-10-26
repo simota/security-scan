@@ -117,7 +117,9 @@ version, replace its hash list from the release's PyPI JSON
 The workflow uses the GitHub runner's already-installed official **Google Chrome**,
 launched through `/usr/bin/google-chrome` and its normal package wrapper. The
 bounded version list contains only **154.0.8037.57** and **154.0.8037.97**, observed
-on different Ubuntu 22.04 runners during the same image rollout. It requires an
+on different Ubuntu 22.04 runners during the same image rollout, and
+**155.0.8059.39** from Ubuntu 22.04 image 20261012.322.1, admitted only by passing
+the required suite below on that image. It requires an
 exact browser identification/version match to that list and records the
 installed `google-chrome-stable` package version as evidence without assuming a
 Debian revision suffix. It records SHA-256 hashes of the package wrapper and browser executable in
