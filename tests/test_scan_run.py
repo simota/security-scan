@@ -346,6 +346,95 @@ class ScanRunTests(unittest.TestCase):
             with contextlib.suppress(ValueError, OSError):
                 os.kill(int(marker.read_text()), signal.SIGKILL)
 
+    def history(self):
+        return [(e["step"], e["status"], e["exit_code"]) for e in self.state()["history"]]
+
+    def test_missing_findings_is_a_recorded_failure_and_finish_still_summarizes(self):
+        (self.out / "findings.json").unlink()
+        code, event = self.invoke("render", self.root, "--no-pdf")
+        self.assertEqual((code, event["status"]), (2, "failed"))
+        self.assertEqual(self.history()[-1], ("render", "failed", 2))
+        finished = self.cli("finish", self.root, "--no-pdf")
+        self.assertEqual(finished.returncode, 2, finished.stderr)
+        self.assertNotIn("Traceback", finished.stderr)
+        result = json.loads(finished.stdout)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual([s["step"] for s in result["steps"]], ["inventory", "merge", "render", "check"])
+
+    def test_unexpected_error_is_never_recorded_as_success(self):
+        with patch.object(runner, "report_limits", side_effect=RuntimeError("bug")):
+            with self.assertRaises(RuntimeError):
+                self.invoke("render", self.root, "--no-pdf")
+        self.assertEqual(self.history()[-1], ("render", "failed", 2))
+
+    def test_rollback_cleanup_failure_after_publication_keeps_the_published_record(self):
+        fragment = self.fragment("limit.json", {"limitations": ["published despite cleanup"]})
+        real = runner.shutil.rmtree
+
+        def refuse_previous(path, *args, **kwargs):
+            if Path(path).name == ".previous-out":
+                if kwargs.get("ignore_errors"):
+                    return None
+                raise PermissionError("cleanup refused")
+            return real(path, *args, **kwargs)
+
+        with patch.object(runner.shutil, "rmtree", side_effect=refuse_previous):
+            code, event = self.invoke("merge", self.root, fragment)
+        self.assertEqual((code, event["status"]), (0, "complete"))
+        self.assertEqual(event["output_sha256"], runner.tree_digest(self.out))
+        self.assertIn("published despite cleanup",
+                      json.loads((self.out / "findings.json").read_text())["limitations"])
+        self.assertEqual(self.cli("status", self.root).returncode, 0)
+        self.assertFalse((self.root / ".previous-out").exists())
+        self.assertEqual(self.history()[-1], ("merge", "complete", 0))
+
+    def test_interruption_during_rollback_cleanup_keeps_the_published_record(self):
+        fragment = self.fragment("limit.json", {"limitations": ["published before interruption"]})
+        real = runner.shutil.rmtree
+
+        def interrupt_previous(path, *args, **kwargs):
+            if Path(path).name == ".previous-out":
+                raise KeyboardInterrupt
+            return real(path, *args, **kwargs)
+
+        with patch.object(runner.shutil, "rmtree", side_effect=interrupt_previous):
+            code, _ = self.invoke("merge", self.root, fragment)
+        self.assertEqual(code, 130)
+        self.assertEqual(self.history()[-1], ("merge", "complete", 0))
+        self.assertEqual(self.cli("status", self.root).returncode, 0)
+        self.assertFalse((self.root / ".previous-out").exists())
+
+    def test_failed_swap_keeps_the_only_rollback_copy_for_recovery(self):
+        before = runner.tree_digest(self.out)
+
+        def stranded(root, stage, original):
+            (root / "out").rename(root / ".previous-out")
+            raise OSError("rename failed and could not be undone")
+
+        with patch.object(runner, "publish", side_effect=stranded):
+            code, event = self.invoke("renumber", self.root)
+        self.assertEqual((code, event["status"]), (2, "failed"))
+        self.assertTrue((self.root / ".previous-out").is_dir())
+        self.assertEqual(self.cli("status", self.root).returncode, 0)
+        self.assertEqual(runner.tree_digest(self.out), before)
+
+    def test_interruption_while_staging_is_recorded(self):
+        before = runner.tree_digest(self.out)
+        with patch.object(runner.shutil, "copytree", side_effect=KeyboardInterrupt):
+            code, event = self.invoke("renumber", self.root)
+        self.assertEqual((code, event["status"]), (130, "interrupted"))
+        self.assertEqual(self.history()[-1], ("renumber", "interrupted", 130))
+        self.assertEqual(runner.tree_digest(self.out), before)
+
+    def test_child_killed_by_signal_is_a_failed_command(self):
+        (self.base / "findings.py").write_text("import os, signal\nos.kill(os.getpid(), signal.SIGKILL)\n")
+        before = runner.tree_digest(self.out)
+        with patch.object(runner, "SCRIPTS", self.base):
+            code, event = self.invoke("renumber", self.root)
+        self.assertEqual((code, event["status"]), (2, "failed"))
+        self.assertEqual(event["commands"], [{"tool": "findings.py", "exit_code": 2}])
+        self.assertEqual(runner.tree_digest(self.out), before)
+
     def test_successful_pdf_removes_old_missing_pdf_limitation(self):
         self.assertEqual(self.cli("render", self.root, "--no-pdf").returncode, 3)
         real = runner.execute
@@ -362,6 +451,8 @@ class ScanRunTests(unittest.TestCase):
         self.assertEqual(event["status"], "complete")
         data = json.loads((self.out / "findings.json").read_text())
         self.assertFalse(any(x.startswith(runner.PDF_LIMIT) for x in data["limitations"]))
+        # The HTML-only staging copy is not kept once the printed copy is published.
+        self.assertFalse((self.root / "scratch" / event["attempt"] / "out").exists())
 
     def test_live_lock_returns_immediately_without_modifying_history(self):
         before = (self.root / "state.json").read_bytes()

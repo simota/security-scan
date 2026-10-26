@@ -114,6 +114,7 @@ and a second copy for a render attempt that tries a PDF.
 | Offline/incomplete advisory coverage or PDF omitted/unavailable/timed out | `3` | Useful results plus explicit limitations; not an all-clear |
 | Another process still holds this run's OS lock | `3` | Unchanged; inspect that process instead of retrying blindly |
 | Record or contract rejected | Tool's `1` or `2` | Last published checkpoint retained |
+| Unreadable run record, or child stopped by a signal | `2` | Last published checkpoint retained |
 | Child command exceeds its deadline | `124` | Last published checkpoint retained, except the explicit PDF/HTML fallback |
 | Keyboard interruption | `130` | Last published checkpoint retained; interruption recorded |
 
@@ -134,7 +135,9 @@ termination can leave partial files or a child writer lock only in that attempt,
 so a later permitted operation starts from the published checkpoint. Successful
 publication replaces the output directory with a rollback copy available until
 the replacement completes. A later command repairs a publication interrupted
-between renames. The OS run lock releases when the last process holding it
+between renames. The publication is recorded before the rollback copy is
+deleted; if that deletion fails or is interrupted, the operation keeps its
+recorded result and a later command removes the leftover copy. The OS run lock releases when the last process holding it
 exits; never remove `.lock` based on its filename or age. A still-running child
 inherits the lock even if its parent is terminated.
 
