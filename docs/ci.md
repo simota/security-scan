@@ -265,3 +265,72 @@ without relying on machine speed. Derived report states and source indexes are
 reused only within a render or triage call; later calls must observe changed
 records and source files. Evidence-result indexes remain bound to their checked
 declarations, which are validated again on every selection.
+
+### Pipeline workloads and paired comparisons
+
+`scripts/ci/benchmark_pipeline.py` adds full offline scans for Compose files,
+remote-only workflows, workflows with a local composite action, and mixed source
+trees. It also measures the complete output contract checker, finding renumbering,
+and both HTML reports with larger evidence/run catalogs. `--size small`, `normal`
+and `high` select recorded dimensions; `--workloads` selects named cases. The two
+`git_object_*` controls use an in-memory cat-file response to isolate object
+validation and hashing. They do not represent Git subprocess or disk latency.
+All fixtures use invented input; no target or recorded command is executed.
+The `url_plain`, `url_dense` and `url_symbols` cases additionally cover ordinary
+field values, 500 URLs on one source line, and long non-URL lines ending in a
+colon or percent sign. This separates the benefit for ordinary prose from costs
+on URL-bearing or delimiter-bearing input.
+
+For a direct before/after comparison, use the current harness for both script
+directories. This avoids differences in fixture generation or measurement code:
+
+```sh
+PYTHONHASHSEED=0 python3 scripts/ci/compare_performance.py \
+  --before /tmp/security-scan-before/skills/security-scan/scripts \
+  --after skills/security-scan/scripts --samples 21 --memory \
+  -- --size normal --workloads compose workflow_remote workflow_local source_tree contract renumber verification_catalog \
+  > /tmp/security-scan-paired.json
+
+# Run the original eight workloads through the same comparison protocol.
+PYTHONHASHSEED=0 python3 scripts/ci/compare_performance.py \
+  --before /tmp/security-scan-before/skills/security-scan/scripts \
+  --after skills/security-scan/scripts --suite existing --samples 21 \
+  -- --workspaces 150 --findings 100 --source-lines 1000 \
+     --osv-records 1000 --report-findings 100 \
+     --triage-findings 50 --triage-source-files 100 \
+     --integrity-findings 80 --integrity-evidence 100 \
+  > /tmp/security-scan-existing-paired.json
+```
+
+The comparison starts one interpreter per revision to keep imported modules and
+regular-expression caches separate. After three warmups, it alternates which
+revision runs first in each pair, and never overlaps timed operations. Each full
+result hash must match both within and across revisions. Copies, fixture setup,
+IPC and result serialization/hashing remain outside timing. The scripts must
+come from trusted checkouts: this is a measurement utility, not a sandbox for
+untrusted Python code. `--cpu N` can pin the parent and both workers to one
+available CPU on platforms supporting `sched_setaffinity`; omit it elsewhere.
+
+The comparison records every wall and process CPU sample, mean, median, nearest-rank
+P95/P99 and the inverse of mean time as serial operations per second. It also
+reports a deterministic paired bootstrap 95% interval for the ratio of mean
+times (3,000 resamples). These intervals help distinguish repeatable changes
+from noise; they do not establish equivalence or replace workload-specific
+review. With 21 samples, P99 is the maximum observed sample and is not a reliable
+estimate of production tail latency. Repeat noisy cases and preserve their
+earlier samples instead of selecting only favorable runs.
+
+`--memory` adds three separately traced, untimed executions per workload. Their
+`traced_peak_bytes` measure Python allocations made during the operation,
+including its result, but exclude inputs prepared beforehand. They are neither
+total resident memory nor a count of every allocation. RSS values are process
+high-water marks including imports and fixtures; later workloads also inherit
+earlier high-water marks, including any earlier tracing. Use one workload per
+invocation without `--memory` when investigating uninstrumented process RSS.
+Unsupported RSS platforms return `null` rather than an assumed unit.
+
+For standalone `benchmark_performance.py`, the additional diagnostics are
+opt-in through `--metrics` or `--memory`; its original default result fields are
+preserved. Performance measurements do not verify online audit latency, physical
+disk I/O, production concurrency, GC pause distributions, browser interaction
+or PDF layout. Those require their own environments and tests.

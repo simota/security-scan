@@ -7,14 +7,17 @@ that synthetic timings represent complete audits or PDF rendering.
 """
 import argparse
 import copy
+import gc
 import hashlib
 import json
+import math
 from pathlib import Path
 import platform
 import statistics
 import sys
 import tempfile
 import time
+import tracemalloc
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -27,22 +30,65 @@ def positive_int(value):
     return number
 
 
-def measure(prepare, operation, repeats):
+def process_peak_rss():
+    """Whole benchmark process high-water mark, including fixtures and imports."""
+    try:
+        import resource
+    except ImportError:
+        return None
+    if sys.platform not in ("linux", "darwin"):
+        return None  # Do not guess the platform's ru_maxrss unit.
+    value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return value if sys.platform == "darwin" else value * 1024
+
+
+def measure(prepare, operation, repeats, memory=False, metrics=False):
     operation(prepare())  # Warm imports and filesystem caches consistently.
-    samples, expected = [], None
+    samples, cpu_samples, expected = [], [], None
     for _ in range(repeats):
         payload = prepare()
+        cpu_started = time.process_time() if metrics or memory else None
         started = time.perf_counter()
         result = operation(payload)
         samples.append(time.perf_counter() - started)
+        if cpu_started is not None:
+            cpu_samples.append(time.process_time() - cpu_started)
         encoded = json.dumps(result, sort_keys=True, separators=(",", ":"),
                              ensure_ascii=False, allow_nan=False).encode("utf-8")
         digest = hashlib.sha256(encoded).hexdigest()
         if expected is not None and digest != expected:
             raise RuntimeError("benchmark output changed between repetitions")
         expected = digest
-    return {"median_seconds": statistics.median(samples),
-            "samples_seconds": samples, "output_sha256": expected}
+        del result, encoded, payload
+    measured = {"median_seconds": statistics.median(samples),
+                "samples_seconds": samples, "output_sha256": expected}
+    if metrics or memory:
+        ordered = sorted(samples)
+        measured.update(mean_seconds=statistics.mean(samples),
+                        p95_seconds=ordered[math.ceil(0.95 * repeats) - 1],
+                        p99_seconds=ordered[math.ceil(0.99 * repeats) - 1],
+                        operations_per_second=1 / statistics.mean(samples),
+                        median_cpu_seconds=statistics.median(cpu_samples),
+                        cpu_samples_seconds=cpu_samples)
+    if memory:
+        peaks = []
+        for _ in range(3):
+            payload = prepare()
+            gc.collect()
+            # Trace separately: allocation instrumentation must not bias latency.
+            tracemalloc.start()
+            try:
+                result = operation(payload)
+                peaks.append(tracemalloc.get_traced_memory()[1])
+            finally:
+                tracemalloc.stop()
+            encoded = json.dumps(result, sort_keys=True, separators=(",", ":"),
+                                 ensure_ascii=False, allow_nan=False).encode("utf-8")
+            if hashlib.sha256(encoded).hexdigest() != expected:
+                raise RuntimeError("benchmark output changed during memory measurement")
+            del result, encoded, payload
+        measured["traced_peak_bytes"] = peaks
+    return measured
 
 
 def workspace_fixture(root, count):
@@ -146,6 +192,10 @@ def main(argv=None):
                         default=ROOT / "skills/security-scan/scripts",
                         help="scripts directory from the local revision to measure")
     parser.add_argument("--repeats", type=positive_int, default=5)
+    parser.add_argument("--metrics", action="store_true",
+                        help="include CPU, percentile, throughput and process RSS diagnostics")
+    parser.add_argument("--memory", action="store_true",
+                        help="measure peak Python allocations in three separate untimed runs")
     parser.add_argument("--workspaces", type=positive_int, default=600)
     parser.add_argument("--findings", type=positive_int, default=500)
     parser.add_argument("--source-lines", type=positive_int, default=10000)
@@ -208,27 +258,27 @@ def main(argv=None):
             "workloads": {
                 "offline_workspaces": {
                     "members": args.workspaces,
-                    **measure(lambda: workspace, lambda root: deps_scan.scan(root, False), args.repeats),
+                    **measure(lambda: workspace, lambda root: deps_scan.scan(root, False), args.repeats, args.memory, args.metrics),
                 },
                 "shared_source_excerpts": {
                     "findings": args.findings, "source_lines": args.source_lines,
                     "source_bytes": source_bytes,
-                    **measure(lambda: copy.deepcopy(document), excerpts, args.repeats),
+                    **measure(lambda: copy.deepcopy(document), excerpts, args.repeats, args.memory, args.metrics),
                 },
                 "structured_verification_report": {
                     "findings": args.report_findings, "language": "en", "html_outputs": 2,
-                    **measure(lambda: copy.deepcopy(report), reports, args.repeats),
+                    **measure(lambda: copy.deepcopy(report), reports, args.repeats, args.memory, args.metrics),
                 },
                 "triage_without_source_model": {
                     "findings": args.triage_findings, "ecosystem": "python",
                     "source_files": args.triage_source_files, "source_bytes": triage_bytes,
-                    **measure(lambda: copy.deepcopy(triage_data), triage, args.repeats),
+                    **measure(lambda: copy.deepcopy(triage_data), triage, args.repeats, args.memory, args.metrics),
                 },
                 "live_integrity_report": {
                     "findings": args.integrity_findings, "evidence_records": args.integrity_evidence,
                     "language": "en", "html_outputs": 2,
                     **measure(lambda: copy.deepcopy(integrity_report),
-                              lambda data: reports(data, live_result), args.repeats),
+                              lambda data: reports(data, live_result), args.repeats, args.memory, args.metrics),
                 },
             },
         }
@@ -237,8 +287,11 @@ def main(argv=None):
             result["workloads"][name] = {
                 "vulnerability_records": args.osv_records,
                 "groups": len(payload["results"][0]["packages"][0]["groups"]),
-                **measure(lambda: copy.deepcopy(payload), advisories, args.repeats),
+                **measure(lambda: copy.deepcopy(payload), advisories, args.repeats, args.memory, args.metrics),
             }
+    if args.metrics or args.memory:
+        result["process_peak_rss_bytes"] = process_peak_rss()
+        result["rss_includes_tracemalloc"] = args.memory
     print(json.dumps(result, indent=2))
     return 0
 

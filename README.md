@@ -608,6 +608,26 @@ digest of each complete result. Compare revisions on the same machine and
 require matching output digests before comparing timings. Fixture creation,
 warmup, input copying and result hashing are excluded from the timed region.
 Use `--repeats`, `--workspaces`, `--findings` and `--source-lines` to adjust the
-workload. These synthetic fixtures make no network requests and do not measure
-advisory services, full report generation or PDF conversion; no machine-dependent
+workload. Add `--metrics` for CPU time, sample percentiles and serial throughput,
+or `--memory` for three separate, untimed Python allocation measurements. The
+default JSON fields remain unchanged.
+
+`scripts/ci/benchmark_pipeline.py` adds small, normal and high-load fixtures for
+Compose and workflow scanning, source discovery, contract checking, renumbering
+and complete HTML generation. To compare revisions in separate interpreters,
+alternating their timed operations without running them concurrently:
+
+```sh
+PYTHONHASHSEED=0 python3 scripts/ci/compare_performance.py \
+  --before /path/to/baseline/skills/security-scan/scripts \
+  --after skills/security-scan/scripts --samples 21 --memory \
+  -- --size normal --workloads compose contract renumber
+```
+
+These synthetic fixtures make no network requests, run no advisory commands and
+do not measure PDF conversion. See [measurement conditions and limits](docs/ci.md#offline-performance-comparisons)
+before interpreting memory, throughput or tail measurements. No machine-dependent
 timing threshold is imposed on CI.
+
+The [2026-11-04 optimization report](docs/performance-2026-11-04.md) records
+the adopted changes, rejected candidates, raw measurements and validation limits.
