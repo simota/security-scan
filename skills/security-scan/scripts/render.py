@@ -17,6 +17,7 @@ import re
 import sys
 import unicodedata
 from collections import Counter
+from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
@@ -1706,9 +1707,15 @@ def verification_view(data, finding, state, lang):
     """A curated, redacted view shared by HTML, dashboard and PDF."""
     L = LABELS[lang]
 
+    # A view repeats commits, hashes and evidence text. Keep this bounded and
+    # local so another finding or render never inherits values or language.
+    @lru_cache(maxsize=256)
+    def redacted_text(value):
+        return L["v_withheld"] if PRIVATE_KEY_RE.search(value) else redact(value)
+
     def text(value):
         value = str(value if value is not None else "")
-        return L["v_withheld"] if PRIVATE_KEY_RE.search(value) else redact(value)
+        return redacted_text(value)
 
     def label(value):
         return L.get("v_" + str(value), str(value))

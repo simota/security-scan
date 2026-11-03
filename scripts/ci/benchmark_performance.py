@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure offline scan/excerpt workloads against any local scripts checkout.
+"""Measure offline scan, advisory and report workloads against a local checkout.
 
 Fixture creation, warmup, copying and result hashing are outside the timed
 region. Output digests allow comparisons between revisions without claiming
@@ -71,6 +71,35 @@ def excerpt_fixture(root, count, lines):
     ]}, len(text.encode("utf-8"))
 
 
+def osv_fixture(count, group_size):
+    """Synthetic advisory records; no scanner, advisory service or target runs."""
+    records, groups = [], []
+    for index in range(count):
+        identifier = "BENCH-%06d" % index
+        records.append({
+            "id": identifier, "summary": "Synthetic advisory %d" % index,
+            "aliases": ["CVE-2099-%06d" % index],
+            "affected": [{"package": {"name": "benchmark-package"},
+                          "ranges": [{"type": "SEMVER", "events": [{"fixed": "1.2.%d" % index}]}]}],
+            "references": [{"type": "FIX", "url": "https://example.invalid/fixes/%d" % index}],
+        })
+        if group_size:
+            if index % group_size == 0:
+                groups.append({"ids": [], "max_severity": "7.5"})
+            groups[-1]["ids"].append(identifier)
+    return {"results": [{"source": {"path": "package-lock.json", "type": "lockfile"},
+                         "packages": [{"package": {"name": "benchmark-package", "version": "1.0.0"},
+                                       "vulnerabilities": records, "groups": groups}]}]}
+
+
+def verification_fixture(render, count):
+    document = json.loads((ROOT / "examples/findings.verification.sample.json").read_text(encoding="utf-8"))
+    finding = document["findings"][0]
+    document["findings"] = [dict(copy.deepcopy(finding), id="F-%04d" % (index + 1))
+                            for index in range(count)]
+    return render.validate_data(document)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scripts-dir", type=Path,
@@ -80,6 +109,8 @@ def main(argv=None):
     parser.add_argument("--workspaces", type=positive_int, default=600)
     parser.add_argument("--findings", type=positive_int, default=500)
     parser.add_argument("--source-lines", type=positive_int, default=10000)
+    parser.add_argument("--osv-records", type=positive_int, default=2000)
+    parser.add_argument("--report-findings", type=positive_int, default=400)
     args = parser.parse_args(argv)
     scripts = args.scripts_dir.resolve()
     for name in ("deps_scan.py", "render.py"):
@@ -96,10 +127,21 @@ def main(argv=None):
         source.mkdir()
         workspace_fixture(workspace, args.workspaces)
         document, source_bytes = excerpt_fixture(source, args.findings, args.source_lines)
+        report = verification_fixture(render, args.report_findings)
 
         def excerpts(data):
             render.attach_sources(data, source)
             return data
+
+        def advisories(data):
+            collector = deps_scan.Collector(workspace)
+            deps_scan.parse_osv(collector, data, workspace, workspace / "package-lock.json")
+            return collector.findings
+
+        def reports(data):
+            labels = render.LABELS["en"]
+            return {"dashboard": render.render_dashboard(data, labels, "en"),
+                    "assessment": render.render_assessment_html(data, labels, "en")}
 
         result = {
             "python": platform.python_version(), "platform": platform.platform(),
@@ -114,8 +156,19 @@ def main(argv=None):
                     "source_bytes": source_bytes,
                     **measure(lambda: copy.deepcopy(document), excerpts, args.repeats),
                 },
+                "structured_verification_report": {
+                    "findings": args.report_findings, "language": "en", "html_outputs": 2,
+                    **measure(lambda: copy.deepcopy(report), reports, args.repeats),
+                },
             },
         }
+        for name, group_size in (("osv_distinct_groups", 1), ("osv_alias_pairs", 2), ("osv_ungrouped", 0)):
+            payload = osv_fixture(args.osv_records, group_size)
+            result["workloads"][name] = {
+                "vulnerability_records": args.osv_records,
+                "groups": len(payload["results"][0]["packages"][0]["groups"]),
+                **measure(lambda: copy.deepcopy(payload), advisories, args.repeats),
+            }
     print(json.dumps(result, indent=2))
     return 0
 
