@@ -105,6 +105,9 @@ def has_url_credentials(text):
 
 def redact_urls(text):
     """Remove URL credentials, queries and fragments from a string."""
+    # Every pattern below needs a ':' (scheme or userinfo) or a '%' (encoded ':').
+    if ":" not in text and "%" not in text:
+        return text
     text = QUOTED_USERINFO_RE.sub("[redacted URL]", text)
     text = SCHEMELESS_USERINFO_RE.sub("//", text)
     text = ENCODED_URL_RE.sub(lambda m: "[redacted URL]" if _encoded_secret(m.group()) else m.group(), text)

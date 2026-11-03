@@ -1355,11 +1355,19 @@ def _sub_keyed(line, tail, repl):
     return "".join(out) + line[pos:] if out else line
 
 
+# Every keyed step below needs a _KEY match or a run ending in _KEY_END; both
+# imply one of these substrings (same case folding), so a line without any is
+# returned unchanged by those steps.
+_KEY_HINT = re.compile(r"(?i)pass|pwd|secret|token|api[_-]?key|private[_-]?key|access[_-]?key|credential")
+
+
 def redact(line):
     line = redact_urls(line)
     # Recognizable credentials are masked wherever they appear, keyed or not.
     line = JWT_RE.sub("********", TOKEN_RE.sub("********", line))
     line = JWT_KEY_LITERAL.sub(_mask_jwt_key, line)
+    if not _KEY_HINT.search(line):
+        return line
     line = _sub_keyed(line, _QUOTED_TAIL, lambda key, m: key + m.group(1) + m.group(2) + "********" + m.group(2))
     line = _sub_keyed(line, _SECRET_TAIL, lambda key, m: key + m.group(1) + "********")
     if _KEY.search(line) or any(_KEY_END.search(run.group()) for run in _KEY_RUN.finditer(line)):
