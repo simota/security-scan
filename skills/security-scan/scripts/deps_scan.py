@@ -115,8 +115,14 @@ def safe_file(path, root=None):
     path = Path(path)
     try:
         if root is not None:
-            root = Path(root).resolve()
+            # Keep the existing lexical normalization before checking the file.
             path = Path(os.path.abspath(path))
+        # Workspace discovery probes many absent lockfile names. Reject missing
+        # and non-regular candidates before resolving and checking each ancestor.
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return False
+        if root is not None:
+            root = Path(root).resolve()
             parts = path.relative_to(root).parts
             current = root
             for part in parts:

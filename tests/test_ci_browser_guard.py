@@ -32,14 +32,16 @@ class BrowserVersionGuardTests(unittest.TestCase):
         exec(self.guard, {"os": Environment, "version": version})
 
     def test_only_the_explicit_runner_versions_are_accepted(self):
-        self.assertEqual(set(self.approved.split(",")), {"154.0.8037.57", "154.0.8037.97", "155.0.8059.39"})
+        self.assertEqual(set(self.approved.split(",")), {"155.0.8059.39", "156.0.8078.47"})
         for version in self.approved.split(","):
             with self.subTest(version=version):
                 self.check_version("Google Chrome " + version)
 
     def test_unknown_versions_and_other_distributions_are_rejected(self):
-        for version in ("Google Chrome 154.0.8037.98", "Google Chrome 155.0.0.0", "Google Chrome 155.0.8059.390",
-                        "Chromium 154.0.8037.97", "Google Chrome 154.0.8037.97 beta", ""):
+        for version in ("Google Chrome 154.0.8037.57", "Google Chrome 154.0.8037.97",
+                        "Google Chrome 155.0.0.0", "Google Chrome 155.0.8059.390",
+                        "Google Chrome 156.0.8078.48", "Google Chrome 156.0.8078.470",
+                        "Chromium 156.0.8078.47", "Google Chrome 156.0.8078.47 beta", ""):
             with self.subTest(version=version), self.assertRaises(SystemExit):
                 self.check_version(version)
 
