@@ -122,12 +122,24 @@ def check(data, out_dir, pdf=True, allow=()):
             add(f"meta.{key}: required; assessor names the host and model, e.g. 'Codex (gpt-5)'")
 
     ids = [str(f.get("id", "")) for f in findings]
-    for i in sorted({i for i in ids if ids.count(i) > 1}):
-        add(f"{i}: duplicate id")
-    code = [f for f in findings if CODE_ID.fullmatch(str(f.get("id", "")))]
-    deps = [f for f in findings if DEP_ID.fullmatch(str(f.get("id", "")))]
+    # Keep duplicate diagnostics sorted and unique without recounting the
+    # complete ID list for every finding or retaining a second ID collection.
+    ids.sort()
+    previous = duplicate = None
+    for identifier in ids:
+        if identifier == previous and identifier != duplicate:
+            add(f"{identifier}: duplicate id")
+            duplicate = identifier
+        previous = identifier
+    del ids  # Later output checks need neither this list nor its temporary strings.
+    code, deps = [], []
     for f in findings:
-        if f not in code and f not in deps:
+        identifier = str(f.get("id", ""))
+        if CODE_ID.fullmatch(identifier):
+            code.append(f)
+        elif DEP_ID.fullmatch(identifier):
+            deps.append(f)
+        else:
             add(f"{f.get('id')}: ids are F-NNN (code findings) or D-NNN (deps_scan.py only)")
     numbers = sorted(int(CODE_ID.fullmatch(f["id"]).group(1)) for f in code)
     if numbers != list(range(1, len(numbers) + 1)):

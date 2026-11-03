@@ -78,10 +78,11 @@ def is_requirements(p, suffixes=("txt", "in")):
     """requirements*.txt, dev-requirements.txt / test_requirements.in, and files under requirements/."""
     p = Path(p)
     ext = p.suffix[1:]
-    prose = re.match(r"(readme|license|licence|notice|notes|changelog|authors)\b", p.stem, re.I)
+    # Prose exclusions apply only to otherwise unidentified files in requirements/.
     return ext in suffixes and (re.match(r"^requirements", p.name) is not None
                                 or re.search(r"[-_.]requirements$", p.stem) is not None
-                                or p.parent.name == "requirements" and not prose)
+                                or p.parent.name == "requirements" and not re.match(
+                                    r"(readme|license|licence|notice|notes|changelog|authors)\b", p.stem, re.I))
 
 
 CAT_DEP = "Dependencies and platform"
@@ -1346,8 +1347,10 @@ def local_calls(files, root, privileged):
         if not (is_workflow(p) or p.name in ("action.yml", "action.yaml")):
             continue
         text = read(p)
+        if "./" not in text:
+            continue  # Every recognized local uses: value must contain this literal.
         lines = text.splitlines()
-        if is_workflow(p) and (escaped_triggers(text) or any(t in workflow_triggers(text) for t in PRIVILEGED_TRIGGERS)):
+        if is_workflow(p) and (escaped_triggers(text) or not workflow_triggers(text).isdisjoint(PRIVILEGED_TRIGGERS)):
             own.add(p.resolve())  # privileged by its own trigger, not only through its callers
         top = yaml_children(lines)
         env_of = lambda e, end: mapping_values(lines, e[0], e[1], end) if e else {}
@@ -1481,7 +1484,9 @@ def privileged_workflows(files, root):
     for p in files:
         if is_workflow(p):
             text = read(p)
-            t = [x for x in PRIVILEGED_TRIGGERS if x in workflow_triggers(text)]
+            triggers = workflow_triggers(text)
+            t = [x for x in PRIVILEGED_TRIGGERS if x in triggers]
+            del triggers  # Do not retain a potentially large set while parsing the next file.
             if t or escaped_triggers(text):
                 priv[p.resolve()] = t[0] if t else "pull_request_target"
     # Follow local calls to a fixed point: a callee's own callees run in the
@@ -2392,7 +2397,8 @@ def check_compose(c, p):
     # Legacy (v1) files have no services: key; their services are top-level keys.
     # x-* extension fields are usually anchors merged into services (<<: *base).
     entries = yaml_children(lines, services[1] + 1, services[3]) if services else []
-    for service in entries + [e for e in top if e not in entries and (not services or str(e[0]).startswith("x-"))]:
+    # Top-level entries and services' children have disjoint source-line ranges.
+    for service in entries + [e for e in top if not services or str(e[0]).startswith("x-")]:
         props = yaml_children(lines, service[1] + 1, service[3])
         image = child(props, "image")
         if not image or child(props, "build"):
