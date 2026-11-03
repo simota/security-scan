@@ -1076,9 +1076,14 @@ def workflow_states(data, integrity=None):
 
 def report_model(data, integrity=None):
     """One report-wide action model shared by both outputs; never mutates verdicts."""
-    fs = active(data)
     verification = derive_verification(data, SchemaError, integrity=integrity)
     workflows = workflow_states(data, integrity=integrity)
+    return _report_model(data, verification, workflows, integrity)
+
+
+def _report_model(data, verification, workflows, integrity):
+    """Project states freshly derived by this render; never read stored flags."""
+    fs = active(data)
     profile = derive_three_pass(data, SchemaError, integrity=integrity)
     queue = [{"finding": display_finding(f, verification[f["id"]]),
               "action": action_kind(f, verification[f["id"]], workflows.get(f["id"])), "anchor": finding_anchor(data, f)}
@@ -2141,11 +2146,11 @@ def verification_summary_html(model, L, integrity_summary=None):
 def render_assessment_html(data, L, lang, integrity=None):
     L = {**ASSESSMENT_LABELS.get(lang, ASSESSMENT_LABELS["en"]), **L}
     m, st, fs = data["meta"], stats(data), active(data)
-    model = report_model(data, integrity=integrity)
     verification_states = derive_verification(data, SchemaError, integrity=integrity)
+    workflows = workflow_states(data, integrity=integrity)
+    model = _report_model(data, verification_states, workflows, integrity)
     verification_views = {f["id"]: verification_view(data, f, verification_states[f["id"]], lang)
                           for f in data["findings"]}
-    workflows = workflow_states(data, integrity=integrity)
     workflow_views = {f["id"]: workflow_view(data, f, workflows[f["id"]], lang)
                       for f in data["findings"] if f["id"] in workflows}
     excluded = [f for f in data["findings"] if f["verdict"] in EXCLUDED]
@@ -2542,9 +2547,9 @@ def render_dashboard(data, L, lang, integrity=None):
             http_url(f["source_link"], "source_link")
         for ref in f.get("references", []):
             http_url(ref["url"], "references.url")
-    model = report_model(data, integrity=integrity)
     verification_states = derive_verification(data, SchemaError, integrity=integrity)
     workflows = workflow_states(data, integrity=integrity)
+    model = _report_model(data, verification_states, workflows, integrity)
     payload = {
         "meta": {**{key: data["meta"][key] for key in ("project", "date", "assessor", "scope", "method", "commit")
                     if key in data["meta"]},

@@ -220,12 +220,22 @@ individual finding is ready for a fix.
 
 ## Offline performance comparisons
 
-`scripts/ci/benchmark_performance.py` measures six synthetic workloads: workspace
+`scripts/ci/benchmark_performance.py` measures eight synthetic workloads: workspace
 lock discovery, shared source excerpts, both structured-verification HTML reports,
-and OSV result parsing with distinct groups, alias pairs, or no groups. OSV data
-is generated in memory; the benchmark does not run an auditor or query a service.
-The report fixture repeats a finding from the existing verification sample and
-does not run its recorded commands, check evidence files, or print PDFs.
+dependency triage without a source-reference model, reports with live evidence
+results, and OSV result parsing with distinct groups, alias pairs, or no groups.
+OSV and triage findings are generated in memory; the benchmark does not run an
+auditor or query a service. The report fixtures repeat a finding from the existing
+verification sample and never run its recorded commands or print PDFs.
+
+The triage fixture contains Python source files whose contents cannot contribute
+to the scanner's automatic reference inference. It measures the triage step only,
+including its decision whether to read those files, not an online audit. The live
+integrity fixture writes inert artifacts and checks their bytes before timing the
+reports. It supplies no Git repository, so source revision checks remain explicitly
+incomplete. `--triage-source-files`, `--triage-findings`, `--integrity-evidence`
+(5–512) and `--integrity-findings` control these fixture sizes; `--source-lines`
+also controls each triage source file's length.
 
 Run the same harness against each revision's scripts, sequentially on the same
 machine. For example, compare a local base worktree with the current checkout:
@@ -239,13 +249,19 @@ python3 scripts/ci/benchmark_performance.py \
   --repeats 5 --osv-records 5000 --report-findings 400 > /tmp/security-scan-after.json
 ```
 
-Fixture setup, report validation, copies, warmup and output hashing are outside
-the timed regions; OSV parsing includes its normal input validation. Each workload
+Fixture setup, report validation, initial evidence-file checks, input copies,
+warmup and output hashing are outside the timed regions; OSV parsing includes its
+normal input validation. The timed live-integrity reports still perform the normal
+declaration validation, stale-result checks and selected-result copying. Each workload
 reports every sample, its median and an output SHA-256;
 compare both the medians and the hashes between revisions. Results that change
 between repetitions cause an error. The hashes include complete findings or HTML,
 so the comparison also detects changed ordering, references and displayed text.
 These timings describe the specified local workloads, not end-to-end audits or
 network/PDF latency. They are diagnostic measurements rather than CI time limits.
-The offline regression suite instead checks bounded record traversal and repeated
-redaction work without relying on machine speed.
+The offline regression suite instead checks bounded record traversal, repeated
+redaction and verification work, selective evidence copying and source loading
+without relying on machine speed. Derived report states and source indexes are
+reused only within a render or triage call; later calls must observe changed
+records and source files. Evidence-result indexes remain bound to their checked
+declarations, which are validated again on every selection.

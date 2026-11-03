@@ -100,6 +100,46 @@ def verification_fixture(render, count):
     return render.validate_data(document)
 
 
+def triage_fixture(deps_scan, root, source_files, source_lines, findings):
+    """An ecosystem without source-reference inference still needs triage."""
+    text = "value = 42\n" * source_lines
+    for index in range(source_files):
+        (root / ("module_%04d.py" % index)).write_text(text, encoding="utf-8")
+    lock = root / "requirements.txt"
+    lock.write_text("benchmark-package==1.0.0\n", encoding="utf-8")
+    collector = deps_scan.Collector(root)
+    for index in range(findings):
+        deps_scan.vuln(collector, "high", "benchmark-package", "1.0.0",
+                       ["BENCH-%06d" % index], "Synthetic advisory", lock, "benchmark")
+    return collector, len(text.encode("utf-8")) * source_files
+
+
+def integrity_fixture(render, integrity, root, findings, evidence_count):
+    """Check inert local artifacts once, then time only their report projection.
+
+    Source revision checks intentionally remain incomplete: no Git repository or
+    recorded application command is executed by this fixture.
+    """
+    document = verification_fixture(render, findings)
+    if not len(document["evidence"]) <= evidence_count <= integrity.MAX_EVIDENCE:
+        raise ValueError("integrity evidence count must be between %d and %d" %
+                         (len(document["evidence"]), integrity.MAX_EVIDENCE))
+    content = b"Synthetic benchmark evidence; no application execution.\n"
+    digest = hashlib.sha256(content).hexdigest()
+    for index in range(evidence_count - len(document["evidence"])):
+        document["evidence"].append({
+            "id": "extra-%04d" % index, "kind": "runtime",
+            "commit": document["assessment"]["commit"],
+            "summary": "Synthetic unreferenced evidence", "location": "", "sha256": digest,
+        })
+    for index, record in enumerate(document["evidence"]):
+        record["location"] = "evidence-%04d.txt" % index
+        record["sha256"] = digest
+        (root / record["location"]).write_bytes(content)
+    document = render.validate_data(document)
+    return document, integrity.verify_evidence(document, root)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scripts-dir", type=Path,
@@ -111,6 +151,10 @@ def main(argv=None):
     parser.add_argument("--source-lines", type=positive_int, default=10000)
     parser.add_argument("--osv-records", type=positive_int, default=2000)
     parser.add_argument("--report-findings", type=positive_int, default=400)
+    parser.add_argument("--triage-findings", type=positive_int, default=100)
+    parser.add_argument("--triage-source-files", type=positive_int, default=600)
+    parser.add_argument("--integrity-findings", type=positive_int, default=200)
+    parser.add_argument("--integrity-evidence", type=positive_int, default=500)
     args = parser.parse_args(argv)
     scripts = args.scripts_dir.resolve()
     for name in ("deps_scan.py", "render.py"):
@@ -119,15 +163,26 @@ def main(argv=None):
     sys.path.insert(0, str(scripts))
     import deps_scan
     import render
+    import evidence_integrity
 
     with tempfile.TemporaryDirectory(prefix="security-scan-benchmark-") as temporary:
         base = Path(temporary).resolve()
         workspace, source = base / "workspace", base / "source"
+        triage_source, evidence = base / "triage", base / "evidence"
         workspace.mkdir()
         source.mkdir()
+        triage_source.mkdir()
+        evidence.mkdir()
         workspace_fixture(workspace, args.workspaces)
         document, source_bytes = excerpt_fixture(source, args.findings, args.source_lines)
         report = verification_fixture(render, args.report_findings)
+        triage_data, triage_bytes = triage_fixture(deps_scan, triage_source, args.triage_source_files,
+                                                  args.source_lines, args.triage_findings)
+        try:
+            integrity_report, live_result = integrity_fixture(render, evidence_integrity, evidence,
+                                                               args.integrity_findings, args.integrity_evidence)
+        except ValueError as error:
+            parser.error(str(error))
 
         def excerpts(data):
             render.attach_sources(data, source)
@@ -138,10 +193,14 @@ def main(argv=None):
             deps_scan.parse_osv(collector, data, workspace, workspace / "package-lock.json")
             return collector.findings
 
-        def reports(data):
+        def reports(data, integrity=None):
             labels = render.LABELS["en"]
-            return {"dashboard": render.render_dashboard(data, labels, "en"),
-                    "assessment": render.render_assessment_html(data, labels, "en")}
+            return {"dashboard": render.render_dashboard(data, labels, "en", integrity=integrity),
+                    "assessment": render.render_assessment_html(data, labels, "en", integrity=integrity)}
+
+        def triage(collector):
+            deps_scan.triage(collector, triage_source)
+            return collector.findings
 
         result = {
             "python": platform.python_version(), "platform": platform.platform(),
@@ -159,6 +218,17 @@ def main(argv=None):
                 "structured_verification_report": {
                     "findings": args.report_findings, "language": "en", "html_outputs": 2,
                     **measure(lambda: copy.deepcopy(report), reports, args.repeats),
+                },
+                "triage_without_source_model": {
+                    "findings": args.triage_findings, "ecosystem": "python",
+                    "source_files": args.triage_source_files, "source_bytes": triage_bytes,
+                    **measure(lambda: copy.deepcopy(triage_data), triage, args.repeats),
+                },
+                "live_integrity_report": {
+                    "findings": args.integrity_findings, "evidence_records": args.integrity_evidence,
+                    "language": "en", "html_outputs": 2,
+                    **measure(lambda: copy.deepcopy(integrity_report),
+                              lambda data: reports(data, live_result), args.repeats),
                 },
             },
         }

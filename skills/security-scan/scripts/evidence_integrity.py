@@ -85,18 +85,25 @@ def _record_digest(data):
 
 class VerificationResult:
     """An in-process observation; serialize .receipt, never reconstruct authority."""
-    __slots__ = ("__receipt", "__digest", "__token")
+    __slots__ = ("__receipt", "__items", "__digest", "__token")
 
     def __init__(self, receipt, token=None):
         if token is not _TOKEN:
             raise EvidenceError("live_result_required")
         self.__receipt = copy.deepcopy(receipt)
+        self.__items = {item["evidence_id"]: item for item in self.__receipt["items"]}
         self.__digest = receipt["input_sha256"]
         self.__token = token
 
     @property
     def receipt(self):
         return copy.deepcopy(self.__receipt)
+
+    def _selected_records(self, identifiers):
+        # Each finding usually cites only a few records. Do not copy the whole
+        # receipt for every lookup, and never expose its private mutable items.
+        return copy.deepcopy({identifier: self.__items[identifier] for identifier in identifiers
+                              if identifier in self.__items})
 
     def matches(self, data):
         try:
@@ -637,7 +644,7 @@ def provenance_state(data, evidence_ids, result=None):
     if not live or reason == "context_stale":
         return {"status": "incomplete" if reason == "context_stale" else "declared", "reasons": [reason],
                 "records": [{"evidence_id": i, "bytes": "declared", "source": "declared", "reason": reason} for i in selected]}
-    checked = {item["evidence_id"]: item for item in result.receipt["items"]}
+    checked = result._selected_records(selected)
     records = [checked.get(i, {"evidence_id": i, "bytes": "unavailable", "source": "not_checked", "reason": "evidence_not_checked"}) for i in selected]
     reasons = sorted({r["reason"] for r in records if not _matched(catalog[r["evidence_id"]], r)})
     if not selected:
