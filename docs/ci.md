@@ -217,3 +217,35 @@ pass counts, gaps, claim labels, scope-countercheck reasons and evidence, and
 redaction of hostile/secret-like fixture text. Missing workflows cannot reuse an
 older finding's readiness, and negative-scope gaps remain visible even if an
 individual finding is ready for a fix.
+
+## Offline performance comparisons
+
+`scripts/ci/benchmark_performance.py` measures six synthetic workloads: workspace
+lock discovery, shared source excerpts, both structured-verification HTML reports,
+and OSV result parsing with distinct groups, alias pairs, or no groups. OSV data
+is generated in memory; the benchmark does not run an auditor or query a service.
+The report fixture repeats a finding from the existing verification sample and
+does not run its recorded commands, check evidence files, or print PDFs.
+
+Run the same harness against each revision's scripts, sequentially on the same
+machine. For example, compare a local base worktree with the current checkout:
+
+```sh
+git worktree add --detach /tmp/security-scan-before <base-commit>
+python3 scripts/ci/benchmark_performance.py \
+  --scripts-dir /tmp/security-scan-before/skills/security-scan/scripts \
+  --repeats 5 --osv-records 5000 --report-findings 400 > /tmp/security-scan-before.json
+python3 scripts/ci/benchmark_performance.py \
+  --repeats 5 --osv-records 5000 --report-findings 400 > /tmp/security-scan-after.json
+```
+
+Fixture setup, report validation, copies, warmup and output hashing are outside
+the timed regions; OSV parsing includes its normal input validation. Each workload
+reports every sample, its median and an output SHA-256;
+compare both the medians and the hashes between revisions. Results that change
+between repetitions cause an error. The hashes include complete findings or HTML,
+so the comparison also detects changed ordering, references and displayed text.
+These timings describe the specified local workloads, not end-to-end audits or
+network/PDF latency. They are diagnostic measurements rather than CI time limits.
+The offline regression suite instead checks bounded record traversal and repeated
+redaction work without relying on machine speed.

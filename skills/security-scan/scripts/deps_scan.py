@@ -2606,6 +2606,15 @@ def parse_osv(c, data, root, lock):
                         raise ValueError("invalid OSV group ID")
                     group_sev[identifier] = g.get("max_severity", "")
                     group_of[identifier] = number
+            # Index once: scanning every vulnerability for each reported group
+            # is quadratic, even when none of the records belongs to a group.
+            members_by_group = {}
+            for record in vulnerabilities:
+                if isinstance(record, dict) and isinstance(record.get("id"), str):
+                    group = group_of.get(record["id"])
+                    if group is not None:
+                        members_by_group.setdefault(group, []).append(record)
+            # Validate every record, including aliases of already reported groups.
             for v in vulnerabilities:
                 if (not isinstance(v, dict) or not isinstance(v.get("id"), str) or not v["id"]
                         or not isinstance(v.get("summary", ""), str)):
@@ -2620,8 +2629,7 @@ def parse_osv(c, data, root, lock):
                 reported.add(group)
                 ids = list(groups[group].get("ids", [])) if group is not None else []
                 # Fix versions and references may sit on any alias record of the group.
-                members = [v] + [x for x in vulnerabilities if x is not v and isinstance(x, dict)
-                                 and group is not None and group_of.get(x.get("id")) == group]
+                members = [v] + [x for x in members_by_group.get(group, ()) if x is not v]
                 aliases = aliases + [a for x in members[1:] for a in x.get("aliases") or [] if isinstance(a, str)]
                 malicious = [a for a in aliases + ids if a.startswith("MAL-")]
                 aliases = sorted({a for a in aliases if a.startswith("CVE-")})[:2]
