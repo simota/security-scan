@@ -3075,7 +3075,7 @@ def triage(c, root):
     deps = [f for f in c.findings if f.get("package")]
     if not deps:
         return
-    texts = source_index(root)
+    texts = None
     index = None
     ctxs = {}
     for f in deps:
@@ -3094,6 +3094,10 @@ def triage(c, root):
         npm_family = Path(lock).name in LOCKS["package.json"]
         # Other ecosystems have no needle model: report "unknown", never a false "no".
         needles = ctx["needles"].get(name)
+        if (needles or npm_family) and texts is None:
+            # Only source-aware ecosystems need the checkout's source text.
+            # Keep even an empty index local to this triage call.
+            texts = source_index(root)
         if needles:
             referenced = "yes" if any(n in t for t in texts for n in needles) else "no"
         elif npm_family:
