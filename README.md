@@ -590,3 +590,24 @@ ecosystem audit tools for `--audit`.
 GitHub CI also requires real Chromium interaction and Japanese/English PDF
 checks with zero skipped tests. See [CI checks and local reproduction](docs/ci.md)
 for the pinned tooling, synthetic artifacts and stricter test command.
+
+### Performance measurements
+
+Run the offline performance fixtures with Python's standard library:
+
+```sh
+python3 scripts/ci/benchmark_performance.py
+# Run the same fixtures against a separate, trusted baseline checkout:
+python3 scripts/ci/benchmark_performance.py --scripts-dir /path/to/baseline/skills/security-scan/scripts
+```
+
+The fixtures scan 600 npm workspace members sharing a root lockfile and attach
+500 finding excerpts from one 10,000-line source file. JSON output includes
+five timed samples, their median, the Python/platform identity and a SHA-256
+digest of each complete result. Compare revisions on the same machine and
+require matching output digests before comparing timings. Fixture creation,
+warmup, input copying and result hashing are excluded from the timed region.
+Use `--repeats`, `--workspaces`, `--findings` and `--source-lines` to adjust the
+workload. These synthetic fixtures make no network requests and do not measure
+advisory services, full report generation or PDF conversion; no machine-dependent
+timing threshold is imposed on CI.

@@ -1608,6 +1608,7 @@ def attach_sources(data, repo, context=3, evidence_dir=None):
     if not _FULL_OID.fullmatch(commit) or pin.get("worktree") != "clean" or pin.get("diff_sha256"):
         commit = ""
     pinned_git = bool(commit and root and os.path.lexists(root / ".git"))
+    sources = {}
     for f in data["findings"]:
         f.pop("source_link", None)
         f.pop("snippet", None)
@@ -1623,6 +1624,11 @@ def attach_sources(data, repo, context=3, evidence_dir=None):
             f["source_link"] = http_url(link, "source_link")
         if not root or sensitive_path(rel):
             continue
+        sources.setdefault(rel, []).append((f, start, end))
+    # Process one source at a time without reordering the findings. Repeated
+    # locations share the read, commit lookup and whole-file redaction work;
+    # source contents are never retained across calls or accumulated by path.
+    for rel, locations in sources.items():
         blob = _captured_source(data, evidence_dir, commit, rel) if commit else None
         if commit and blob is None:
             blob = _commit_source(root, commit, rel) if pinned_git else None
@@ -1652,21 +1658,22 @@ def attach_sources(data, repo, context=3, evidence_dir=None):
         if lines and lines[-1] == "":
             lines.pop()
         lines = [line[:-1] if line.endswith("\r") else line for line in lines]
-        if start > len(lines):
-            continue  # The location is past the end of this file: no excerpt.
-        lo, hi = max(1, start - max(0, context)), min(len(lines), end + max(0, context))
-        requested_hi = hi
-        hi = min(hi, lo + 199)
-        redacted = [redact(lines[i - 1]) for i in range(lo, hi + 1)]
-        # A Secrets finding (a hardcoded credential, but also weak crypto or TLS)
-        # keeps its excerpt unless a cited line still holds a secret-like value
-        # that masking did not recognise, such as a bare key on its own.
-        if secrets_finding(f) and any(secret_candidate(redacted[i - lo])
-                                      for i in range(start, min(end, hi) + 1)):
-            continue
-        f["snippet"] = {"start": lo, "hit": [start, end],
-                        "lines": [line[:240] for line in redacted],
-                        "truncated": requested_hi > hi or any(len(line) > 240 for line in redacted)}
+        for f, start, end in locations:
+            if start > len(lines):
+                continue  # The location is past the end of this file: no excerpt.
+            lo, hi = max(1, start - max(0, context)), min(len(lines), end + max(0, context))
+            requested_hi = hi
+            hi = min(hi, lo + 199)
+            redacted = [redact(lines[i - 1]) for i in range(lo, hi + 1)]
+            # A Secrets finding (a hardcoded credential, but also weak crypto or TLS)
+            # keeps its excerpt unless a cited line still holds a secret-like value
+            # that masking did not recognise, such as a bare key on its own.
+            if secrets_finding(f) and any(secret_candidate(redacted[i - lo])
+                                          for i in range(start, min(end, hi) + 1)):
+                continue
+            f["snippet"] = {"start": lo, "hit": [start, end],
+                            "lines": [line[:240] for line in redacted],
+                            "truncated": requested_hi > hi or any(len(line) > 240 for line in redacted)}
 
 
 def snippet_html(f, L=None):
