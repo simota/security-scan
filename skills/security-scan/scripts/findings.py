@@ -298,9 +298,17 @@ SEALED = ("assessment", "evidence", "test_runs", "evidence_integrity")
 
 def renumber_map(findings):
     """Old F-* id -> new id: contract_check.py's order; excluded findings last, in their old order."""
+    # Complete the ID pass before inspecting validation records, preserving
+    # which malformed field is reported first.
     code = [f for f in findings if f["id"].startswith("F-")]
-    excluded = [f for f in code if (f.get("validation") or {}).get("verdict") in render.EXCLUDED]
-    active = sorted((f for f in code if f not in excluded), key=lambda f: (order_key(f), f["id"]))
+    active, excluded = [], []
+    for finding in code:
+        if (finding.get("validation") or {}).get("verdict") in render.EXCLUDED:
+            excluded.append(finding)
+        else:
+            active.append(finding)
+    del code  # The partitions now own these references; release the extra list before sorting.
+    active.sort(key=lambda f: (order_key(f), f["id"]))
     excluded.sort(key=lambda f: f["id"])
     return {f["id"]: f"F-{n:03d}" for n, f in enumerate(active + excluded, 1)}
 
