@@ -83,6 +83,7 @@ class _Validator:
         self.data, self.error_type = data, error_type
         self.integrity = integrity
         self.integrity_required = False
+        self.provenance = None
         self.evidence, self.runs = {}, {}
         self.assessment_pin = None
         self.structured = False
@@ -450,7 +451,10 @@ class _Validator:
             all_runs.update(remediation.get(key, []))
         for ref in all_runs:
             all_refs.update(self.runs[ref].get("evidence_ids", []))
-        provenance = integrity_state(self.data, sorted(all_refs), self.integrity)
+        if self.provenance is None and self.integrity is not None:
+            from evidence_integrity import _Provenance
+            self.provenance = _Provenance(self.data, self.integrity)
+        provenance = integrity_state(self.data, sorted(all_refs), self.integrity, self.provenance)
         # Recorded declarations retain their previous interpretation. Explicit
         # required policy, or a freshly observed contrary file check, cannot be
         # bypassed by a supplied verdict, historical receipt or completed journal.
@@ -465,15 +469,19 @@ class _Validator:
                 "evidence_ids": sorted(all_refs), "run_ids": sorted(all_runs), "integrity": provenance}
 
 
-def integrity_state(data, evidence_ids, integrity=None):
+def integrity_state(data, evidence_ids, integrity=None, provenance=None):
     """Curate fresh byte/source checks separately from recorded support levels."""
     # Old schemas allow arbitrary extension records and IDs. Merely rendering
     # their declarations must not opt into the stricter local-reader contract.
     if integrity is None or data.get("schema_version", 1) != 2:
         return {"status": "declared", "reasons": ["not_checked"], "records": [],
                 "bytes_checked": 0, "sources_checked": 0, "evidence_total": len(evidence_ids)}
-    from evidence_integrity import provenance_state
-    result = provenance_state(data, evidence_ids, integrity)
+    if provenance is None:
+        from evidence_integrity import provenance_state
+        result = provenance_state(data, evidence_ids, integrity)
+    else:
+        # A reusable evidence_integrity._Provenance bound to this data and integrity.
+        result = provenance(evidence_ids)
     records = result.get("records", [])
     result.update(bytes_checked=sum(item.get("bytes") == "matched" for item in records),
                   sources_checked=sum(item.get("source") == "matched" for item in records),

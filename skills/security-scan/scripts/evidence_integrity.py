@@ -107,15 +107,25 @@ class VerificationResult:
 
     def matches(self, data):
         try:
-            return self.__token is _TOKEN and self.__digest == declaration_digest(data)
+            return self._matches_digest(declaration_digest(data))
         except EvidenceError:
             return False
+
+    def _matches_digest(self, digest):
+        return self.__token is _TOKEN and self.__digest == digest
 
     def __reduce__(self):
         raise TypeError("VerificationResult cannot be serialized; use .receipt")
 
 
 def _validate(data, evidence_ids):
+    catalog = _catalog(data)
+    selected = _select(catalog, evidence_ids)
+    declaration_digest(data)
+    return catalog, selected
+
+
+def _catalog(data):
     if not isinstance(data, dict) or type(data.get("schema_version")) is not int or data["schema_version"] != 2:
         raise EvidenceError("schema_version_2_required")
     assessment = data.get("assessment")
@@ -152,6 +162,10 @@ def _validate(data, evidence_ids):
         if "source_path" in record and (not isinstance(record["source_path"], str) or not record["source_path"].strip()):
             raise EvidenceError("invalid_source_path")
         catalog[identifier] = record
+    return catalog
+
+
+def _select(catalog, evidence_ids):
     if evidence_ids is None:
         selected = sorted(catalog)
     else:
@@ -160,8 +174,7 @@ def _validate(data, evidence_ids):
         selected = sorted(set(evidence_ids))
         if len(selected) != len(evidence_ids) or any(i not in catalog for i in selected):
             raise EvidenceError("invalid_evidence_selection")
-    declaration_digest(data)
-    return catalog, selected
+    return selected
 
 
 def _parts(path):
@@ -634,12 +647,39 @@ def _matched(record, item):
 
 def provenance_state(data, evidence_ids, result=None):
     """Describe fresh checks separately from declarations and stored receipts."""
-    catalog, selected = _validate(data, evidence_ids)
+    catalog = _catalog(data)
+    selected = _select(catalog, evidence_ids)
+    return _provenance(catalog, selected, declaration_digest(data), result)
+
+
+class _Provenance:
+    """provenance_state for many selections of one unchanged document.
+
+    The catalog checks and declaration digest do not depend on the selection,
+    so they run once (in provenance_state's order) on the first call instead of
+    once per finding. Callers must not mutate the document between calls.
+    """
+
+    def __init__(self, data, result):
+        self.data, self.result = data, result
+        self.catalog = self.digest = None
+
+    def __call__(self, evidence_ids):
+        if self.digest is None:
+            catalog = _catalog(self.data)
+            selected = _select(catalog, evidence_ids)
+            self.digest, self.catalog = declaration_digest(self.data), catalog
+        else:
+            selected = _select(self.catalog, evidence_ids)
+        return _provenance(self.catalog, selected, self.digest, self.result)
+
+
+def _provenance(catalog, selected, digest, result):
     reason = "not_checked"
     live = isinstance(result, VerificationResult)
     if result is not None and not live:
         reason = "recorded_receipt_only"
-    elif live and not result.matches(data):
+    elif live and not result._matches_digest(digest):
         reason = "context_stale"
     if not live or reason == "context_stale":
         return {"status": "incomplete" if reason == "context_stale" else "declared", "reasons": [reason],

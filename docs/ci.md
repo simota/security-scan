@@ -264,4 +264,9 @@ redaction and verification work, selective evidence copying and source loading
 without relying on machine speed. Derived report states and source indexes are
 reused only within a render or triage call; later calls must observe changed
 records and source files. Evidence-result indexes remain bound to their checked
-declarations, which are validated again on every selection.
+declarations. `provenance_state` validates them again on every call; one derivation
+of all finding states validates and digests them once, then checks each finding's
+selection against that catalog, and the next derivation starts over. Redaction
+skips its keyed-secret steps for a line containing no key name those steps could
+match, and URL redaction skips a line with no `:` or `%`; both shortcuts return
+exactly what the full pass would.
