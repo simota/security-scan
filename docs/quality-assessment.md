@@ -175,3 +175,129 @@ uses 3.9 and 3.12.
 | U7 | 10 | 4 | E3 | 18–26 ms DOMContentLoaded on samples; lazy details tested on large registers, no stated budget |
 | **UXQI** | | **79** | coverage 100 % | |
 | **SQI** | | **74.25** | | |
+
+## After the changes
+
+Same rubric, weights, measurement conditions and samples as the baseline.
+
+### Changes adopted
+
+| Change | Files | Targets |
+|---|---|---|
+| The findings.json contract (enumerations, `SchemaError`, `load`, `validate_data`, `json_depth`, `http_url`) moved out of the renderer into its own module; `render` re-exports the same objects, so `render.<name>` callers keep working | `skills/security-scan/scripts/report_schema.py` (new), `skills/security-scan/scripts/render.py` | D1, D2, A1, A2, A3 |
+| Secret detection and masking (`redact`, `mask_multiline`, `secret_in_source`, `sensitive_path`, token patterns) moved into its own module, re-exported the same way | `skills/security-scan/scripts/secret_redaction.py` (new), `skills/security-scan/scripts/render.py` | D1, D2, A1, A3 |
+| Record tools import the contract modules instead of the renderer | `findings.py`, `evidence_capture.py`, `expert_audit.py`, `scan_run.py`, `reproduction.py`, `verification_workflow.py` | A1, A3 |
+| Dependency-direction tests: no tool imports `render`; contract modules never import presentation or the PDF kit; no load-time cycle; deferred cycles pinned to the known set | `tests/test_module_boundaries.py` (new) | D6, A1 |
+| Register: Confidence and Validation columns widened (96→120 px, 84→116 px at ≥851 px) and allowed to break only at a hyphen before a mid-word fallback | `render.py` (`DASHBOARD_CSS`), `docs/report-design.md` | V3, U2 |
+| Browser regression test for that rule, required in CI | `tests/test_register_legibility.py` (new), `scripts/ci/run_required_tests.py` | D6, V3 |
+
+Four existing tests patched or read names that moved; they now target the
+module that owns them, with unchanged assertions:
+`tests/test_input_schema.py` (patches `int` in the module owning
+`validate_data`), `tests/test_record_tools_review.py` (patches
+`report_schema.validate_data` through `findings`),
+`tests/test_redaction_prefilter_performance.py` and
+`tests/test_performance_regressions.py` (read and patch masking internals in
+`secret_redaction`). Without the retargeting, the `_sub_keyed` call-count test
+would have passed vacuously.
+
+### Change rejected
+
+A hash-based Content-Security-Policy for `dashboard.html`
+(`default-src 'none'`, script and style allowed by SHA-256) ran the page with
+zero violations and blocked injected script, inline handlers and image fetches.
+It was not adopted: two existing required browser tests failed under it, one
+because a meta policy survives `document.write` into the same document (the
+next report written there loses its stylesheet), one because Playwright's
+string `wait_for_function` needs `eval`. Both are compatibility breaks for
+tools that reuse or script the page, and passing them would have meant
+changing the harness of existing required tests. It needs a maintainer
+decision, not a silent harness change.
+
+### Measurements
+
+| Measure | Before | After |
+|---|---|---|
+| `make check` | 1105 OK, 26 skipped | 1111 OK, 27 skipped (+5 boundary tests, +1 opt-in browser test) |
+| Required non-PDF browser tests | 14/14 pass | 15/15 pass |
+| PDF tests | engine times out in this container (unverified) | same; `assessment.html` is byte-identical to the baseline for all five samples, so the printed input is unchanged |
+| Rendered output vs baseline | — | `assessment.html` identical; `dashboard.html` differs only by the register rule; `deps_scan.py` output on this repository identical |
+| Enum register values split mid-word (5 samples × 1280/1000/900/390 px × included/all views, 208 cells) | 60 | 0 |
+| axe violations (dashboard / assessment) | 0 / 0 | 0 / 0 |
+| Focus-invisible Tab stops | 0 / 358 | 0 / 358 |
+| Horizontal overflow runs | 0 / 40 | 0 / 40 |
+| Targets <24 px at mobile (inline, exception applies) | 22 / 24 | 22 / 24 |
+| Truncated filter-select values (≥1100 px) | 2 | 2 (not changed) |
+| Title column width, ja sample (851 / 1100 / 1280 px) | 247 / 236 / 416 px | 191 / 180 / 360 px |
+| Register height, ja sample at 1100 px (more title wrapping) | 842 px | 893 px |
+| Record/tool modules importing `render`, module level (the baseline method) | 4 | 0 |
+| Same, counting function-level imports | 6 | 0 |
+| Load-time import cycles | 0 | 0 |
+| Elementary cycles counting function-level imports | 10 | 5 (pinned by test) |
+| `import <tool>` loads `render` / the PDF engine | yes / yes | no / no (`scan_run` still loads the PDF engine's Chrome list) |
+| Import time, interleaved A/B, median of 15, cold (`-B`): `findings`, `evidence_capture`, `expert_audit`, `scan_run`, `deps_scan`, `render` | 82.1, 81.1, 79.8, 89.5, 109.9, 75.9 ms | 54.1, 60.2, 51.4, 73.7, 88.0, 75.3 ms |
+| Same, warm bytecode cache | 32.1, 31.6, 31.3, 32.0, 34.0, 37.7 ms | 25.9, 29.0, 25.4, 30.5, 32.9, 30.1 ms |
+| `render.py` lines | 2,684 | 2,239 (`report_schema.py` 258, `secret_redaction.py` 228) |
+| Functions >120 lines | 8 | 8 (`validate_data` moved, not split) |
+
+The baseline import time (31.9 ms for `findings`) was taken in a separate run;
+the A/B rows above were measured interleaved in one run and are the ones to
+compare.
+
+### Scores
+
+| Item | W | Before | After | Δ weighted | Evidence | Why it changed |
+|---|---:|---:|---:|---:|---|---|
+| D1 | 20 | 2 | 4 | +8 | E2 | no module is imported for a responsibility other than its primary one; `render` and `deps_scan` still hold ≥3 change reasons |
+| D2 | 15 | 3 | 4 | +3 | E2 | contract and masking names live in their own modules; `render` keeps re-exports for compatibility (so not 5) |
+| D3 | 15 | 4 | 4 | 0 | E2 | unchanged; public functions untyped |
+| D4 | 15 | 3 | 3 | 0 | E2 | S1 still touches 8 modules (verdict names repeated) |
+| D5 | 10 | 3 | 3 | 0 | E2 | still 8 functions >120 lines |
+| D6 | 15 | 4 | 5 | +3 | E2 | dependency direction and register legibility are now enforced by tests |
+| D7 | 10 | 5 | 5 | 0 | E2 | unchanged |
+| **DQI** | | **66** | **80** | **+14** | coverage 100 % | |
+| A1 | 20 | 2 | 5 | +12 | E2 | 0 tool → presentation imports, 0 load-time cycles, enforced by `tests/test_module_boundaries.py`; 5 deferred cycles remain, disclosed and pinned |
+| A2 | 15 | 4 | 4 | 0 | E1 | validation now separate; the derived report model is still built inside `render` |
+| A3 | 15 | 2 | 5 | +9 | E2 | 0 modules outside presentation import `render` (correlated with A1: one structural change moves both) |
+| A4 | 15 | 5 | 5 | 0 | E2 | unchanged |
+| A5 | 10 | 5 | 5 | 0 | E3 | unchanged |
+| A6 | 10 | 4 | 4 | 0 | E2 | CSP rejected (see above) |
+| A7 | 10 | 4 | 4 | 0 | E2 | unchanged |
+| A8 | 5 | 4 | 4 | 0 | E2 | unchanged |
+| **AQI** | | **71** | **92** | **+21** | coverage 100 % | |
+| V1 | 20 | 4 | 4 | 0 | E1 | unchanged |
+| V2 | 20 | 4 | 4 | 0 | E1 | one more local register override |
+| V3 | 15 | 3 | 4 | +3 | E2 | 0 of 208 enum cells split mid-word (was 60); not 5: long unbroken titles still break anywhere by design, mobile card labels are 10 px |
+| V4 | 15 | 4 | 4 | 0 | E2 | 0 overflow; 2 truncated select values remain |
+| V5 | 10 | 5 | 5 | 0 | E2 | unchanged |
+| V6 | 10 | 5 | 5 | 0 | E2 | unchanged |
+| V7 | 10 | 4 | 4 | 0 | E1 | unchanged; titles wrap more (title column 56 px narrower) |
+| **VQI** | | **81** | **84** | **+3** | coverage 100 % | |
+| U1 | 25 | 4 | 4 | 0 | E2 | unchanged; no user test |
+| U2 | 15 | 3 | 4 | +3 | E2 | one minor issue left (truncated current filter values at ≥1100 px) |
+| U3 | 15 | 4 | 4 | 0 | E1 | unchanged |
+| U4 | 10 | 5 | 5 | 0 | E2 | unchanged |
+| U5 | 10 | 4 | 4 | 0 | E2 | unchanged |
+| U6 | 15 | 4 | 4 | 0 | E2 | unchanged; no screen-reader pass |
+| U7 | 10 | 4 | 4 | 0 | E3 | unchanged |
+| **UXQI** | | **79** | **82** | **+3** | coverage 100 % | |
+| **SQI** | | **74.25** | **84.50** | **+10.25** | | |
+
+### Remaining risks and open items
+
+- PDF output is unverified in this container (Chrome PDF engine timeout as
+  root). The assessment HTML it prints is byte-identical to the baseline; CI's
+  required PDF tests are the check.
+- Truncated *Records* and *Order* select values at ≥1100 px: fixing them means
+  a taller pinned filter bar or shorter labels, a design decision left open.
+- Verdict names are repeated in 8 modules (D4 scenario S1); `contract_check.py`
+  may duplicate them deliberately to stay independent, so they were not merged.
+- Five deferred import cycles remain, all on controller/CLI paths, now pinned
+  by `tests/test_module_boundaries.py`.
+- Very long functions (`deps_scan.check_workflow` 477 lines,
+  `expert.derive_expert` 406) were left alone: splitting them is a large,
+  high-risk change with no defect to fix.
+- V1, V2, V7, A2 and U3 are inspection scores (E1). No real-user test was run,
+  so nothing here claims better task completion or satisfaction.
+- A1 and A3 measure overlapping things, so the AQI gain rests mostly on one
+  structural change.
