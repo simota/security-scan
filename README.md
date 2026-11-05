@@ -66,6 +66,9 @@ RECON ─► CHECKLIST ─► REVIEW ─► VERIFY ─► REPORT
   reported; each carries severity and confidence separately
 - **Report** — one `findings.json` supplies the dashboard and assessment, with
   a shared verification model and explicit evidence limitations
+- **Rescan and hand-off** — compare two runs (new, reopened, persisting, not
+  reported) with an optional CI gate, and export SARIF for code scanning, CSV
+  for trackers and per-finding issue drafts
 
 Ask for "what should we check" and it stops after the checklist. Ask it to
 check or audit and it runs all phases.
@@ -273,6 +276,44 @@ Do not file an unfixed High or Medium as a public issue on a public repository;
 use a private tracker or a GitHub Security Advisory. Templates carry the same
 rules as the report: no working payloads, no secret values, and no source
 excerpts for readers who cannot already see the repository.
+
+`export.py issues` fills the issue template from the record, one draft per
+open finding plus an `index.md`, and labels each open High or Medium for a
+private tracker:
+
+```sh
+python3 skills/security-scan/scripts/export.py issues out/findings.json --out drafts --lang ja
+```
+
+### Rescan comparison and CI gate
+
+After fixing, a second, independent run shows what changed. `compare.py`
+matches findings by file, weakness class (CWE or perspective), line proximity
+and title — IDs are per run — and groups them as new, reopened, persisting
+(with severity, confidence, verdict or status changes), not reported, and ruled
+out. "Not reported" is deliberately not "fixed": the comparison says whether
+the current run checked that perspective, and a fix is confirmed by a
+regression test or retest record.
+
+```sh
+python3 skills/security-scan/scripts/compare.py before/out after/out --markdown delta.md --json delta.json
+python3 skills/security-scan/scripts/compare.py before/out after/out --fail-on High   # exit 1 on an open new, reopened, escalated or regressed High
+```
+
+### SARIF and CSV exports
+
+`export.py sarif` writes SARIF 2.1.0 for GitHub code scanning and IDEs: a rule
+per finding, level and `security-severity` from severity, CWE help links,
+suppressions for ruled-out and accepted findings, and a run-independent
+fingerprint so alerts follow findings across rescans. `export.py csv` writes a
+tracker/spreadsheet row per finding with formula-like cells neutralized. Both
+mask secret-looking values like the reports. See
+`skills/security-scan/reference/compare-and-export.md`.
+
+```sh
+python3 skills/security-scan/scripts/export.py sarif out/findings.json --out results.sarif
+python3 skills/security-scan/scripts/export.py csv out/findings.json --out findings.csv --bom
+```
 
 ### Optional three-pass assurance
 
@@ -543,6 +584,7 @@ skills/security-scan/
   reference/expert-mode.md     expert-grade multi-agent run card, envelope and calibration anchors
   reference/engine-map.md      the only place host spawn tools and preflights are named
   reference/findings-schema.md findings.json and the render command
+  reference/compare-and-export.md rescan comparison, CI gate, SARIF / CSV / issue-draft exports
   reference/invariants.md      invariant ledger, path trace, close-check, static reproduction
   reference/coverage-trace.md  ASVS / API Top 10 / CWE Top 25 mapped to perspectives and hunt steps
   scripts/deps_scan.py         dependency inventory, supply-chain checks, audits (stdlib only)
@@ -555,6 +597,10 @@ skills/security-scan/
   scripts/expert_audit.py      expert-grade gate over records, run files and the rendered report
   scripts/render.py            findings.json -> dashboard / assessment PDF (stdlib only)
   scripts/report_schema.py     the findings.json contract: enumerations, validation, parsing
+  scripts/compare.py           two assessments -> new / reopened / persisting / not reported; --fail-on gate
+  scripts/export.py            findings.json -> SARIF 2.1.0, CSV, issue drafts
+  scripts/finding_keys.py      run-independent finding identity (fingerprint, matching keys)
+  scripts/output_files.py      masked, atomic, symlink-refusing writes for derived files
   scripts/secret_redaction.py  secret detection and masking for excerpts and report text
   scripts/verification.py      evidence consistency and derived verification/retest states
   scripts/evidence_integrity.py read-only local evidence verification and separate receipts
