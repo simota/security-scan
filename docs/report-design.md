@@ -14,6 +14,8 @@ security-scan uses it as follows:
 - `skills/security-scan/scripts/render.py` inlines the shared stylesheets first and
   appends only the rules for security-scan record types (verification,
   workflow, expert and three-pass records, evidence cells) in `ASSESSMENT_CSS`
-  and `DASHBOARD_CSS`.
+  and `DASHBOARD_CSS`, plus one register rule: the Confidence and Validation
+  columns are widened so their enumerated values (`Environment-dependent`,
+  `NotApplicable`) are not split inside a word.
 - The running footer is `SECURITY ASSESSMENT` (ja `セキュリティ診断`), passed to
   `document_css()` from the `a_running_footer` label.
