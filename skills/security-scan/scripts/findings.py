@@ -22,7 +22,7 @@ verification_workflow.py, only if no other writer changed it meanwhile. Profiles
 `schema_version`, `assessment`, `meta.commit` and `kind: "source"` evidence come only from
 evidence_capture.py (a fragment may change only a source record's `summary`);
 workflow journals come only from verification_workflow.py. The merged report
-must pass render.py's schema check
+must pass the findings.json schema check (report_schema.py, the one render.py applies)
 before anything is written.
 
 Finding text describes the weakness, not an attack: the request shape is the
@@ -62,7 +62,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import render  # noqa: E402
+import report_schema  # noqa: E402
 from contract_check import order_key, read_regular  # noqa: E402
 from expert import derive_expert  # noqa: E402
 from payloads import PAYLOAD  # noqa: E402
@@ -93,14 +93,14 @@ def read_json(path, raw=None):
         raw = read_regular(path) if raw is None else raw
         value = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object)
         # Deeper input would overflow copy/validation recursion later.
-        if render.json_depth(value) > render.MAX_JSON_DEPTH:
-            raise ValueError(f"JSON nesting deeper than {render.MAX_JSON_DEPTH} levels")
+        if report_schema.json_depth(value) > report_schema.MAX_JSON_DEPTH:
+            raise ValueError(f"JSON nesting deeper than {report_schema.MAX_JSON_DEPTH} levels")
         return value
     except RecursionError:
         # Older Pythons stop decoding deep input themselves; report it the same way.
-        raise render.SchemaError(f"{path}: JSON nesting deeper than {render.MAX_JSON_DEPTH} levels") from None
+        raise report_schema.SchemaError(f"{path}: JSON nesting deeper than {report_schema.MAX_JSON_DEPTH} levels") from None
     except (OSError, UnicodeError, ValueError) as e:
-        raise render.SchemaError(f"{path}: {e}") from None
+        raise report_schema.SchemaError(f"{path}: {e}") from None
 
 
 def unique_object(pairs):
@@ -299,7 +299,7 @@ SEALED = ("assessment", "evidence", "test_runs", "evidence_integrity")
 def renumber_map(findings):
     """Old F-* id -> new id: contract_check.py's order; excluded findings last, in their old order."""
     code = [f for f in findings if f["id"].startswith("F-")]
-    excluded = [f for f in code if (f.get("validation") or {}).get("verdict") in render.EXCLUDED]
+    excluded = [f for f in code if (f.get("validation") or {}).get("verdict") in report_schema.EXCLUDED]
     active = sorted((f for f in code if f not in excluded), key=lambda f: (order_key(f), f["id"]))
     excluded.sort(key=lambda f: f["id"])
     return {f["id"]: f"F-{n:03d}" for n, f in enumerate(active + excluded, 1)}
@@ -402,7 +402,7 @@ def main(argv=None):
         original = read_regular(args.findings) if os.path.lexists(args.findings) else None
         base = read_json(args.findings, original) if original is not None else {}
         fragments = [(str(path), read_json(path)) for path in args.fragments]
-    except (render.SchemaError, OSError) as e:
+    except (report_schema.SchemaError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
     refused = []
@@ -426,18 +426,18 @@ def main(argv=None):
         return 1
     try:
         if not isinstance(base, dict):
-            raise render.SchemaError("existing report must be an object")
+            raise report_schema.SchemaError("existing report must be an object")
         if base:
-            render.validate_data(copy.deepcopy(base))
-            derive_expert(base, render.SchemaError)
+            report_schema.validate_data(copy.deepcopy(base))
+            derive_expert(base, report_schema.SchemaError)
         for name, fragment in fragments:
             if any(key in fragment for key in (*PROFILES, "test_runs")) and base.get("schema_version") != 2:
-                raise render.SchemaError("extension profiles and test_runs require evidence_capture.py first")
+                raise report_schema.SchemaError("extension profiles and test_runs require evidence_capture.py first")
             # Evidence IDs come from evidence_capture.py; records citing guessed IDs
             # merged earlier would make the capture itself fail, with no way to remove them.
             if base.get("schema_version") != 2 and ("evidence" in fragment or any(
                     isinstance(f, dict) and "verification" in f for f in fragment.get("findings", []))):
-                raise render.SchemaError("verification and evidence require evidence_capture.py first; "
+                raise report_schema.SchemaError("verification and evidence require evidence_capture.py first; "
                                          "cite the IDs it prints")
             # A missing entry is refused, so a typo cannot leave the old text in place.
             missing = [f"{name}: remove.{key}: {entry!r} is not recorded"
@@ -447,10 +447,10 @@ def main(argv=None):
                 print("\n".join(missing), file=sys.stderr)
                 return 1
             base = merge(base, fragment)
-        render.validate_data(copy.deepcopy(base))
+        report_schema.validate_data(copy.deepcopy(base))
         # Shape errors fail; incomplete later phases are permitted and stay held.
-        derive_expert(base, render.SchemaError)
-    except render.SchemaError as e:
+        derive_expert(base, report_schema.SchemaError)
+    except report_schema.SchemaError as e:
         print(f"error: merged report does not match the schema: {e}", file=sys.stderr)
         return 2
     try:
@@ -467,8 +467,8 @@ def main_renumber(path):
         original = read_regular(path)
         data = read_json(path, original)
         if not isinstance(data, dict):
-            raise render.SchemaError("existing report must be an object")
-        render.validate_data(copy.deepcopy(data))
+            raise report_schema.SchemaError("existing report must be an object")
+        report_schema.validate_data(copy.deepcopy(data))
         mapping = renumber_map(data["findings"])
         if all(old == new for old, new in mapping.items()):
             print(f"{path}: F-* findings already in order")
@@ -478,10 +478,10 @@ def main_renumber(path):
         if refused:
             print("\n".join(refused), file=sys.stderr)
             return 1
-        render.validate_data(copy.deepcopy(moved))
-        derive_expert(moved, render.SchemaError)
+        report_schema.validate_data(copy.deepcopy(moved))
+        derive_expert(moved, report_schema.SchemaError)
         write_report(path, moved, original)
-    except (render.SchemaError, MergeConflict, OSError) as e:
+    except (report_schema.SchemaError, MergeConflict, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
     changes = ", ".join(f"{old}->{new}" for old, new in sorted(mapping.items()) if old != new)

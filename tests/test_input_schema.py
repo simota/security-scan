@@ -216,7 +216,9 @@ class InputSchemaTests(unittest.TestCase):
                 raise ValueError('Synthetic platform integer limit')
             return original_int(value, *args, **kwargs)
 
-        with patch.dict(self.renderer.__dict__, {'int': limited_int}):
+        # Patch the module that owns validate_data (render re-exports it).
+        schema = sys.modules[self.renderer.validate_data.__module__]
+        with patch.dict(schema.__dict__, {'int': limited_int}):
             self.assert_invalid(data, 'findings[0].location')
 
     def test_renderer_nesting_failure_exits_two_before_output(self):

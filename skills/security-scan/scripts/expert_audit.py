@@ -24,7 +24,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import contract_check
 from expert import derive_expert
-import render
+import report_schema
 
 
 def run_file(out_dir, rel):
@@ -92,13 +92,13 @@ def main(argv=None):
         if not isinstance(data, dict):
             raise ValueError("findings.json must hold a JSON object")
         # The record gates below assume render.py's schema (meta an object, and so on).
-        render.validate_data(copy.deepcopy(data))
+        report_schema.validate_data(copy.deepcopy(data))
         result = audit(data, a.out_dir, pdf=not a.no_pdf, evidence_root=a.evidence_root,
                        evidence_repository=a.evidence_repository)
     except RecursionError:
         print("expert_audit.py: findings.json nesting is too deep", file=sys.stderr)
         return 2
-    except render.SchemaError as exc:
+    except report_schema.SchemaError as exc:
         print(f"expert_audit.py: findings.json does not match the schema: {exc}", file=sys.stderr)
         return 2
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:

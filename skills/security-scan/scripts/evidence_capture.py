@@ -45,7 +45,9 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from evidence_integrity import (EvidenceError, _GitSnapshot, _Root, _parts, _deadline, _json_object,
                                 require_self_contained_git)
-from render import SchemaError, derive_expert, secret_in_source, validate_data
+from expert import derive_expert
+from report_schema import SchemaError, validate_data
+from secret_redaction import secret_in_source
 
 GIT_BINARY = "/usr/bin/git"  # Never resolve a program through target PATH/config.
 GIT_ENV = {"PATH": "/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,

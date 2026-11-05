@@ -74,13 +74,13 @@ class FindingsMergeReviewTests(unittest.TestCase):
 
     def test_concurrent_change_is_not_overwritten(self):
         self.assertEqual(self.merge(self.fragment("a.json", {"meta": META, "findings": [FINDING]})), 0)
-        real = self.tool.render.validate_data
+        real = self.tool.report_schema.validate_data
 
         def edit_meanwhile(data):
             self.out.write_text(self.out.read_text() + " ")
             return real(data)
 
-        with patch.object(self.tool.render, "validate_data", side_effect=edit_meanwhile):
+        with patch.object(self.tool.report_schema, "validate_data", side_effect=edit_meanwhile):
             self.assertEqual(self.merge(self.fragment("b.json", {"limitations": ["x"]})), 2)
         self.assertNotIn('"x"', self.out.read_text())
 
