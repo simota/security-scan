@@ -554,6 +554,8 @@ skills/security-scan/
   scripts/expert.py            expert-grade gate derivation (independence, redundancy, panels, calibration)
   scripts/expert_audit.py      expert-grade gate over records, run files and the rendered report
   scripts/render.py            findings.json -> dashboard / assessment PDF (stdlib only)
+  scripts/report_schema.py     the findings.json contract: enumerations, validation, parsing
+  scripts/secret_redaction.py  secret detection and masking for excerpts and report text
   scripts/verification.py      evidence consistency and derived verification/retest states
   scripts/evidence_integrity.py read-only local evidence verification and separate receipts
   scripts/verification_workflow.py ordered local review handoffs, progress and lineage

@@ -98,7 +98,7 @@ def _hash(value):
 
 
 def _normalized_finding(finding):
-    """Match render.load's benign defaults without omitting substantive inputs."""
+    """Match report_schema.load's benign defaults without omitting substantive inputs."""
     result = copy.deepcopy({k: v for k, v in finding.items()
                             if k not in _DERIVED and k != "verification_workflow"})
     result.setdefault("status", "Open")
@@ -106,7 +106,7 @@ def _normalized_finding(finding):
         result.setdefault(key, "")
     result["category"] = result.get("category") or "Uncategorized"
     if result.get("cwe") == "":
-        del result["cwe"]  # render.validate_data drops an empty cwe as omitted.
+        del result["cwe"]  # report_schema.validate_data drops an empty cwe as omitted.
     validation = result.setdefault("validation", {})
     if isinstance(validation, dict):
         for key, value in (("verdict", "Unverified"), ("method", ""), ("evidence", "")):
@@ -191,9 +191,9 @@ def _seal(event, previous=None):
 
 
 def _validate_base(data):
-    # Import lazily: render uses this module to derive workflow states, but its
-    # shared validator is only called from controller entry points, never derive.
-    from render import SchemaError, validate_data
+    # Import lazily: report_schema calls this module's validate_workflows, while
+    # the shared validator is only needed by controller entry points, never derive.
+    from report_schema import SchemaError, validate_data
     try:
         validate_data(copy.deepcopy(data))
     except SchemaError as exc:

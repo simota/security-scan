@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills/security-scan/scripts"))
 import evidence_integrity as integrity  # noqa: E402
 import render  # noqa: E402
+import secret_redaction  # noqa: E402
 import url_redaction  # noqa: E402
 import verification  # noqa: E402
 
@@ -32,15 +33,15 @@ def full_redact_urls(text):
 
 def full_redact(line):
     """render.redact without the keyword shortcut: every keyed step always runs."""
-    line = render.redact_urls(line)
-    line = render.JWT_RE.sub("********", render.TOKEN_RE.sub("********", line))
-    line = render.JWT_KEY_LITERAL.sub(render._mask_jwt_key, line)
-    line = render._sub_keyed(line, render._QUOTED_TAIL,
+    line = secret_redaction.redact_urls(line)
+    line = secret_redaction.JWT_RE.sub("********", secret_redaction.TOKEN_RE.sub("********", line))
+    line = secret_redaction.JWT_KEY_LITERAL.sub(secret_redaction._mask_jwt_key, line)
+    line = secret_redaction._sub_keyed(line, secret_redaction._QUOTED_TAIL,
                              lambda key, m: key + m.group(1) + m.group(2) + "********" + m.group(2))
-    line = render._sub_keyed(line, render._SECRET_TAIL, lambda key, m: key + m.group(1) + "********")
-    if render._KEY.search(line) or any(render._KEY_END.search(run.group())
-                                       for run in render._KEY_RUN.finditer(line)):
-        line = render._FALLBACK_LITERAL.sub(lambda m: m.group(1) + m.group(2) + "********" + m.group(2), line)
+    line = secret_redaction._sub_keyed(line, secret_redaction._SECRET_TAIL, lambda key, m: key + m.group(1) + "********")
+    if secret_redaction._KEY.search(line) or any(secret_redaction._KEY_END.search(run.group())
+                                       for run in secret_redaction._KEY_RUN.finditer(line)):
+        line = secret_redaction._FALLBACK_LITERAL.sub(lambda m: m.group(1) + m.group(2) + "********" + m.group(2), line)
     return line
 
 
@@ -88,14 +89,14 @@ class RedactionShortcutTests(unittest.TestCase):
         for line in ("see ghp_" + "a" * 36, "eyJhbGciOi.eyJzdWIiOi.c2ln", "https://user:pw@host.example/x?q=1",
                      "https%3A%2F%2Fuser%3Apw%40host.example"):
             with self.subTest(line=line):
-                self.assertFalse(render._KEY_HINT.search(line))
+                self.assertFalse(secret_redaction._KEY_HINT.search(line))
                 masked = render.redact(line)
                 self.assertNotEqual(masked, line)
                 self.assertEqual(masked, full_redact(line))
 
     def test_plain_lines_skip_keyed_scans(self):
         line = "Synthetic review found no compensating ownership guard."
-        with patch.object(render, "_sub_keyed", wraps=render._sub_keyed) as keyed:
+        with patch.object(secret_redaction, "_sub_keyed", wraps=secret_redaction._sub_keyed) as keyed:
             self.assertEqual(render.redact(line), line)
         self.assertEqual(keyed.call_count, 0)
 

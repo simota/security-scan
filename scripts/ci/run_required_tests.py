@@ -34,6 +34,7 @@ REQUIRED_TESTS = frozenset({
     "test_three_pass_reports.ThreePassPDFTests.test_japanese_three_pass_pdf",
     "test_render_round6.DashboardBrowserTests.test_browser_large_register_lazy_details_debounced_search_priority_and_copy_fallback",
     "test_render_round6.DashboardBrowserTests.test_browser_singular_summary_and_more_high_note",
+    "test_register_legibility.RegisterLegibilityBrowserTests.test_enumerated_register_values_break_only_at_hyphens",
 })
 
 

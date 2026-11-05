@@ -12,15 +12,16 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills/security-scan/scripts"))
 import deps_scan  # noqa: E402
 import render  # noqa: E402
+import secret_redaction  # noqa: E402
 
 LIMIT = 3.0  # seconds; the old code took 5 s to 6 min on these inputs
 
 
 class RedactionTests(unittest.TestCase):
     def reference(self, line):
-        line = render.redact_urls(line)
-        line = render.QUOTED_SECRET_RE.sub(lambda m: m.group(1) + m.group(2) + "********" + m.group(2), line)
-        return render.SECRET_RE.sub(lambda m: m.group(1) + "********", line)
+        line = secret_redaction.redact_urls(line)
+        line = secret_redaction.QUOTED_SECRET_RE.sub(lambda m: m.group(1) + m.group(2) + "********" + m.group(2), line)
+        return secret_redaction.SECRET_RE.sub(lambda m: m.group(1) + "********", line)
 
     def test_linear_redaction_matches_the_reference_patterns(self):
         rng = random.Random(20261010)

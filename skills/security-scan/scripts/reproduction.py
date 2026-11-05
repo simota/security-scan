@@ -25,7 +25,7 @@ LIMITATION = "Synthetic model only; no target application code, real boundary, c
 def safe_id(value):
     if not isinstance(value, str) or not ID.fullmatch(value):
         raise BundleError("IDs must be bounded alphanumeric identifiers with - or _")
-    from render import redact
+    from secret_redaction import redact
     if redact(value) != value or re.match(r"(?i)(?:gh[opusr]_|github_pat_|sk-|xox[baprs]-|AKIA[A-Z0-9]{16})", value):
         raise BundleError("Secret-bearing identifier refused")
     return value

@@ -25,7 +25,7 @@ sys.path.insert(0, str(SCRIPTS))
 from contract_check import read_regular
 from evidence_capture import GIT_BINARY
 from findings import read_json as read_record
-from render import SchemaError
+from report_schema import SchemaError
 from scan_report_kit.pdf import CHROME_CANDIDATES
 from scan_report_kit.output import write_output
 

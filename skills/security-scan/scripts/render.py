@@ -11,11 +11,9 @@ import argparse
 import hashlib
 import html
 import json
-import math
 import os
 import re
 import sys
-import unicodedata
 from collections import Counter
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
@@ -23,28 +21,26 @@ from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 # Sibling modules must import under python3 -I / PYTHONSAFEPATH as well.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from url_redaction import URL_RE, has_url_credentials, redact_urls
-from verification import CLAIMS, derive_verification, validate_verification
-from verification_workflow import derive_workflow, validate_workflows
+from url_redaction import has_url_credentials
+from report_schema import (  # noqa: F401 - re-exported: render.<name> stays the public API
+    CONFIDENCES, CWE_RE, EXCLUDED, LOC_RE, MAX_JSON_DEPTH, SEVERITIES, STATUSES, VERDICTS, SchemaError,
+    http_url, invisible_or_control, json_depth, load, text_field, validate_data, validate_json_values)
+from secret_redaction import (  # noqa: F401 - secret_in_source re-exported as above
+    JWT_RE, PRIVATE_KEY_RE, TOKEN_RE, _KEY_END, mask_multiline, redact, secret_candidate, secret_in_source,
+    secrets_finding, sensitive_path)
+from verification import CLAIMS, derive_verification, validate_verification  # noqa: F401 - re-exported
+from verification_workflow import derive_workflow
 from evidence_integrity import verify_evidence
-from three_pass import derive_three_pass, enabled as three_pass_enabled
+from three_pass import derive_three_pass
 from contract_check import read_regular
 from expert import derive_expert
-from invariant_ledger import ledger_html, validate_ledger
+from invariant_ledger import ledger_html
 from scan_report_kit import pdf as kit_pdf, style as kit_style
 from scan_report_kit.output import write_output
 
-SEVERITIES = ["High", "Medium", "Low", "Info"]
-CONFIDENCES = ["Confirmed", "Environment-dependent", "Suspected"]
-STATUSES = ["Open", "Fixed", "Accepted"]
-VERDICTS = ["Valid", "Likely", "Unverified", "Unlikely", "FalsePositive", "NotApplicable"]
-EXCLUDED = {"FalsePositive", "NotApplicable"}
 # Report parts: the application's own design, code and configuration, then the
 # scanner-owned dependency and supply-chain records (D-*, reference/dependencies.md).
 PARTS = ("code", "deps")
-# ASCII digits only, no trailing newline: the number becomes part of a link.
-CWE_RE = re.compile(r"CWE-[0-9]{1,5}")
-
 LABELS = {
     "en": {
         "title": "Security Assessment Report",
@@ -760,236 +756,6 @@ def expert_gap_label(code, L):
     return L.get("e_gap_" + head, head) + (": " + arg if arg else "")
 
 
-class SchemaError(Exception):
-    pass
-
-
-def invisible_or_control(ch):
-    """C0/C1 controls, format characters (bidi overrides, zero-width) and line/paragraph separators."""
-    return unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp")
-
-
-def http_url(value, field="url"):
-    """Validate every href, not just its HTML escaping."""
-    if (not isinstance(value, str) or not value or "\\" in value
-            or any(ch.isspace() or invisible_or_control(ch) for ch in value)):
-        raise SchemaError(f"{field}: must be an absolute http(s) URL without whitespace or controls")
-    try:
-        parsed = urlsplit(value)
-        if (parsed.scheme.lower() not in ("http", "https") or not parsed.hostname
-                or parsed.username is not None or parsed.password is not None):
-            raise ValueError("unsafe URL")
-        parsed.port  # Reject malformed/out-of-range ports too.
-        # Webhook and bot URLs carry the credential in the path, where dropping the query cannot help.
-        if TOKEN_RE.search(unquote(parsed.netloc + parsed.path)) or JWT_RE.search(unquote(parsed.path)):
-            raise ValueError("credential in path")
-    except ValueError:
-        raise SchemaError(f"{field}: must be an absolute http(s) URL without credentials") from None
-    return value
-
-
-def text_field(obj, key, where, *, required=False, default=""):
-    """Validate before coercion, hashing, sorting, or rendering can hide bad input."""
-    value = obj.get(key, default)
-    field = f"{where}.{key}" if where else key
-    if not isinstance(value, str):
-        raise SchemaError(f"{field}: must be a string")
-    if required and not value.strip():
-        raise SchemaError(f"{field}: required nonblank string")
-    return value
-
-
-def validate_json_values(data):
-    """Reject values that UTF-8 HTML or the dashboard's JSON parser cannot read."""
-    pending = [("", data)]
-    while pending:
-        where, value = pending.pop()
-        if isinstance(value, str):
-            try:
-                value.encode("utf-8")
-            except UnicodeEncodeError:
-                raise SchemaError(f"{where or 'top level'}: must contain valid Unicode text") from None
-        elif isinstance(value, float) and not math.isfinite(value):
-            raise SchemaError(f"{where or 'top level'}: number must be finite")
-        elif isinstance(value, list):
-            pending.extend((f"{where}[{i}]", entry) for i, entry in enumerate(value))
-        elif isinstance(value, dict):
-            for key, entry in value.items():
-                # Validate the key before using it in an error message.
-                try:
-                    key.encode("utf-8")
-                except UnicodeEncodeError:
-                    raise SchemaError(f"{where or 'top level'}: invalid Unicode object key") from None
-                # Keys go into error messages: show control/format characters escaped.
-                shown = key if key.isprintable() else ascii(key)
-                pending.append((f"{where}.{shown}" if where else shown, entry))
-
-
-def load(path, raw=None):
-    """Parse and validate findings; raw is the exact bytes when the caller already read them."""
-    def invalid_constant(value):
-        raise SchemaError(f"{path}: invalid JSON constant {value}")
-
-    try:
-        raw = Path(path).read_bytes() if raw is None else raw
-        data = json.loads(raw.decode("utf-8"), parse_constant=invalid_constant)
-        if json_depth(data) > MAX_JSON_DEPTH:
-            raise SchemaError(f"{path}: JSON nesting is too deep")
-    except json.JSONDecodeError as e:
-        raise SchemaError(f"{path}: invalid JSON: {e}")
-    except UnicodeError:
-        raise SchemaError(f"{path}: must be UTF-8 text") from None
-    except ValueError:
-        raise SchemaError(f"{path}: invalid JSON numeric value") from None
-    except RecursionError:
-        raise SchemaError(f"{path}: JSON nesting is too deep") from None
-    return validate_data(data)
-
-
-# Records are shallow. Newer Pythons parse very deep JSON without
-# RecursionError, so the depth is checked explicitly.
-MAX_JSON_DEPTH = 200
-
-
-def json_depth(value):
-    depth, pending = 0, [(value, 1)]
-    while pending:
-        item, level = pending.pop()
-        if isinstance(item, (dict, list)):
-            depth = max(depth, level)
-            if level > MAX_JSON_DEPTH:
-                return level
-            pending.extend((child, level + 1) for child in (item.values() if isinstance(item, dict) else item))
-    return depth
-
-
-def validate_data(data):
-    """Validate and normalize a parsed report using the same contract as the CLI."""
-    validate_json_values(data)
-    if not isinstance(data, dict):
-        raise SchemaError("top level must be an object")
-    # Fresh verification is an explicit in-memory argument, never input JSON.
-    data.pop("_evidence_integrity", None)
-    meta = data.get("meta")
-    if not isinstance(meta, dict):
-        raise SchemaError("meta: required object")
-    for k in ("project", "date"):
-        text_field(meta, k, "meta", required=True)
-    for k in ("assessor", "scope", "method", "commit"):
-        text_field(meta, k, "meta")
-    if meta.get("source_url") not in (None, ""):
-        meta["source_url"] = http_url(meta["source_url"], "meta.source_url")
-    findings = data.get("findings")
-    if not isinstance(findings, list):
-        raise SchemaError("findings: required list")
-    seen = set()
-    for i, f in enumerate(findings):
-        where = f"findings[{i}]"
-        if not isinstance(f, dict):
-            raise SchemaError(f"{where}: must be an object")
-        # These are derived output fields, never trusted JSON input.
-        f.pop("source_link", None)
-        f.pop("snippet", None)
-        f.pop("_evidence_integrity", None)
-        for k in ("id", "title", "severity", "confidence", "location"):
-            text_field(f, k, where, required=True)
-        if any(invisible_or_control(char) for char in f["location"]):
-            raise SchemaError(f"{where}.location: must not contain control characters")
-        match = LOC_RE.match(f["location"].strip())
-        if match:
-            try:
-                int(match.group("start"))
-                int(match.group("end") or match.group("start"))
-            except ValueError:
-                raise SchemaError(f"{where}.location: line numbers cannot be parsed") from None
-        if f["id"] in seen:
-            raise SchemaError(f"{where}.id: duplicate {f['id']}")
-        seen.add(f["id"])
-        if f["severity"] not in SEVERITIES:
-            raise SchemaError(f"{where}.severity: one of {SEVERITIES}")
-        if f["confidence"] not in CONFIDENCES:
-            raise SchemaError(f"{where}.confidence: one of {CONFIDENCES}")
-        f["status"] = text_field(f, "status", where, default="Open")
-        if f["status"] not in STATUSES:
-            raise SchemaError(f"{where}.status: one of {STATUSES}")
-        for k in ("category", "actor", "request", "impact", "fix"):
-            f[k] = text_field(f, k, where)
-        if "cwe" in f:
-            # Optional text fields may be an empty string (findings-schema.md).
-            if not text_field(f, "cwe", where):
-                del f["cwe"]
-            elif not CWE_RE.fullmatch(f["cwe"]):
-                raise SchemaError(f"{where}.cwe: CWE-<number>")
-        if not f["category"]:
-            f["category"] = "Uncategorized"
-        val = f.get("validation", {})
-        if not isinstance(val, dict):
-            raise SchemaError(f"{where}.validation: must be an object")
-        val["verdict"] = text_field(val, "verdict", f"{where}.validation", default="Unverified")
-        if val["verdict"] not in VERDICTS:
-            raise SchemaError(f"{where}.validation.verdict: one of {VERDICTS}")
-        evidence = text_field(val, "evidence", f"{where}.validation")
-        text_field(val, "method", f"{where}.validation")
-        if val["verdict"] in ("Valid", "FalsePositive", "NotApplicable") and not evidence.strip():
-            raise SchemaError(f"{where}.validation.evidence: required when verdict is {val['verdict']}")
-        val["evidence"] = evidence
-        f["validation"] = val
-        f["verdict"] = val["verdict"]
-        if "previous_validation" in f:
-            previous = f["previous_validation"]
-            if not isinstance(previous, dict):
-                raise SchemaError(f"{where}.previous_validation: must be an object")
-            for k in ("verdict", "evidence", "method"):
-                text_field(previous, k, f"{where}.previous_validation")
-        refs = f.get("references", [])
-        if not isinstance(refs, list):
-            raise SchemaError(f"{where}.references: must be a list")
-        clean = []
-        for j, r in enumerate(refs):
-            if isinstance(r, str):
-                r = {"url": r}
-            if not isinstance(r, dict):
-                raise SchemaError(f"{where}.references[{j}]: must be an object or URL")
-            ref_where = f"{where}.references[{j}]"
-            http_url(r.get("url"), f"{ref_where}.url")
-            clean.append({"type": text_field(r, "type", ref_where) or "web", "url": r["url"],
-                          "title": text_field(r, "title", ref_where)})
-        f["references"] = clean
-    for k in ("checked_ok", "decisions", "limitations", "next_steps"):
-        v = data.get(k, [])
-        if not isinstance(v, list):
-            raise SchemaError(f"{k}: must be a list")
-        for j, entry in enumerate(v):
-            if not isinstance(entry, str):
-                raise SchemaError(f"{k}[{j}]: must be a string")
-        data[k] = v
-    lens = data.get("perspectives", [])
-    if not isinstance(lens, list):
-        raise SchemaError("perspectives: must be a list")
-    for j, perspective in enumerate(lens):
-        where = f"perspectives[{j}]"
-        if not isinstance(perspective, dict):
-            raise SchemaError(f"{where}: must be an object")
-        text_field(perspective, "name", where, required=True)
-        for k in ("result", "note"):
-            text_field(perspective, k, where)
-    data["perspectives"] = lens
-    # A versionless or version-1 "three_pass" key is uninterpreted legacy data, not the opt-in.
-    if three_pass_enabled(data) or "expert" in data:
-        # These gates select code findings by F-NNN; any other id would be
-        # silently outside them, letting an open finding pass "complete".
-        for f in findings:
-            if not re.fullmatch(r"[FD]-[0-9]{3}", str(f["id"])):
-                raise SchemaError(f"{f['id']}: three-pass and expert records need F-NNN or D-NNN ids")
-    validate_verification(data, SchemaError)
-    validate_workflows(data, SchemaError)
-    validate_ledger(data, SchemaError)
-    rank = {s: i for i, s in enumerate(SEVERITIES)}
-    # code findings before dependency advisories (D-*) at the same severity
-    findings.sort(key=lambda f: (rank[f["severity"]], str(f["id"]).startswith("D-"), f["id"]))
-    return data
-
-
 def active(data):
     return [f for f in data["findings"] if f["verdict"] not in EXCLUDED]
 
@@ -1283,223 +1049,7 @@ ASSESSMENT_CSS = """
 """
 
 
-LOC_RE = re.compile(r"^(?P<path>[^:]+):(?P<start>\d+)(?:-(?P<end>\d+))?$")
-SECRET_RE = re.compile(
-    r"(?i)((?:password|passwd|secret|token|api[_-]?key|private[_-]?key|access[_-]?key|credential)"
-    r"[\w.-]*['\"]?\s*(?:=>|:=|[:=])\s*['\"]?)"
-    r"(?!\$|[A-Za-z_][\w.]*\(|process\.env|os\.environ|null\b|None\b|true\b|false\b)([^'\"\s,;)]{4,})")
-
-
-SENSITIVE_NAMES = {".npmrc", ".yarnrc", ".yarnrc.yml", ".pypirc", ".netrc", ".git-credentials",
-                   "auth.json", "credentials", "credentials.json", "secrets.json", "secrets.yaml", "secrets.yml",
-                   "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", ".pgpass", ".htpasswd", ".dockercfg",
-                   "terraform.tfstate.backup"}
-SENSITIVE_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".tfstate", ".tfvars"}
-PRIVATE_KEY_RE = re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----")
-# The ordinary-character branch must exclude backslashes: otherwise an
-# unterminated quoted value explores exponentially many escape combinations.
-QUOTED_SECRET_RE = re.compile(
-    r"(?i)((?:password|passwd|secret|token|api[_-]?key|private[_-]?key|access[_-]?key|credential)"
-    r"[\w.-]*['\"]?\s*(?:=>|:=|[:=])\s*)(['\"])(?:\\.|(?!\2)[^\\\n])*\2")
-
-
-def sensitive_path(path):
-    path = Path(path)
-    name = path.name.lower()
-    return (name == ".env" or name.startswith(".env.") or name.endswith(".env")
-            or name in SENSITIVE_NAMES or path.suffix.lower() in SENSITIVE_SUFFIXES
-            or name.endswith((".tfstate.backup", ".tfvars.json"))
-            # Docker registry logins: .docker/config.json holds base64 user:password.
-            or name == "config.json" and path.parent.name.lower() == ".docker"
-            or any(part.lower() in {".ssh", ".aws", ".kube", "secrets"} for part in path.parts))
-
-
-_KEY_RUN = re.compile(r"[\w.-]+")
-_KEY = re.compile(r"(?i)password|passwd|secret|token|api[_-]?key|private[_-]?key|access[_-]?key|credential")
-# Short names count only as a whole name segment: `pass=`, `db_pwd:` but not `bypass` or `passed`.
-_KEY_END = re.compile(r"(?i)(?:^|[_.-])(?:pass|pwd|passphrase)$")
-# Every tail allows the key's closing quote, and after it a closing subscript
-# bracket, before the operator: app.config["SECRET_KEY"] = "...", [ "SECRET_KEY" ] = ...,
-# os.environ['TOKEN'] = ...; an unquoted subscript (errors[CONF_PASSWORD] =
-# "invalid_auth") names a constant, not the secret.
-_SECRET_TAIL = re.compile(r"""(?i)((?:['"](?:[ \t]*\])?)?\s*(?:=>|:=|[:=])\s*['"]?)"""
-                          r"""(?!\$|[A-Za-z_][\w.]*\(|process\.env|os\.environ|null\b|None\b|true\b|false\b)([^'"\s,;)]{4,})""")
-# Python/JS string prefixes (b"...", r'...', f"...") still delimit a literal.
-_QUOTED_TAIL = re.compile(r"""(?i)((?:['"](?:[ \t]*\])?)?\s*(?:=>|:=|[:=])\s*(?:[rbfu]{1,2}(?=['"]))?)(['"])(?:\\.|(?!\2)[^\\\n])*\2""")
-# A literal fallback default after an environment lookup is a hardcoded secret
-# too: os.environ.get("X", "lit"), getenv('X', 'lit'), ENV['X'] || 'lit',
-# value or "lit", value ?? "lit". Masked on lines that name a secret key.
-_FALLBACK_LITERAL = re.compile(r"""(?i)((?:\b(?:get|getenv|fetch|getProperty|env)\s*\(\s*[^,()\n]{1,200},\s*"""
-                               r"""|\|\|\s*|\?\?\s*|\?:\s*|\bor\s+)(?:[rbfu]{1,2}(?=['"]))?)(['"])(?:\\.|(?!\2)[^\\\n])+\2""")
-# Signed JSON Web Tokens: header.payload.signature, each base64url.
-JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{4,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*")
-
-
-def _sub_keyed(line, tail, repl):
-    """SECRET_RE / QUOTED_SECRET_RE .sub() with one attempt per key-character run.
-
-    Every keyword position inside one run reaches the same tail at the run's
-    end, so only the run's leftmost keyword can start a match.
-    """
-    out, pos = [], 0
-    for run in _KEY_RUN.finditer(line):
-        if run.start() < pos:
-            continue
-        key = _KEY.search(line, run.start(), run.end())
-        start = key.start() if key else run.start() if _KEY_END.search(run.group()) else None
-        m = start is not None and tail.match(line, run.end())
-        if m:
-            out.append(line[pos:start])
-            out.append(repl(line[start:run.end()], m))
-            pos = m.end()
-    return "".join(out) + line[pos:] if out else line
-
-
-# Every keyed step below needs a _KEY match or a run ending in _KEY_END; both
-# imply one of these substrings (same case folding), so a line without any is
-# returned unchanged by those steps.
-_KEY_HINT = re.compile(r"(?i)pass|pwd|secret|token|api[_-]?key|private[_-]?key|access[_-]?key|credential")
-
-
-def redact(line):
-    line = redact_urls(line)
-    # Recognizable credentials are masked wherever they appear, keyed or not.
-    line = JWT_RE.sub("********", TOKEN_RE.sub("********", line))
-    line = JWT_KEY_LITERAL.sub(_mask_jwt_key, line)
-    if not _KEY_HINT.search(line):
-        return line
-    line = _sub_keyed(line, _QUOTED_TAIL, lambda key, m: key + m.group(1) + m.group(2) + "********" + m.group(2))
-    line = _sub_keyed(line, _SECRET_TAIL, lambda key, m: key + m.group(1) + "********")
-    if _KEY.search(line) or any(_KEY_END.search(run.group()) for run in _KEY_RUN.finditer(line)):
-        line = _FALLBACK_LITERAL.sub(lambda m: m.group(1) + m.group(2) + "********" + m.group(2), line)
-    return line
-
-
-def _mask_jwt_key(m):
-    return m.group(1) + m.group(2) + "********" + m.group(2)
-
-
-def mask_multiline(text):
-    """A literal JWT key or Authorization value whose call or key is on an earlier line,
-    masked in place: no line break is touched, so line numbers hold."""
-    return _AUTH_VALUE.sub(lambda m: m.group(1) + "********", JWT_KEY_LITERAL.sub(_mask_jwt_key, text))
-
-
 MAX_SOURCE_BYTES = 16 * 1024 * 1024
-# secret_in_source: a key whose last name segment (snake, kebab, dotted, camel or
-# SCREAMING case) is a secret name, optionally followed by an encoding suffix
-# (secret_key_base, private_key_pem), assigned a value that is not a placeholder,
-# version, path, URL or plain words. A quoted secret name passed with a quoted
-# value (define('DB_PASSWORD', '...'), setdefault("SECRET_KEY", "...")) is an
-# assignment too. Values are bounded so an unterminated quote costs at most 1 KiB per key.
-_SECRET_NAME = re.compile(r"(?i)(?:^|[_.-])(?:token|secret|password|passwd|api[_-]?key|access[_-]?key"
-                          r"|private[_-]?key|secret[_-]?key|client[_-]?secret|auth|credentials?)"
-                          r"(?:[_.-](?:base|pem|value|b64|base64|hex|raw))?$")
-_LITERAL_TAIL = re.compile(r"""(?:(?P<comma>['"][ \t]*,)|(?:['"](?:[ \t]*\])?)?[ \t]*(?::[ \t]*[A-Za-z_][\w.\[\], |]{0,40}?[ \t]*(?==))?(?:=>|:=|[:=]))[ \t]*"""
-                           r"""(?:(?P<q>['"`])(?P<v>(?:\\.|(?!(?P=q))[^\\\n]){0,1024})(?P=q)|(?P<bare>[^'"`\s,;)#]{1,1024}))""")
-# A second argument naming another field, variable, flag or code ("csrf_token", "DATABASE_URL",
-# "--github-token", "password2") is not a value.
-_FIELD_NAME = re.compile(r"-{0,2}[A-Za-z]+(?:[_.-][A-Za-z]+)*[0-9]?")
-# A backtick quotes a template literal here; in shell, Ruby or Perl it runs a command.
-TEMPLATE_SUFFIXES = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".vue", ".svelte"}
-_NOT_SECRET = re.compile(r"[$<{%]|process\.env|os\.environ|[A-Za-z_][\w.]*\(")
-_PLAIN_VALUE = re.compile(r"[\^~<>=].*|v?\d+(?:\.\d+)+[\w.+-]*|(?:~|\.{1,2})?(?:/[a-z0-9_.{}:-]*)+"
-                          r"|[a-z][a-z0-9+.-]*://[^?#@\s]*|[A-Za-z][A-Za-z ]*[.!?:]?")
-# Recognizable credentials, keyed or not: provider token prefixes, webhook and
-# bot URLs whose path is the credential, and an HTTP Authorization value
-# (Bearer/Basic followed by a token holding a digit, or any token right after an
-# Authorization key (`:`, `=`, `,` or `=>`), also on the next line or after a YAML block-scalar indicator, so `Bearer ${token}`, `"Bearer " + token` and prose stay readable).
-_AUTH_CTX = r"(?i:authorization)[\"']?[ \t]*\]?[ \t]*(?:=>|[:=,])(?:[ \t]*[|>][-+0-9]{0,2}[ \t]*(?=[\r\n]))?\s{0,40}[\"'`]?(?i:bearer|basic)[ \t]+"
-# After an Authorization key any whole token counts, but not a placeholder (one repeated
-# character, YOUR_TOKEN, token), prose (`Bearer flows; …`) nor an expression (`abc" + x`, `abc${x}`).
-_AUTH_END = r"""(?:[ \t]*(?:[\r\n]|$)|["'`,)}\]\\])"""
-_AUTH_TOKEN = (r"(?!(?:(?P<c>[\w.~+/-])(?P=c)*|[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+|(?i:(?:your|my)?[_-]?token))=*" + _AUTH_END
-               + r")[\w.~+/-]{4,}=*(?=" + _AUTH_END + ")")
-TOKEN_RE = re.compile(r"\b(?:gh[opsu]_[A-Za-z0-9]{36,}|github_pat_\w{22,}|A(?:KIA|SIA)[0-9A-Z]{16}"
-                      r"|xox[abprse]-[A-Za-z0-9-]{10,}|[sr]k_(?:live|test)_[A-Za-z0-9]{16,}|glpat-[\w-]{20,}"
-                      r"|AIza[\w-]{35}|sk-(?:proj|ant|svcacct|admin)-[\w-]{20,}|sk-[A-Za-z0-9]{32,}"
-                      r"|npm_[A-Za-z0-9]{36}|hf_[A-Za-z0-9]{30,}|SG\.[\w-]{16,}\.[\w-]{16,}"
-                      r"|hooks\.slack\.com/(?:services|workflows|triggers)/[\w/-]{20,}"
-                      r"|discord(?:app)?\.com/api/webhooks/\d+/[\w-]{20,}"
-                      r"|(?:api\.telegram\.org/bot)?\d{6,12}:AA[\w-]{30,}"
-                      r"|(?i:bearer)[ \t]+(?=[A-Za-z._~+/-]*\d)[\w.~+/-]{16,}=*"
-                      r"|(?i:basic)[ \t]+(?=[A-Za-z+/]*\d)[A-Za-z0-9+/]{16,}={0,2}(?![\w.~+/-])"
-                      r"|" + _AUTH_CTX + _AUTH_TOKEN + ")")
-_AUTH_VALUE = re.compile("(" + _AUTH_CTX + ")" + _AUTH_TOKEN)
-# A literal signing key passed positionally or by keyword: jwt.sign(payload, "key"),
-# jwt.encode(claims, 'key', ...), jwt.decode(token, "key"), jwt.encode(payload,
-# algorithm="HS256", key="key") (also secret=, signing_key=), the keyword form also first:
-# jwt.encode(key="key", payload=p). A `template` literal counts unless it interpolates ${…}. The first argument is a simple expression, call or
-# object literal; the call may span lines.
-# A bracketed group nested at most two deep, each level bounded: makePayload(user), {id: f(x)}.
-_GROUP = r"[({](?:[^(){}\n]|[({][^(){}\n]{0,200}[)}]){0,200}[)}]"
-# Keyword arguments skipped before key= are bounded too, a [list] kept whole: algorithms=["HS256", "RS256"].
-_KWARG = r"[a-z_]\w{0,40}\s{0,40}=(?!=)(?:[^,(){}\[\]\n]|\[[^\[\](){}\n]{0,200}\]|%s){0,199},\s{0,40}" % _GROUP
-_JWT_KW = r"(?:key|secret|signing_key)\s{0,40}=\s{0,40}"
-JWT_KEY_LITERAL = re.compile(r"""(?i)(\b(?:jwt|jsonwebtoken|jose|jws)\.(?:sign|encode|verify|decode)\s{0,40}\(\s{0,40}"""
-                             r"""(?:(?:[^\s,(){}]|%s)(?:[^,(){}\n]|%s){0,199},\s{0,40}(?:(?:%s){0,4}%s)?|%s)(?:[rbfu]{1,2}(?=['"]))?)"""
-                             r"""(['"`])(?!(?<=`)[^`\n]{0,1024}\$\{)((?:\\.|(?!\2)[^\\\n]){1,1024})\2""" % (_GROUP, _GROUP, _KWARG, _JWT_KW, _JWT_KW))
-# A private key block: the header followed by a base64 body line (raw or \n-escaped).
-PEM_BODY_RE = re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[ \t]*(?:\r?\n|(?:\\r)?\\n)"
-                         r"(?:[\w-]+:[^\n\\]*(?:\r?\n|(?:\\r)?\\n))*[ \t]*[A-Za-z0-9+/]{16,}")
-CONFIG_SUFFIXES = {".yml", ".yaml", ".ini", ".cfg", ".conf", ".properties", ".toml", ".sh", ".bash", ".zsh"}
-
-
-def config_source(rel):
-    """Files whose unquoted `key=value` / `KEY: value` (also `export K=v`, `ENV K=v`) is a literal."""
-    name = Path(rel).name.lower()
-    return (Path(rel).suffix.lower() in CONFIG_SUFFIXES or name in {".envrc", "dockerfile", "containerfile"}
-            or name.startswith(("env.", "dockerfile.")) or name.endswith((".env", ".dockerfile")))
-
-
-def secret_value(value):
-    return len(value) >= 8 and not _NOT_SECRET.match(value) and not _PLAIN_VALUE.fullmatch(value)
-
-
-def secret_in_source(rel, text):
-    """True when a file would put a secret-looking value into shareable output."""
-    if sensitive_path(rel) or PEM_BODY_RE.search(text) or TOKEN_RE.search(text) or JWT_RE.search(text):
-        return True
-    # A literal signing key is a secret even when it reads like a word ("supersecret").
-    if any(m.group(3) and not _NOT_SECRET.match(m.group(3)) for m in JWT_KEY_LITERAL.finditer(text)):
-        return True
-    config = config_source(rel)
-    for line in text.split("\n"):
-        for run in _KEY_RUN.finditer(line):
-            name = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", run.group())
-            m = _SECRET_NAME.search(name) and _LITERAL_TAIL.match(line, run.end())
-            if not m or m["comma"] and (not m["q"] or _FIELD_NAME.fullmatch(m["v"])):
-                continue
-            if m["q"] == "`" and (Path(rel).suffix.lower() not in TEMPLATE_SUFFIXES or "${" in m["v"]):
-                continue  # a command substitution, or an interpolated template literal: an expression
-            if secret_value(m["v"] if m["q"] else m["bare"] if config else ""):
-                return True
-        # Userinfo, including a password with '/', '?' or '#', a quoted or
-        # percent-encoded one, and scheme-relative //user:pw@host URLs.
-        if has_url_credentials(line):
-            return True
-    return False
-
-
-_SECRETISH_RUN = re.compile(r"[A-Za-z0-9_+/-]{12,}={0,2}")
-_QUOTED_LITERAL = re.compile(r"""(['"])([^'"\s]{8,1024})\1""")
-
-
-def secrets_finding(finding):
-    return str(finding.get("category", "")).lower() == "secrets"
-
-
-def secret_candidate(text):
-    """A value that may be an unrecognised secret: a long token mixing letters
-    and digits (keys, hex, base64), an all-caps name-like token, or a quoted
-    literal that is not a placeholder, version, path or URL. Over-matching only
-    withholds an excerpt."""
-    for m in _SECRETISH_RUN.finditer(text):
-        token = m.group()
-        if (re.search(r"\d", token) and re.search(r"[A-Za-z]", token)
-                or "_" in token and token.upper() == token and re.search(r"[A-Z]", token)):
-            return True
-    return any(secret_value(m.group(2)) for m in _QUOTED_LITERAL.finditer(text) if "*" * 8 not in m.group(2))
 
 
 def source_base(url):
@@ -2545,6 +2095,11 @@ td .verification-level{font-family:var(--sans);font-size:11px;font-weight:400;co
 .app-shell .filters{grid-template-columns:minmax(0,2fr) repeat(4,minmax(0,1fr))}
 @media(max-width:1099px){.app-shell .filters{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:850px){.app-shell .filters{grid-template-columns:repeat(2,minmax(0,1fr))}}
+/* Confidence and validation cells hold one enumerated word each (Environment-dependent,
+   NotApplicable): wide enough to keep the longest whole, and where a column is narrower
+   (the mobile cards) broken at the hyphen before falling back to a mid-word break. */
+table.register>tbody>tr>td:nth-child(3),table.register>tbody>tr>td:nth-child(5){overflow-wrap:break-word}
+@media(min-width:851px){.app-shell table.register>thead>tr>th:nth-child(3){width:120px}.app-shell table.register>thead>tr>th:nth-child(5){width:116px}}
 """
 DASHBOARD = DASHBOARD.replace("__STYLE__", kit_style.dashboard_css() + DASHBOARD_CSS, 1)
 
