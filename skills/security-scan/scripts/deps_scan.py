@@ -90,7 +90,10 @@ CAT_BUILD = "Build and delivery"
 
 def printable(text):
     """Escape control/format characters so a location or title stays one line."""
-    return "".join(ch if ch.isprintable() else ascii(ch)[1:-1] for ch in str(text))
+    text = str(text)
+    if text.isprintable():  # The usual case: nothing to escape, same string.
+        return text
+    return "".join(ch if ch.isprintable() else ascii(ch)[1:-1] for ch in text)
 
 
 def safe_output(value):
@@ -98,7 +101,8 @@ def safe_output(value):
     if isinstance(value, str):
         # Undecodable file names arrive as surrogate escapes; keep them visible
         # as \udcXX text so the output is always valid UTF-8 JSON.
-        return redact_urls(value.encode("utf-8", "backslashreplace").decode("utf-8"))
+        # ASCII text has no surrogates and round-trips unchanged; skip the copy.
+        return redact_urls(value if value.isascii() else value.encode("utf-8", "backslashreplace").decode("utf-8"))
     if isinstance(value, list):
         return [safe_output(v) for v in value]
     if isinstance(value, dict):
