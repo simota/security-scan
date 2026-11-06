@@ -27,11 +27,12 @@ requested), 1 gate failed, 2 unreadable or invalid input or output.
 The comparison reads both records only; it writes nothing unless asked.
 """
 import argparse
+from functools import cached_property
 import json
 from pathlib import Path
 import sys
 
-from finding_keys import fingerprint, included, location, part, title_similarity
+from finding_keys import fingerprint, included, location, part, title_tokens, token_similarity
 from output_files import OutputError, shareable, write_file
 from report_schema import SEVERITIES, SchemaError, load
 
@@ -87,40 +88,73 @@ def read_record(path):
     return load(path)
 
 
+class _Keys:
+    """The values score() reads from one finding, each computed at most once.
+
+    Values are computed on first use, in the order score() reads them, so a
+    malformed finding raises where it always did. Findings are not modified
+    while they are compared.
+    """
+
+    def __init__(self, finding):
+        self.finding = finding
+
+    @cached_property
+    def part(self):
+        return part(self.finding)
+
+    @cached_property
+    def fingerprint(self):
+        return fingerprint(self.finding)
+
+    @cached_property
+    def location(self):
+        return location(self.finding)
+
+    @cached_property
+    def tokens(self):
+        return title_tokens(self.finding["title"])
+
+    @cached_property
+    def advisories(self):
+        return set(self.finding.get("advisory_ids") or [])
+
+
 def _deps_score(a, b):
     """Dependency findings are scanner-written: package and advisory, or file and title."""
-    adv_a = set(a.get("advisory_ids") or [])
-    adv_b = set(b.get("advisory_ids") or [])
-    if a.get("package") or b.get("package"):
-        if a.get("package") != b.get("package"):
+    adv_a = a.advisories
+    adv_b = b.advisories
+    package_a, package_b = a.finding.get("package"), b.finding.get("package")
+    if package_a or package_b:
+        if package_a != package_b:
             return 0.0
         if adv_a or adv_b:
             return 10.0 if adv_a & adv_b else 0.0
-    if location(a)[0] != location(b)[0]:
+    if a.location[0] != b.location[0]:
         return 0.0
-    return 10.0 if title_similarity(a["title"], b["title"]) >= 0.999 else 6.0 * title_similarity(a["title"], b["title"])
+    similarity = token_similarity(a.tokens, b.tokens)
+    return 10.0 if similarity >= 0.999 else 6.0 * similarity
 
 
-def score(a, b):
-    """How likely two findings from different runs describe the same root cause."""
-    if part(a) != part(b):
+def _score(a, b):
+    if a.part != b.part:
         return 0.0
-    if part(a) == "deps":
+    if a.part == "deps":
         return _deps_score(a, b)
-    if fingerprint(a) == fingerprint(b):
+    if a.fingerprint == b.fingerprint:
         return 20.0
-    path_a, start_a, _ = location(a)
-    path_b, start_b, _ = location(b)
-    similarity = title_similarity(a["title"], b["title"])
+    path_a, start_a, _ = a.location
+    path_b, start_b, _ = b.location
+    similarity = token_similarity(a.tokens, b.tokens)
     total = 0.0
     if path_a == path_b:
         total += 4.0
     elif similarity < 0.999:
         # Different files only match when the titles are the same words.
         return 0.0
-    if a.get("cwe") and b.get("cwe"):
-        total += 2.0 if a["cwe"] == b["cwe"] else -2.0
-    if a.get("category") == b.get("category"):
+    if a.finding.get("cwe") and b.finding.get("cwe"):
+        total += 2.0 if a.finding["cwe"] == b.finding["cwe"] else -2.0
+    if a.finding.get("category") == b.finding.get("category"):
         total += 1.0
     if path_a == path_b and start_a is not None and start_b is not None:
         distance = abs(start_a - start_b)
@@ -128,14 +162,80 @@ def score(a, b):
     return total + 4.0 * similarity
 
 
+def score(a, b):
+    """How likely two findings from different runs describe the same root cause."""
+    return _score(_Keys(a), _Keys(b))
+
+
+# Two different token sets reach a Jaccard similarity of 0.999 only when they
+# share at least this many tokens; smaller similar sets are equal sets.
+_SIMILAR_TOKENS = 999
+
+
+def _indexable(finding):
+    """A validated finding: the fields an index groups by have known types."""
+    if not isinstance(finding, dict) or not isinstance(finding.get("id"), str) \
+            or not isinstance(finding.get("title"), str):
+        return False
+    if part(finding) == "code":
+        return True
+    advisories = finding.get("advisory_ids")
+    return (finding.get("package") is None or isinstance(finding["package"], str)) and (
+        advisories is None or isinstance(advisories, list) and all(isinstance(a, str) for a in advisories))
+
+
+def _labels(keys):
+    """The groups one finding belongs to; only findings sharing one can score above zero.
+
+    A code pair scores above zero only with the same fingerprint, the same
+    file or near-identical title tokens; a dependency pair only with the same
+    package or the same file.
+    """
+    if keys.part == "code":
+        labels = [("fingerprint", keys.fingerprint), ("path", keys.location[0])]
+        if keys.tokens:
+            labels.append(("tokens", frozenset(keys.tokens)))
+        if len(keys.tokens) >= _SIMILAR_TOKENS:
+            labels.append(("many tokens", None))
+        return labels
+    labels = [("deps path", keys.location[0])]
+    if keys.finding.get("package"):
+        labels.append(("package", keys.finding["package"]))
+    return labels
+
+
+def _candidate_pairs(base_keys, cur_keys):
+    """Every (i, j) whose score can be above zero; the rest score 0.0.
+
+    Pairs are produced per baseline finding, so memory stays bounded by one
+    finding's candidates rather than by every pair.
+    """
+    index = {}
+    for j, keys in enumerate(cur_keys):
+        for label in _labels(keys):
+            index.setdefault(label, []).append(j)
+    for i, keys in enumerate(base_keys):
+        members = set()
+        for label in _labels(keys):
+            members.update(index.get(label, ()))
+        for j in sorted(members):
+            yield i, j
+
+
 def match(baseline, current):
     """Greedy one-to-one pairing by descending score; ties broken by IDs for determinism."""
+    base_keys = [_Keys(f) for f in baseline]
+    cur_keys = [_Keys(f) for f in current]
+    if all(map(_indexable, baseline)) and all(map(_indexable, current)):
+        scored = _candidate_pairs(base_keys, cur_keys)
+    else:
+        # Unvalidated extension values: score every pair, as before.
+        scored = ((i, j) for i in range(len(baseline)) for j in range(len(current)))
     candidates = []
-    for i, a in enumerate(baseline):
-        for j, b in enumerate(current):
-            s = score(a, b)
-            if s >= MATCH_THRESHOLD:
-                candidates.append((-s, a["id"], b["id"], i, j))
+    for i, j in scored:
+        s = _score(base_keys[i], cur_keys[j])
+        if s >= MATCH_THRESHOLD:
+            candidates.append((-s, baseline[i]["id"], current[j]["id"], i, j))
     candidates.sort()
     used_a, used_b, pairs = set(), set(), []
     for neg, _, _, i, j in candidates:
