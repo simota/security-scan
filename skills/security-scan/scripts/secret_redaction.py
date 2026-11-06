@@ -42,7 +42,10 @@ def sensitive_path(path):
 
 
 _KEY_RUN = re.compile(r"[\w.-]+")
-_KEY = re.compile(r"(?i)password|passwd|secret|token|api[_-]?key|private[_-]?key|access[_-]?key|credential")
+# Every alternative starts with p, s, t, a or c. The zero-width lookahead lets the
+# engine skip other positions quickly; under IGNORECASE the class matches exactly
+# the characters those literals match (including U+017F), so matches are unchanged.
+_KEY = re.compile(r"(?i)(?=[pstac])(?:password|passwd|secret|token|api[_-]?key|private[_-]?key|access[_-]?key|credential)")
 # Short names count only as a whole name segment: `pass=`, `db_pwd:` but not `bypass` or `passed`.
 _KEY_END = re.compile(r"(?i)(?:^|[_.-])(?:pass|pwd|passphrase)$")
 # Every tail allows the key's closing quote, and after it a closing subscript
@@ -84,14 +87,16 @@ def _sub_keyed(line, tail, repl):
 
 # Every keyed step below needs a _KEY match or a run ending in _KEY_END; both
 # imply one of these substrings (same case folding), so a line without any is
-# returned unchanged by those steps.
-_KEY_HINT = re.compile(r"(?i)pass|pwd|secret|token|api[_-]?key|private[_-]?key|access[_-]?key|credential")
+# returned unchanged by those steps. The lookahead is the same as _KEY's.
+_KEY_HINT = re.compile(r"(?i)(?=[pstac])(?:pass|pwd|secret|token|api[_-]?key|private[_-]?key|access[_-]?key|credential)")
 
 
 def redact(line):
     line = redact_urls(line)
     # Recognizable credentials are masked wherever they appear, keyed or not.
-    line = JWT_RE.sub("********", TOKEN_RE.sub("********", line))
+    line = TOKEN_RE.sub("********", line)
+    if "eyJ" in line:  # JWT_RE requires this literal; skip the scan otherwise.
+        line = JWT_RE.sub("********", line)
     line = JWT_KEY_LITERAL.sub(_mask_jwt_key, line)
     if not _KEY_HINT.search(line):
         return line
@@ -141,7 +146,10 @@ _AUTH_CTX = r"(?i:authorization)[\"']?[ \t]*\]?[ \t]*(?:=>|[:=,])(?:[ \t]*[|>][-
 _AUTH_END = r"""(?:[ \t]*(?:[\r\n]|$)|["'`,)}\]\\])"""
 _AUTH_TOKEN = (r"(?!(?:(?P<c>[\w.~+/-])(?P=c)*|[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+|(?i:(?:your|my)?[_-]?token))=*" + _AUTH_END
                + r")[\w.~+/-]{4,}=*(?=" + _AUTH_END + ")")
-TOKEN_RE = re.compile(r"\b(?:gh[opsu]_[A-Za-z0-9]{36,}|github_pat_\w{22,}|A(?:KIA|SIA)[0-9A-Z]{16}"
+# Each alternative starts with one of the lookahead's characters (bearer/basic/
+# authorization case-insensitively); the zero-width lookahead only lets the engine
+# skip other positions quickly, so matches are unchanged.
+TOKEN_RE = re.compile(r"\b(?=[AaBbdghnrSsx\d])(?:gh[opsu]_[A-Za-z0-9]{36,}|github_pat_\w{22,}|A(?:KIA|SIA)[0-9A-Z]{16}"
                       r"|xox[abprse]-[A-Za-z0-9-]{10,}|[sr]k_(?:live|test)_[A-Za-z0-9]{16,}|glpat-[\w-]{20,}"
                       r"|AIza[\w-]{35}|sk-(?:proj|ant|svcacct|admin)-[\w-]{20,}|sk-[A-Za-z0-9]{32,}"
                       r"|npm_[A-Za-z0-9]{36}|hf_[A-Za-z0-9]{30,}|SG\.[\w-]{16,}\.[\w-]{16,}"

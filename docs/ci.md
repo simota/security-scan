@@ -220,10 +220,11 @@ individual finding is ready for a fix.
 
 ## Offline performance comparisons
 
-`scripts/ci/benchmark_performance.py` measures eight synthetic workloads: workspace
+`scripts/ci/benchmark_performance.py` measures nine synthetic workloads: workspace
 lock discovery, shared source excerpts, both structured-verification HTML reports,
 dependency triage without a source-reference model, reports with live evidence
-results, and OSV result parsing with distinct groups, alias pairs, or no groups.
+results, OSV result parsing with distinct groups, alias pairs, or no groups, and a
+`compare.py` rescan comparison (skipped for revisions without `compare.py`).
 OSV and triage findings are generated in memory; the benchmark does not run an
 auditor or query a service. The report fixtures repeat a finding from the existing
 verification sample and never run its recorded commands or print PDFs.
@@ -235,7 +236,10 @@ integrity fixture writes inert artifacts and checks their bytes before timing th
 reports. It supplies no Git repository, so source revision checks remain explicitly
 incomplete. `--triage-source-files`, `--triage-findings`, `--integrity-evidence`
 (5–512) and `--integrity-findings` control these fixture sizes; `--source-lines`
-also controls each triage source file's length.
+also controls each triage source file's length. The rescan comparison pairs two
+validated records of `--compare-findings` code findings (default 300) with line
+drift, reworded titles, new findings and findings the later run does not report,
+and times `compare.compare()` with a `High` gate; it writes no files.
 
 Run the same harness against each revision's scripts, sequentially on the same
 machine. For example, compare a local base worktree with the current checkout:

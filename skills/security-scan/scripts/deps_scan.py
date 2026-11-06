@@ -90,7 +90,10 @@ CAT_BUILD = "Build and delivery"
 
 def printable(text):
     """Escape control/format characters so a location or title stays one line."""
-    return "".join(ch if ch.isprintable() else ascii(ch)[1:-1] for ch in str(text))
+    text = str(text)
+    if text.isprintable():  # The usual case: nothing to escape, same string.
+        return text
+    return "".join(ch if ch.isprintable() else ascii(ch)[1:-1] for ch in text)
 
 
 def safe_output(value):
@@ -98,7 +101,8 @@ def safe_output(value):
     if isinstance(value, str):
         # Undecodable file names arrive as surrogate escapes; keep them visible
         # as \udcXX text so the output is always valid UTF-8 JSON.
-        return redact_urls(value.encode("utf-8", "backslashreplace").decode("utf-8"))
+        # ASCII text has no surrogates and round-trips unchanged; skip the copy.
+        return redact_urls(value if value.isascii() else value.encode("utf-8", "backslashreplace").decode("utf-8"))
     if isinstance(value, list):
         return [safe_output(v) for v in value]
     if isinstance(value, dict):
@@ -114,25 +118,41 @@ def safe_file(path, root=None):
     """
     path = Path(path)
     try:
-        if root is not None:
-            # Keep the existing lexical normalization before checking the file.
-            path = Path(os.path.abspath(path))
+        # Keep the existing lexical normalization before checking the file.
+        candidate = os.path.abspath(path) if root is not None else path
         # Workspace discovery probes many absent lockfile names. Reject missing
-        # and non-regular candidates before resolving and checking each ancestor.
-        if not stat.S_ISREG(os.lstat(path).st_mode):
+        # and non-regular candidates before resolving and checking each ancestor
+        # (or building a second Path object for them).
+        if not stat.S_ISREG(os.lstat(candidate).st_mode):
             return False
         if root is not None:
+            path = Path(candidate)
             root = Path(root).resolve()
-            parts = path.relative_to(root).parts
-            current = root
-            for part in parts:
-                current /= part
-                if current.is_symlink():
+            # Every ancestor below the root is still checked with lstat; plain
+            # strings avoid building one Path object per component. An lstat
+            # error rejects the file, as pathlib's is_symlink() did before 3.13.
+            current = str(root)
+            for part in _relative_parts(path, root):
+                current = os.path.join(current, part)
+                if stat.S_ISLNK(os.lstat(current).st_mode):
                     return False
-            path.resolve(strict=True).relative_to(root)
+            _relative_parts(path.resolve(strict=True), root)
         return not path.is_symlink() and path.is_file()
     except (OSError, ValueError, RuntimeError):
         return False
+
+
+def _relative_parts(path, root):
+    """``path.relative_to(root).parts`` for an absolute path and resolved root.
+
+    The common case is a lexical prefix test; anything else (the root itself,
+    the filesystem root, a path outside it) keeps pathlib's own semantics and
+    its ValueError.
+    """
+    text, prefix = str(path), str(root)
+    if prefix != os.sep and text.startswith(prefix + os.sep) and os.sep * 2 not in text[len(prefix):]:
+        return text[len(prefix) + 1:].split(os.sep)
+    return path.relative_to(root).parts
 
 
 def audit_input(c, root, path, companions=()):

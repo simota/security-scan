@@ -140,6 +140,28 @@ def integrity_fixture(render, integrity, root, findings, evidence_count):
     return document, integrity.verify_evidence(document, root)
 
 
+def comparison_fixture(render, count):
+    """Two validated rescans: line drift, reworded titles, new and unreported findings."""
+    words = ("tenant", "order", "export", "session", "token", "upload", "query", "redirect")
+
+    def finding(index, line, reworded=False):
+        title = "%s check missing in handler %d" % (words[index % len(words)].capitalize(), index)
+        return {"id": "F-%04d" % (index + 1), "severity": ("High", "Medium", "Low")[index % 3],
+                "confidence": "Suspected", "category": "Category %d" % (index % 7),
+                "title": title + (" (revised)" if reworded else ""),
+                "location": "src/module_%03d.py:%d" % (index // 4, line)}
+
+    meta = {"project": "benchmark", "date": "2026-01-01"}
+    baseline = [finding(index, 10 + index % 40) for index in range(count)]
+    current = [finding(index, 12 + index % 40, reworded=index % 5 == 0)
+               for index in range(count) if index % 10 != 9]
+    current += [finding(count + index, 5) for index in range(count // 10)]
+    for number, record in enumerate(current, 1):
+        record["id"] = "F-%04d" % number
+    return tuple(render.validate_data({"meta": meta, "findings": findings, "perspectives": []})
+                 for findings in (baseline, current))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scripts-dir", type=Path,
@@ -155,6 +177,7 @@ def main(argv=None):
     parser.add_argument("--triage-source-files", type=positive_int, default=600)
     parser.add_argument("--integrity-findings", type=positive_int, default=200)
     parser.add_argument("--integrity-evidence", type=positive_int, default=500)
+    parser.add_argument("--compare-findings", type=positive_int, default=300)
     args = parser.parse_args(argv)
     scripts = args.scripts_dir.resolve()
     for name in ("deps_scan.py", "render.py"):
@@ -164,6 +187,8 @@ def main(argv=None):
     import deps_scan
     import render
     import evidence_integrity
+    # Revisions before compare.py existed have no rescan comparison to measure.
+    compare = __import__("compare") if (scripts / "compare.py").is_file() else None
 
     with tempfile.TemporaryDirectory(prefix="security-scan-benchmark-") as temporary:
         base = Path(temporary).resolve()
@@ -238,6 +263,14 @@ def main(argv=None):
                 "vulnerability_records": args.osv_records,
                 "groups": len(payload["results"][0]["packages"][0]["groups"]),
                 **measure(lambda: copy.deepcopy(payload), advisories, args.repeats),
+            }
+        if compare is not None:
+            comparison = comparison_fixture(render, args.compare_findings)
+            result["workloads"]["rescan_comparison"] = {
+                "baseline_findings": len(comparison[0]["findings"]),
+                "current_findings": len(comparison[1]["findings"]),
+                **measure(lambda: copy.deepcopy(comparison),
+                          lambda pair: compare.compare(pair[0], pair[1], "High"), args.repeats),
             }
     print(json.dumps(result, indent=2))
     return 0

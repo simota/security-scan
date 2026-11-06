@@ -108,9 +108,16 @@ def redact_urls(text):
     # Every pattern below needs a ':' (scheme or userinfo) or a '%' (encoded ':').
     if ":" not in text and "%" not in text:
         return text
-    text = QUOTED_USERINFO_RE.sub("[redacted URL]", text)
-    text = SCHEMELESS_USERINFO_RE.sub("//", text)
+    # QUOTED_USERINFO_RE, SCHEMELESS_USERINFO_RE and URL_RE each need '//' or an
+    # escaped '\/'. ENCODED_URL_RE cannot create either (it keeps a match or
+    # replaces it with bracketed text), so text without them skips those scans.
+    slashes = "//" in text or "\\/" in text
+    if slashes:
+        text = QUOTED_USERINFO_RE.sub("[redacted URL]", text)
+        text = SCHEMELESS_USERINFO_RE.sub("//", text)
     text = ENCODED_URL_RE.sub(lambda m: "[redacted URL]" if _encoded_secret(m.group()) else m.group(), text)
+    if not slashes:
+        return text
 
     def clean(match):
         prefix, token = match.group("prefix"), match.group("url")

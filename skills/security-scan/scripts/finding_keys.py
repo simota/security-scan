@@ -57,7 +57,11 @@ def title_tokens(text):
 
 def title_similarity(a, b):
     """Jaccard similarity of title tokens, 0.0-1.0."""
-    left, right = title_tokens(a), title_tokens(b)
+    return token_similarity(title_tokens(a), title_tokens(b))
+
+
+def token_similarity(left, right):
+    """title_similarity() for token sets already computed by title_tokens()."""
     if not left or not right:
         return 0.0
     return len(left & right) / len(left | right)
