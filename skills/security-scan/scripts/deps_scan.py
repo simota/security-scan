@@ -3284,13 +3284,19 @@ def merge_into(path, result, audit=None):
     old = [f for f in data.get("findings", []) if str(f.get("id", "")).startswith("D-")]
     # Never silently reuse a reachability decision after code/config changes.
     # Keep a matching review as history, requiring revalidation on every scan.
-    kept = {}
+    kept, decided = {}, {}
     for f in old:
+        # Triage (status, owner, risk acceptance) is a remediation decision, not a
+        # reachability review: it stays with the same package and advisory.
+        if isinstance(f.get("triage"), dict):
+            decided[finding_key(f)] = (f.get("status", "Open"), f["triage"])
         val = f.get("validation") if isinstance(f.get("validation"), dict) else {}
         previous = val if val and val.get("method") != "auto" else f.get("previous_validation")
         if previous:
             kept[finding_key(f)] = previous
     for f in result["findings"]:
+        if finding_key(f) in decided:
+            f["status"], f["triage"] = decided[finding_key(f)]
         previous = kept.get(finding_key(f))
         if previous:
             f["previous_validation"] = previous

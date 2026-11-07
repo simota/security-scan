@@ -2,7 +2,7 @@
 """Compare two assessments of the same application: what is new, what persists, what is gone.
 
     python3 compare.py BASELINE CURRENT [--json OUT] [--markdown OUT] [--lang en|ja]
-                       [--fail-on High|Medium|Low|Info]
+                       [--fail-on High|Medium|Low|Info] [--as-of YYYY-MM-DD]
 
 BASELINE and CURRENT are findings.json files (or the output directories that
 hold them) from two independent runs, typically before and after a round of
@@ -22,11 +22,16 @@ are `ruled_out`.
 With `--fail-on SEVERITY` the exit code is 1 when any new or reopened
 finding at that severity or above is still open, or a persisting open
 finding there was raised into that range or recorded Fixed before (a
-regressed fix), which lets CI hold a change that introduces one. Exit codes: 0 compared (gate passed or not
+regressed fix), which lets CI hold a change that introduces one. An
+`Accepted` finding whose recorded review date (triage.py) has passed by
+`--as-of` (default today, UTC) counts as open, and a persisting finding whose
+acceptance has expired blocks at its severity, so a risk acceptance cannot
+outlive its review date unnoticed. Exit codes: 0 compared (gate passed or not
 requested), 1 gate failed, 2 unreadable or invalid input or output.
 The comparison reads both records only; it writes nothing unless asked.
 """
 import argparse
+import datetime
 from functools import cached_property
 import json
 from pathlib import Path
@@ -34,7 +39,7 @@ import sys
 
 from finding_keys import fingerprint, included, location, part, title_tokens, token_similarity
 from output_files import OutputError, shareable, write_file
-from report_schema import SEVERITIES, SchemaError, load
+from report_schema import SEVERITIES, SchemaError, acceptance_expired, iso_date, load
 
 RANK = {s: i for i, s in enumerate(SEVERITIES)}
 TRACKED = ("severity", "confidence", "verdict", "status")
@@ -58,6 +63,9 @@ LABELS = {
         "match_note": "Findings are matched by part, file, weakness class, line proximity and title, not by ID.",
         "project_mismatch": "The two records name different projects ({a} / {b}); check that they assess the same system.",
         "regressed": "{n} persisting finding(s) were recorded Fixed in the baseline and are open again.",
+        "expired": "{n} finding(s) carry a risk acceptance whose review date has passed (as of {date}); "
+                   "they count as open until a new decision is recorded.",
+        "col_owner": "Owner",
     },
     "ja": {
         "title": "診断結果の比較", "baseline": "前回", "current": "今回",
@@ -75,6 +83,8 @@ LABELS = {
         "match_note": "指摘は ID ではなく、区分・ファイル・脆弱性の種類・行の近さ・タイトルで対応付けています。",
         "project_mismatch": "2 つの記録の対象プロジェクト名が異なります（{a} / {b}）。同じシステムの診断か確認してください。",
         "regressed": "前回 Fixed と記録された指摘のうち {n} 件が、今回再び未対応として報告されています。",
+        "expired": "見直し期限（{date} 時点）を過ぎたリスク受容が {n} 件あります。新しい判断を記録するまで未対応として扱います。",
+        "col_owner": "担当",
     },
 }
 
@@ -248,11 +258,15 @@ def match(baseline, current):
 
 
 def brief(finding):
-    return {"id": finding["id"], "part": part(finding), "severity": finding["severity"],
-            "confidence": finding["confidence"], "verdict": finding["verdict"], "status": finding["status"],
-            "title": shareable(finding["title"]), "location": shareable(finding["location"]),
-            "category": finding.get("category", ""), "cwe": finding.get("cwe", ""),
-            "fingerprint": fingerprint(finding)}
+    entry = {"id": finding["id"], "part": part(finding), "severity": finding["severity"],
+             "confidence": finding["confidence"], "verdict": finding["verdict"], "status": finding["status"],
+             "title": shareable(finding["title"]), "location": shareable(finding["location"]),
+             "category": finding.get("category", ""), "cwe": finding.get("cwe", ""),
+             "fingerprint": fingerprint(finding)}
+    triage = finding.get("triage")
+    if isinstance(triage, dict):
+        entry["triage"] = {k: shareable(triage[k]) for k in ("owner", "review_by", "ticket") if triage.get(k)}
+    return entry
 
 
 def checked_perspectives(data):
@@ -264,8 +278,10 @@ def checked_perspectives(data):
     return checked
 
 
-def compare(base_data, current_data, fail_on=None):
+def compare(base_data, current_data, fail_on=None, as_of=None):
+    as_of = as_of or datetime.datetime.now(datetime.timezone.utc).date()
     base, cur = base_data["findings"], current_data["findings"]
+    expired = set()
     pairs = match(base, cur)
     matched_base = {i: (j, s) for i, j, s in pairs}
     matched_cur = {j: i for i, j, _ in pairs}
@@ -277,11 +293,19 @@ def compare(base_data, current_data, fail_on=None):
                 result["reopened"].append({**brief(f), "baseline_id": old["id"]})
             elif included(f):
                 changes = {k: {"from": old[k], "to": f[k]} for k in TRACKED if old[k] != f[k]}
-                result["persisting"].append({**brief(f), "baseline_id": old["id"], "changes": changes})
+                entry = {**brief(f), "baseline_id": old["id"], "changes": changes}
+                # Expired now, or expired in the baseline and not decided again since.
+                if acceptance_expired(f, as_of) or (acceptance_expired(old, as_of) and f["status"] == "Open"):
+                    entry["acceptance_expired"] = True
+                    expired.add(f["id"])
+                result["persisting"].append(entry)
             elif included(old):
                 result["ruled_out"].append({**brief(f), "baseline_id": old["id"]})
         elif included(f):
             result["new"].append(brief(f))
+            if acceptance_expired(f, as_of):
+                result["new"][-1]["acceptance_expired"] = True
+                expired.add(f["id"])
     checked = checked_perspectives(current_data)
     for i, f in enumerate(base):
         if i not in matched_base and included(f):
@@ -294,15 +318,17 @@ def compare(base_data, current_data, fail_on=None):
         # Escalated into the gated range, or recorded Fixed before and open again (a regressed fix).
         raised = [f for f in result["persisting"]
                   if ("severity" in f["changes"] and RANK[f["changes"]["severity"]["from"]] > limit)
-                  or f["changes"].get("status", {}).get("from") == "Fixed"]
+                  or f["changes"].get("status", {}).get("from") == "Fixed" or f.get("acceptance_expired")]
+        # An acceptance past its review date no longer holds: the finding counts as open.
         blocking = [f["id"] for f in result["new"] + result["reopened"] + raised
-                    if RANK[f["severity"]] <= limit and f["status"] == "Open"]
+                    if RANK[f["severity"]] <= limit and (f["status"] == "Open" or f["id"] in expired)]
         gate = {"fail_on": fail_on, "passed": not blocking, "blocking": blocking}
     def meta(data):
         m = data["meta"]
         return {k: shareable(m.get(k, "")) for k in ("project", "date", "commit", "assessor")}
     summary = {k: len(v) for k, v in result.items()}
     summary["changed"] = sum(1 for f in result["persisting"] if f["changes"])
+    summary["acceptance_expired"] = len(expired)
     summary["regressed"] = sum(1 for f in result["persisting"]
                                if f["changes"].get("status", {}).get("from") == "Fixed" and f["status"] == "Open")
     summary["fixed_recorded"] = sum(1 for f in result["persisting"] if f["status"] == "Fixed")
@@ -310,7 +336,7 @@ def compare(base_data, current_data, fail_on=None):
                                      and RANK[f["changes"]["severity"]["to"]] < RANK[f["changes"]["severity"]["from"]])
     summary["severity_lowered"] = sum(1 for f in result["persisting"] if "severity" in f["changes"]
                                       and RANK[f["changes"]["severity"]["to"]] > RANK[f["changes"]["severity"]["from"]])
-    return {"comparison_version": 1, "baseline": meta(base_data), "current": meta(current_data),
+    return {"comparison_version": 1, "as_of": as_of.isoformat(), "baseline": meta(base_data), "current": meta(current_data),
             "summary": summary, "gate": gate, **result}
 
 
@@ -336,6 +362,8 @@ def markdown(report, lang="en"):
               "", L["match_note"]]
     if s["regressed"]:
         lines += ["", "> " + L["regressed"].format(n=s["regressed"])]
+    if s["acceptance_expired"]:
+        lines += ["", "> " + L["expired"].format(n=s["acceptance_expired"], date=report["as_of"])]
     gate = report["gate"]
     if gate:
         text = (L["gate_pass"].format(sev=gate["fail_on"]) if gate["passed"]
@@ -358,7 +386,10 @@ def markdown(report, lang="en"):
     table("reopened", base_cols + [("col_was", lambda f: f["baseline_id"])], report["reopened"])
 
     def changes(f):
-        return ", ".join(f"{k}: {v['from']} → {v['to']}" for k, v in f["changes"].items()) or "—"
+        text = [f"{k}: {v['from']} → {v['to']}" for k, v in f["changes"].items()]
+        if f.get("acceptance_expired"):
+            text.append("acceptance expired")
+        return ", ".join(text) or "—"
     table("persisting", base_cols + [("col_was", lambda f: f["baseline_id"]), ("col_change", changes)],
           report["persisting"])
     table("not_reported", base_cols + [("col_note", lambda f: L["checked"] if f["perspective_checked"]
@@ -379,14 +410,16 @@ def main(argv=None):
     p.add_argument("--lang", choices=sorted(LABELS), default="en")
     p.add_argument("--fail-on", choices=SEVERITIES,
                    help="exit 1 when an open new, reopened, escalated or regressed finding is at this severity or above")
+    p.add_argument("--as-of", dest="as_of", help="date that decides whether an acceptance has expired (default: today, UTC)")
     args = p.parse_args(argv)
     try:
+        as_of = iso_date(args.as_of, "--as-of") if args.as_of else None
         base = read_record(args.baseline)
         cur = read_record(args.current)
     except (SchemaError, OSError) as exc:
         print(f"compare: {exc}", file=sys.stderr)
         return 2
-    report = compare(base, cur, args.fail_on)
+    report = compare(base, cur, args.fail_on, as_of)
     text = markdown(report, args.lang)
     try:
         if args.json_out:

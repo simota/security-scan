@@ -5,6 +5,7 @@ evidence_capture.py, expert_audit.py, scan_run.py) and by render.py, so a
 record tool never has to load the renderer to check its input.
 Standard library only.
 """
+import datetime
 import json
 import math
 import re
@@ -26,6 +27,11 @@ EXCLUDED = {"FalsePositive", "NotApplicable"}
 # ASCII digits only, no trailing newline: the number becomes part of a link.
 CWE_RE = re.compile(r"CWE-[0-9]{1,5}")
 LOC_RE = re.compile(r"^(?P<path>[^:]+):(?P<start>\d+)(?:-(?P<end>\d+))?$")
+DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+# A finding's recorded triage decision (triage.py). Single-line labels; reason may span lines.
+TRIAGE_LINES = ("owner", "decided", "review_by", "ticket")
+TRIAGE_FIELDS = {"status", "reason", *TRIAGE_LINES}
+CARRIED_FIELDS = {"baseline_id", "date", "project"}
 
 
 class SchemaError(Exception):
@@ -54,6 +60,82 @@ def http_url(value, field="url"):
     except ValueError:
         raise SchemaError(f"{field}: must be an absolute http(s) URL without credentials") from None
     return value
+
+
+def iso_date(value, field):
+    """A calendar date written YYYY-MM-DD; returned as datetime.date."""
+    if not isinstance(value, str) or not DATE_RE.fullmatch(value):
+        raise SchemaError(f"{field}: must be a YYYY-MM-DD date")
+    try:
+        return datetime.date.fromisoformat(value)
+    except ValueError:
+        raise SchemaError(f"{field}: not a calendar date") from None
+
+
+def _triage_entry(entry, where, status=None):
+    """One decision: the current `triage` object or one `history` entry."""
+    if not isinstance(entry, dict):
+        raise SchemaError(f"{where}: must be an object")
+    for key in TRIAGE_FIELDS:
+        text_field(entry, key, where, required=key in ("status", "decided"))
+    for key in TRIAGE_LINES:
+        if any(invisible_or_control(ch) for ch in entry.get(key, "")):
+            raise SchemaError(f"{where}.{key}: must be one line without control characters")
+    if entry["status"] not in STATUSES:
+        raise SchemaError(f"{where}.status: one of {STATUSES}")
+    if status is not None and entry["status"] != status:
+        raise SchemaError(f"{where}.status: {entry['status']} does not match the finding's status {status}; "
+                          "record status changes with triage.py")
+    decided = iso_date(entry["decided"], f"{where}.decided")
+    if entry["status"] in ("Accepted", "Fixed") and not entry.get("reason", "").strip():
+        raise SchemaError(f"{where}.reason: required when status is {entry['status']}")
+    if entry.get("review_by"):
+        if iso_date(entry["review_by"], f"{where}.review_by") < decided:
+            raise SchemaError(f"{where}.review_by: earlier than decided")
+    elif entry["status"] == "Accepted":
+        raise SchemaError(f"{where}.review_by: required when status is Accepted")
+    if entry.get("ticket"):
+        http_url(entry["ticket"], f"{where}.ticket")
+    carried = entry.get("carried_from")
+    if carried is not None:
+        if not isinstance(carried, dict) or carried.keys() - CARRIED_FIELDS:
+            raise SchemaError(f"{where}.carried_from: object with {sorted(CARRIED_FIELDS)}")
+        for key in CARRIED_FIELDS:
+            text_field(carried, key, f"{where}.carried_from", required=key == "baseline_id")
+
+
+def validate_triage(finding, where):
+    """`triage` records who decided what about a finding, why and until when.
+
+    It is a workflow record, not evidence: it never changes a verdict,
+    confidence or derived verification state.
+    """
+    if "triage" not in finding:
+        return
+    triage = finding["triage"]
+    where = f"{where}.triage"
+    if not isinstance(triage, dict):
+        raise SchemaError(f"{where}: must be an object")
+    unknown = triage.keys() - TRIAGE_FIELDS - {"carried_from", "history"}
+    if unknown:
+        raise SchemaError(f"{where}: unsupported fields {sorted(unknown)}")
+    _triage_entry(triage, where, finding["status"])
+    history = triage.get("history", [])
+    if not isinstance(history, list):
+        raise SchemaError(f"{where}.history: must be a list")
+    for i, entry in enumerate(history):
+        if isinstance(entry, dict) and entry.keys() - TRIAGE_FIELDS - {"carried_from"}:
+            raise SchemaError(f"{where}.history[{i}]: unsupported fields "
+                              f"{sorted(entry.keys() - TRIAGE_FIELDS - {'carried_from'})}")
+        _triage_entry(entry, f"{where}.history[{i}]")
+
+
+def acceptance_expired(finding, as_of):
+    """An Accepted finding whose recorded review date has passed (as_of: datetime.date)."""
+    triage = finding.get("triage")
+    if finding.get("status") != "Accepted" or not isinstance(triage, dict) or not triage.get("review_by"):
+        return False
+    return datetime.date.fromisoformat(triage["review_by"]) < as_of
 
 
 def text_field(obj, key, where, *, required=False, default=""):
@@ -180,6 +262,7 @@ def validate_data(data):
         f["status"] = text_field(f, "status", where, default="Open")
         if f["status"] not in STATUSES:
             raise SchemaError(f"{where}.status: one of {STATUSES}")
+        validate_triage(f, where)
         for k in ("category", "actor", "request", "impact", "fix"):
             f[k] = text_field(f, k, where)
         if "cwe" in f:

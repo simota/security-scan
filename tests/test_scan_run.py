@@ -65,6 +65,24 @@ class ScanRunTests(unittest.TestCase):
             "limitations": ["invariant ledger and close-check not machine-checked (no invariant_ledger opt-in)"]})
         self.assertEqual(self.cli("merge", self.root, fragment).returncode, 0)
 
+    def test_triage_step_records_decisions_through_a_staged_publication(self):
+        finding = {"id": "F-001", "title": "Order detail lacks a tenant check", "severity": "High",
+                   "confidence": "Confirmed", "location": "app.py:2", "category": "Actor and tenant"}
+        self.assertEqual(self.cli("merge", self.root, self.fragment("f.json", {"findings": [finding]})).returncode, 0)
+        decisions = self.fragment("decisions.json", {"decisions": [
+            {"id": "F-001", "status": "Accepted", "reason": "internal tool only", "review_by": "2099-01-01"}]})
+        result = self.cli("triage", self.root, decisions)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        recorded = json.loads((self.out / "findings.json").read_text())["findings"][0]
+        self.assertEqual((recorded["status"], recorded["triage"]["review_by"]), ("Accepted", "2099-01-01"))
+        self.assertEqual(self.state()["history"][-1]["step"], "triage")
+        # A refused decision publishes nothing.
+        before = (self.out / "findings.json").read_bytes()
+        refused = self.cli("triage", self.root, self.fragment("bad.json", {"decisions": [
+            {"id": "F-001", "status": "Fixed"}]}))
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertEqual((self.out / "findings.json").read_bytes(), before)
+
     def test_finish_continues_after_offline_and_pdf_omissions_through_contract_check(self):
         self.prepare_report()
         finished = self.cli("finish", self.root, "--no-pdf")

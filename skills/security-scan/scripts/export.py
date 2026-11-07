@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Export findings.json to the formats other tools consume: SARIF, CSV and issue drafts.
 
-    python3 export.py sarif  FINDINGS --out results.sarif [--include-fixed] [--id ID ...]
+    python3 export.py sarif  FINDINGS --out results.sarif [--include-fixed] [--as-of YYYY-MM-DD] [--id ID ...]
     python3 export.py csv    FINDINGS --out findings.csv  [--bom] [--id ID ...]
     python3 export.py issues FINDINGS --out DIR [--lang en|ja] [--all] [--id ID ...]
 
@@ -12,10 +12,13 @@ FINDINGS is a findings.json file or the output directory holding it.
   and `security-severity` from the severity, and a run-independent
   `partialFingerprints` entry so an alert follows its finding across rescans.
   Ruled-out findings are emitted as suppressed results and `Accepted` ones as
-  accepted suppressions; `Fixed` findings are left out unless
+  accepted suppressions carrying the recorded triage reason, owner and review
+  date; an acceptance past its review date (`--as-of`, default today, UTC) is
+  emitted unsuppressed so the alert returns. `Fixed` findings are left out unless
   `--include-fixed`. A finding whose location is not a relative `path:line`
   is not emitted (named on stderr), since code scanning needs a file.
-- `csv` writes one row per finding for trackers and spreadsheets. Cells that
+- `csv` writes one row per finding for trackers and spreadsheets, including
+  the triage owner, review date, ticket and decision reason. Cells that
   a spreadsheet would read as a formula are prefixed with `'`.
 - `issues` writes one Markdown issue draft per open, included finding (all
   included findings with `--all`) following `templates/issue.<lang>.md`, plus
@@ -31,6 +34,7 @@ an unknown `--id`.
 """
 import argparse
 import csv
+import datetime
 import io
 import json
 import re
@@ -40,7 +44,7 @@ from urllib.parse import quote
 
 from finding_keys import fingerprint, included, location, part, rule_id
 from output_files import OutputError, check_target, shareable, write_file
-from report_schema import SchemaError, load
+from report_schema import SchemaError, acceptance_expired, iso_date, load
 
 TOOL_URI = "https://github.com/simota/security-scan"
 SARIF_LEVEL = {"High": "error", "Medium": "warning", "Low": "note", "Info": "note"}
@@ -48,12 +52,13 @@ SARIF_LEVEL = {"High": "error", "Medium": "warning", "Low": "note", "Info": "not
 SECURITY_SEVERITY = {"High": "8.0", "Medium": "5.5", "Low": "2.0"}
 CSV_COLUMNS = ("id", "part", "severity", "confidence", "verdict", "status", "verification", "retest",
                "category", "cwe", "location", "title", "actor", "request", "impact", "fix",
-               "references", "fingerprint")
+               "references", "fingerprint", "owner", "review_by", "ticket", "decision_reason", "decided")
 SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
 
 LABELS = {
     "en": {
+        "owner": "Owner", "ticket": "Ticket", "decision": "Triage decision", "review_by": "Review by",
         "title": "Title", "summary": "Summary", "item": "Item", "value": "Value", "severity": "Severity",
         "confidence": "Confidence", "verdict": "Verdict", "method": "method", "verification": "Verification",
         "retest": "Retest", "perspective": "Perspective", "cwe": "CWE", "location": "Location",
@@ -81,6 +86,7 @@ LABELS = {
                     "incomplete": "Retest incomplete"},
     },
     "ja": {
+        "owner": "担当", "ticket": "チケット", "decision": "トリアージの判断", "review_by": "見直し期限",
         "title": "タイトル", "summary": "概要", "item": "項目", "value": "値", "severity": "深刻度",
         "confidence": "確度", "verdict": "検証判定", "method": "方法", "verification": "検証の根拠",
         "retest": "再テスト", "perspective": "観点", "cwe": "CWE", "location": "場所",
@@ -133,6 +139,11 @@ def select(data, ids):
     return [f for f in findings if f["id"] in wanted]
 
 
+def triage(finding):
+    record = finding.get("triage")
+    return record if isinstance(record, dict) else {}
+
+
 def state(finding):
     view = finding.get("_verification") or {}
     return view.get("level", "legacy"), view.get("retest", "not_requested")
@@ -150,7 +161,8 @@ def relative_uri(path):
 
 # --- SARIF ---------------------------------------------------------------
 
-def sarif(data, findings, include_fixed=False):
+def sarif(data, findings, include_fixed=False, as_of=None):
+    as_of = as_of or datetime.datetime.now(datetime.timezone.utc).date()
     rules, results, skipped = [], [], []
     meta = data["meta"]
     for f in findings:
@@ -199,9 +211,19 @@ def sarif(data, findings, include_fixed=False):
         if not included(f):
             result["suppressions"] = [{"kind": "external", "status": "accepted",
                                        "justification": shareable(f"{f['verdict']}: {f['validation'].get('evidence', '')}")}]
+        elif f["status"] == "Accepted" and acceptance_expired(f, as_of):
+            # The decision has lapsed: the alert comes back until it is decided again.
+            result["properties"]["acceptanceExpired"] = True
         elif f["status"] == "Accepted":
-            result["suppressions"] = [{"kind": "external", "status": "accepted",
-                                       "justification": "Risk accepted (status: Accepted)"}]
+            decision = triage(f)
+            justification = "Risk accepted (status: Accepted)"
+            if decision.get("reason"):
+                justification = "Risk accepted: " + shareable(decision["reason"])
+                details = [f"owner {shareable(decision['owner'])}" if decision.get("owner") else "",
+                           f"review by {decision['review_by']}" if decision.get("review_by") else ""]
+                if any(details):
+                    justification += " (" + "; ".join(d for d in details if d) + ")"
+            result["suppressions"] = [{"kind": "external", "status": "accepted", "justification": justification}]
         results.append(result)
     run_properties = {"project": shareable(meta.get("project", "")), "date": shareable(meta.get("date", "")),
                       "assessor": shareable(meta.get("assessor", "")), "method": shareable(meta.get("method", ""))}
@@ -235,7 +257,9 @@ def csv_text(findings):
                "title": f["title"], "actor": f.get("actor", ""), "request": f.get("request", ""),
                "impact": f.get("impact", ""), "fix": f.get("fix", ""),
                "references": " ".join(r["url"] for r in f.get("references", [])),
-               "fingerprint": fingerprint(f)}
+               "fingerprint": fingerprint(f), "owner": triage(f).get("owner", ""),
+               "review_by": triage(f).get("review_by", ""), "ticket": triage(f).get("ticket", ""),
+               "decision_reason": triage(f).get("reason", ""), "decided": triage(f).get("decided", "")}
         writer.writerow([spreadsheet_safe(row[c]) for c in CSV_COLUMNS])
     return buffer.getvalue()
 
@@ -285,6 +309,7 @@ def issue(data, f, lang):
              f"| {L['location']} | {_code(f['location'])} |",
              f"| {L['revision']} | {_cell(str(commit)) or '—'} |",
              f"| {L['date']} | {_cell(meta.get('date', ''))} / {_cell(meta.get('assessor', '') or '—')} |",
+             *triage_rows(f, L),
              "", f"## {L['happens']}", "", _md(f.get("impact")) or L["none"], "",
              f"## {L['repro']}", "", f"**{L['actor']}:** {_md(f.get('actor')) or L['none']}", "",
              f"**{L['request']}:**", "", _md(f.get("request")) or L["none"], "",
@@ -300,6 +325,20 @@ def issue(data, f, lang):
     lines += ["", f"## {L['questions']}", ""] + ([f"- {q}" for q in questions] or [L["no_questions"]])
     lines += ["", f"## {L['done']}", ""] + [f"- [ ] {item}" for item in L["done_items"]]
     return "\n".join(lines) + "\n"
+
+
+def triage_rows(f, L):
+    decision = triage(f)
+    rows = []
+    if decision.get("owner"):
+        rows.append(f"| {L['owner']} | {_cell(decision['owner'])} |")
+    if decision.get("ticket"):
+        rows.append(f"| {L['ticket']} | <{_link(decision['ticket'])}> |")
+    if decision.get("reason"):
+        rows.append(f"| {L['decision']} | {decision['status']} ({_cell(decision['decided'])}): {_cell(decision['reason'])} |")
+    if decision.get("review_by"):
+        rows.append(f"| {L['review_by']} | {_cell(decision['review_by'])} |")
+    return rows
 
 
 def write_issues(data, findings, out, lang, everything=False):
@@ -334,8 +373,11 @@ def main(argv=None):
     p.add_argument("--all", action="store_true", help="issues: draft every included finding, not only Open ones")
     p.add_argument("--include-fixed", action="store_true", help="sarif: also emit findings recorded as Fixed")
     p.add_argument("--bom", action="store_true", help="csv: start with a UTF-8 byte-order mark (for Excel)")
+    p.add_argument("--as-of", dest="as_of", help="sarif: date that decides whether an acceptance has expired "
+                   "(default: today, UTC)")
     args = p.parse_args(argv)
     try:
+        as_of = iso_date(args.as_of, "--as-of") if args.as_of else None
         data = read_record(args.findings)
         findings = select(data, args.ids)
     except (SchemaError, OSError, ExportError) as exc:
@@ -343,7 +385,7 @@ def main(argv=None):
         return 2
     try:
         if args.format == "sarif":
-            doc, skipped = sarif(data, findings, args.include_fixed)
+            doc, skipped = sarif(data, findings, args.include_fixed, as_of)
             write_file(args.out, json.dumps(doc, ensure_ascii=False, indent=2) + "\n")
             if skipped:
                 print("export: not emitted (location is not a relative path:line): " + ", ".join(skipped),

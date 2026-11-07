@@ -29,7 +29,7 @@ from report_schema import SchemaError
 from scan_report_kit.pdf import CHROME_CANDIDATES
 from scan_report_kit.output import write_output
 
-STEPS = ("merge", "inventory", "capture", "renumber", "render", "check")
+STEPS = ("merge", "inventory", "capture", "renumber", "triage", "render", "check")
 PDF_LIMIT = "assessment.pdf not produced"
 FINISH_LIMIT = "Runner finish: dependency inventory unavailable"
 # Interrupted tools get this long to stop their own sessions before the group is
@@ -288,6 +288,8 @@ def operation(args, root, state, fd, emit=True):
                                                 "--", state["repo"], *args.paths])
         elif args.step == "renumber":
             code = run("findings.py", ["renumber", findings])
+        elif args.step == "triage":
+            code = run("triage.py", ["apply", findings, Path(args.decisions).resolve()])
         elif args.step == "render":
             def render(where, *extra):
                 return run("render.py", [where / "findings.json", "--out", where, "--repo", state["repo"],
@@ -502,6 +504,8 @@ def main(argv=None):
         elif name == "capture":
             child.add_argument("paths", nargs="+")
             child.add_argument("--commit", default="HEAD")
+        elif name == "triage":
+            child.add_argument("decisions", help="a decisions file for triage.py apply")
         elif name == "render":
             child.add_argument("--no-pdf", action="store_true")
         elif name == "check":

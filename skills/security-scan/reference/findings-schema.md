@@ -191,7 +191,14 @@ computed by the renderer and cannot be set by an input flag.
 §5 specifies; optional `cwe` comes from `reference/coverage-trace.md`.
 
 `status` defaults to `Open`; `validation.verdict`
-defaults to `Unverified`. Findings marked `FalsePositive` or `NotApplicable` are
+defaults to `Unverified`. An optional `triage` object records the decision
+behind the status: `status` (equal to the finding's), `decided` (YYYY-MM-DD),
+`reason` (required for `Accepted` and `Fixed`), `owner`, `review_by`
+(required for `Accepted`, not before `decided`), `ticket` (http(s) URL), the
+`carried_from` baseline it was carried from and earlier decisions in `history`.
+It applies in every schema version, is written only by `scripts/triage.py`
+(a fragment cannot set it, or change `status` away from it), and never changes
+a verdict or the derived verification; see `reference/triage.md`. Findings marked `FalsePositive` or `NotApplicable` are
 left out of included totals and listed in a closing "excluded" section. The
 validation distribution intentionally includes all records; verdict
 rules are in `reference/validation.md`.

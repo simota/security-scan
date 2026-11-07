@@ -300,6 +300,29 @@ python3 skills/security-scan/scripts/compare.py before/out after/out --markdown 
 python3 skills/security-scan/scripts/compare.py before/out after/out --fail-on High   # exit 1 on an open new, reopened, escalated or regressed High
 ```
 
+### Triage: risk acceptance, ownership and rescans
+
+After the report, record what is decided about each finding. An acceptance
+needs a reason and a review date, a fix needs the change that fixed it, and an
+owner or ticket can be assigned to open work, one finding or many at a time.
+The decision is kept with its history and shown in the dashboard,
+assessment, CSV, SARIF and issue drafts; it never changes the verdict.
+
+```sh
+python3 skills/security-scan/scripts/triage.py set out/findings.json F-003 --status Accepted \
+  --reason "Reachable only from the admin VPN" --review-by 2027-01-31 --owner payments-team
+python3 skills/security-scan/scripts/triage.py set out/findings.json F-001 F-002 --owner alice
+python3 skills/security-scan/scripts/triage.py summary out/findings.json --fail-on-overdue   # owners, overdue and due acceptances
+python3 skills/security-scan/scripts/triage.py carry before/out after/out                    # keep decisions on a rescan
+```
+
+`carry` copies unexpired acceptances and assignments to the matching findings
+of a later run. It does not carry an acceptance whose review date has passed
+or whose severity rose, or a `Fixed` finding that was reported again. An
+acceptance past its review date counts as open in `compare.py --fail-on`, is
+emitted unsuppressed in SARIF, and is marked in the dashboard. See
+`skills/security-scan/reference/triage.md`.
+
 ### SARIF and CSV exports
 
 `export.py sarif` writes SARIF 2.1.0 for GitHub code scanning and IDEs: a rule
