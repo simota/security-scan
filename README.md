@@ -116,7 +116,10 @@ the remaining report operations without stopping at an incomplete optional
 step: first-time offline inventory, rendering, then the contract check. It
 reports all outcomes together, preserves existing dependency review, and leaves
 failed inventory for an explicit permitted retry. `status <run>` also exposes
-a read-only snapshot while another operation is running.
+a read-only snapshot while another operation is running. The agent records
+each phase with `phase <run> <PHASE> [--done N --total M]`, and
+`progress <run> --text` shows the phase, percent complete and an estimated
+finish time from the run's own pace.
 
 ### Same result on every host
 

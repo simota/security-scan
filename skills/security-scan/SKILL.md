@@ -35,6 +35,8 @@ the host's file-write tool. `init` prints the fresh `<run>` path and `<run>/out`
 ```sh
 python3 scripts/scan_run.py init <repo> --meta <metadata-fragment> --parent <writable-parent> --lang ja
 python3 scripts/scan_run.py preflight <run>
+python3 scripts/scan_run.py phase <run> REVIEW --total <units> --done <n>   # at each phase start and as units finish
+python3 scripts/scan_run.py progress <run> --text   # phase, percent, estimated finish
 python3 scripts/scan_run.py inventory <run>
 python3 scripts/scan_run.py merge <run> <scratch-fragment>
 python3 scripts/scan_run.py capture <run> <repo-relative-source-path>
@@ -46,7 +48,12 @@ python3 scripts/scan_run.py triage <run> <scratch-decisions>   # after the repor
 Use `<run>/scratch` for finding fragments; `<run>/out` is the contract's `<out>`.
 The first metadata merge is performed by `init`; update scope metadata after
 RECON rather than initializing the record again. Continue the ordinary review
-phases between commands. Inventory is offline unless `inventory --audit` is
+phases between commands. Record each phase as it starts with `phase <run> <PHASE>`
+(`DONE` after the chat summary); in REVIEW pass `--total` as the number of review
+units and `--done` as each finishes, in VERIFY the findings to verify. At each
+phase change, give the requester the `progress <run> --text` line. Its estimate
+comes only from these marks, assumed phase weights and the run's own pace;
+report it as an estimate. Inventory is offline unless `inventory --audit` is
 explicitly requested and its package-list disclosure authorized; a later
 inventory replaces `D-*` reviews just as `deps_scan.py --into` does. Use
 `renumber <run>` before capture if required. After source review, `finish <run>`

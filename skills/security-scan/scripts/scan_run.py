@@ -37,6 +37,10 @@ FINISH_LIMIT = "Runner finish: dependency inventory unavailable"
 CLEANUP_GRACE = 15
 # Held while outputs are swapped in and recorded, so a stop cannot land between.
 TERMINATION = {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
+# Review phases in order, with assumed relative effort used only until the run's
+# own pace is observed. Estimates are planning aids, never a commitment.
+PHASES = ("RECON", "CHECKLIST", "REVIEW", "VERIFY", "REPORT")
+WEIGHTS = {"RECON": 20, "CHECKLIST": 10, "REVIEW": 40, "VERIFY": 20, "REPORT": 10}
 
 
 def stamp():
@@ -369,6 +373,114 @@ def operation(args, root, state, fd, emit=True):
     return 130 if stopped else event["exit_code"]
 
 
+def seconds_between(start, end):
+    return max(0.0, (end - datetime.fromisoformat(start)).total_seconds())
+
+
+def mark_phase(state, name, done, total, now):
+    """Record the agent-reported phase; the same phase again updates its counts."""
+    marks = state.setdefault("progress", [])
+    current = marks[-1] if marks else None
+    if current is not None and "finished" not in current and current["phase"] == name:
+        mark = current
+    else:
+        if current is not None and "finished" not in current:
+            current["finished"] = now
+        if name == "DONE":
+            return
+        mark = {"phase": name, "started": now}
+        marks.append(mark)
+    if total is not None:
+        mark["total"] = total
+    if done is not None:
+        mark["done"] = done
+    if mark.get("done", 0) > mark.get("total", mark.get("done", 0)):
+        raise ValueError("--done cannot exceed --total")
+    mark["updated"] = now
+
+
+def progress(state, now=None):
+    """Estimate from recorded phase marks only; nothing is executed or inferred
+    from the review content. Unknown stays unknown rather than guessed."""
+    now = now or datetime.now(timezone.utc)
+    marks = state.get("progress") or []
+    running = [{"step": e["step"], "elapsed_seconds": round(seconds_between(e["started"], now))}
+               for e in state["history"] if e.get("status") == "running" and "started" in e]
+    result = {"phase": None, "phase_index": None, "phases": len(PHASES), "percent": 0,
+              "elapsed_seconds": None, "remaining_seconds": None, "eta": None,
+              "basis": "no phase recorded", "running": running}
+    if not marks:
+        return result
+    elapsed = seconds_between(marks[0]["started"], now)
+    result["elapsed_seconds"] = round(elapsed)
+    last = marks[-1]
+    if "finished" in last:
+        return {**result, "phase": "DONE", "percent": 100, "remaining_seconds": 0,
+                "elapsed_seconds": round(seconds_between(marks[0]["started"],
+                                                         datetime.fromisoformat(last["finished"]))),
+                "eta": last["finished"], "basis": "all phases recorded complete"}
+    index = PHASES.index(last["phase"])
+    weight = WEIGHTS[last["phase"]]
+    # A phase skipped or passed counts as done: the agent moved beyond it.
+    before = sum(WEIGHTS[name] for name in PHASES[:index])
+    after = sum(WEIGHTS[name] for name in PHASES[index + 1:])
+    in_phase = seconds_between(last["started"], now)
+    spent_before = elapsed - in_phase
+    done, total = last.get("done"), last.get("total")
+    fraction = done / total if total and done is not None else None
+    result.update(phase=last["phase"], phase_index=index + 1,
+                  percent=round(before + weight * (fraction or 0)))
+    if total is not None:
+        result["units"] = {"done": done or 0, "total": total}
+    if before and spent_before > 0:
+        pace = spent_before / before
+        basis = "pace of completed phases"
+    elif fraction:
+        pace = in_phase / (weight * fraction)
+        basis = "pace of units in the current phase"
+    else:
+        result["basis"] = "unknown until a phase completes or units are reported"
+        return result
+    if fraction:
+        current_left = in_phase / fraction - in_phase
+        basis += "; current phase from its units"
+    else:
+        current_left = max(0.0, pace * weight - in_phase)
+    remaining = current_left + pace * after
+    result.update(remaining_seconds=round(remaining), basis=basis,
+                  eta=datetime.fromtimestamp(now.timestamp() + remaining, timezone.utc).isoformat())
+    return result
+
+
+def progress_line(report, lang):
+    """One line for chat or a terminal; the JSON form carries the same values."""
+    def span(seconds):
+        if seconds is None:
+            return "?"
+        minutes = round(seconds / 60)
+        return f"{minutes // 60}h{minutes % 60:02d}m" if minutes >= 60 else f"{minutes}m"
+
+    ja = lang == "ja"
+    if report["phase"] is None:
+        return "進捗未記録" if ja else "no progress recorded"
+    eta = (datetime.fromisoformat(report["eta"]).astimezone().strftime("%H:%M")
+           if report["eta"] else None)
+    phase = ("完了" if ja else "done") if report["phase"] == "DONE" else (
+        f"{report['phase']} {report['phase_index']}/{report['phases']}")
+    parts = [phase]
+    if "units" in report:
+        parts.append(f"{report['units']['done']}/{report['units']['total']}")
+    parts.append(f"{report['percent']}%")
+    parts.append(("経過 " if ja else "elapsed ") + span(report["elapsed_seconds"]))
+    if report["phase"] != "DONE":
+        parts.append((f"残り約 {span(report['remaining_seconds'])} (完了見込み {eta})" if ja else
+                      f"~{span(report['remaining_seconds'])} left (ETA {eta})") if eta else
+                     ("残り時間は推定不可" if ja else "time left unknown"))
+    for item in report["running"]:
+        parts.append(f"{item['step']} " + ("実行中 " if ja else "running ") + span(item["elapsed_seconds"]))
+    return " · ".join(parts)
+
+
 def finish(args, root, state, fd):
     """Deliver independent reporting work without retrying a failed operation."""
     recover(root, state)
@@ -476,6 +588,13 @@ def positive_seconds(value):
     return seconds
 
 
+def count(value):
+    number = int(value)
+    if number < 0:
+        raise argparse.ArgumentTypeError("must be zero or more")
+    return number
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="step", required=True)
@@ -488,6 +607,14 @@ def main(argv=None):
     for name in ("status", "preflight"):
         inspect = sub.add_parser(name, help="inspect the run without executing or retrying tools")
         inspect.add_argument("run", type=Path)
+    mark = sub.add_parser("phase", help="record the review phase the agent is starting or its unit counts")
+    mark.add_argument("run", type=Path)
+    mark.add_argument("name", type=str.upper, choices=(*PHASES, "DONE"))
+    mark.add_argument("--done", type=count)
+    mark.add_argument("--total", type=count)
+    view = sub.add_parser("progress", help="show phase, completion and estimated finish without locking")
+    view.add_argument("run", type=Path)
+    view.add_argument("--text", action="store_true", help="one line instead of JSON")
     final = sub.add_parser("finish", help="finish independent report operations despite incomplete steps")
     final.add_argument("run", type=Path)
     final.add_argument("--timeout", type=positive_seconds, default=60)
@@ -540,11 +667,23 @@ def dispatch(args):
             root = args.run.resolve(strict=True)
             directory(root)
             state = load(root)
+        if args.step == "progress":
+            # Reads the atomically replaced journal only, so it works while
+            # another operation holds the lock.
+            report = progress(state)
+            print(progress_line(report, state["lang"]) if args.text
+                  else json.dumps({"run": str(root), **report}, ensure_ascii=False, indent=2))
+            return 0
         with run_lock(root) as fd:
             # Re-read under the lock; concurrent invocations cannot lose history.
             state = load(root)
             if args.step == "finish":
                 return finish(args, root, state, fd)
+            if args.step == "phase":
+                mark_phase(state, args.name, args.done, args.total, stamp())
+                save(root, state)
+                print(json.dumps({"run": str(root), **progress(state)}, ensure_ascii=False))
+                return 0
             if args.step == "preflight":
                 recover(root, state)
                 state["preflight"] = preflight(root, state)

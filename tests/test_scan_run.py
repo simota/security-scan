@@ -65,6 +65,42 @@ class ScanRunTests(unittest.TestCase):
             "limitations": ["invariant ledger and close-check not machine-checked (no invariant_ledger opt-in)"]})
         self.assertEqual(self.cli("merge", self.root, fragment).returncode, 0)
 
+    def test_progress_estimates_from_recorded_phases_and_units(self):
+        from datetime import datetime, timedelta, timezone
+        t0 = datetime(2026, 11, 7, 9, 0, tzinfo=timezone.utc)
+        at = lambda minutes: (t0 + timedelta(minutes=minutes)).isoformat()
+        state = {"history": []}
+        self.assertEqual(runner.progress(state, t0)["basis"], "no phase recorded")
+        runner.mark_phase(state, "RECON", None, None, at(0))
+        early = runner.progress(state, t0 + timedelta(minutes=5))
+        # Nothing completed and no units: no estimate is invented.
+        self.assertEqual((early["phase_index"], early["percent"], early["eta"]), (1, 0, None))
+        runner.mark_phase(state, "CHECKLIST", None, None, at(20))
+        runner.mark_phase(state, "REVIEW", 0, 4, at(30))
+        runner.mark_phase(state, "REVIEW", 2, None, at(50))
+        report = runner.progress(state, t0 + timedelta(minutes=50))
+        # 30 weight points took 30 minutes; half of REVIEW took 20 minutes.
+        self.assertEqual((report["phase"], report["percent"], report["units"]), ("REVIEW", 50, {"done": 2, "total": 4}))
+        self.assertEqual(report["remaining_seconds"], (20 + 30) * 60)
+        self.assertEqual(report["eta"], at(100))
+        with self.assertRaises(ValueError):
+            runner.mark_phase(state, "REVIEW", 5, None, at(55))
+        runner.mark_phase(state, "DONE", None, None, at(90))
+        final = runner.progress(state, t0 + timedelta(hours=5))
+        self.assertEqual((final["phase"], final["percent"], final["elapsed_seconds"]), ("DONE", 100, 90 * 60))
+        self.assertIn("完了", runner.progress_line(final, "ja"))
+
+    def test_progress_reads_the_journal_while_another_operation_holds_the_lock(self):
+        self.assertEqual(self.cli("phase", self.root, "review", "--total", "3", "--done", "1").returncode, 0)
+        self.assertEqual(self.state()["progress"][0]["phase"], "REVIEW")
+        with runner.run_lock(self.root):
+            busy = self.cli("phase", self.root, "VERIFY")
+            shown = self.cli("progress", self.root, "--text")
+        self.assertEqual(busy.returncode, 3)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertTrue(shown.stdout.startswith("REVIEW 3/5 · 1/3 · 43%"), shown.stdout)
+        self.assertEqual(self.cli("phase", self.root, "NOPE").returncode, 2)
+
     def test_triage_step_records_decisions_through_a_staged_publication(self):
         finding = {"id": "F-001", "title": "Order detail lacks a tenant check", "severity": "High",
                    "confidence": "Confirmed", "location": "app.py:2", "category": "Actor and tenant"}

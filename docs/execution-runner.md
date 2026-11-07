@@ -110,6 +110,40 @@ inferred from a saved checkpoint. As with `deps_scan.py --into`, another
 inventory replaces dependency auto-triage and preserves manual reviews as
 history; do the final inventory before per-package review.
 
+## Progress and estimated finish
+
+The review itself happens between runner commands, so the runner cannot see
+it. The reviewing agent records where it is instead:
+
+```sh
+python3 scripts/scan_run.py phase <run> RECON
+python3 scripts/scan_run.py phase <run> REVIEW --total 12 --done 0
+python3 scripts/scan_run.py phase <run> REVIEW --done 5     # same phase: updates counts
+python3 scripts/scan_run.py phase <run> DONE                # closes the last phase
+python3 scripts/scan_run.py progress <run> --text
+```
+
+Phases are `RECON`, `CHECKLIST`, `REVIEW`, `VERIFY` and `REPORT` (case does not
+matter); starting a new phase closes the previous one. A phase passed without a
+mark counts as done. `--done` cannot exceed `--total`. Marks are stored as
+`progress` in `state.json`; `phase` takes the run lock and exits `3` while
+another operation holds it.
+
+`progress` is read-only and takes no lock, so it can be run from another
+terminal while an operation is in progress. JSON output has the current phase
+and its index, `percent`, optional `units`, `elapsed_seconds`,
+`remaining_seconds`, `eta` (UTC), the `basis` of the estimate and any `running`
+runner operation; `--text` gives one line in the run's language, for example
+`REVIEW 3/5 · 5/12 · 47% · 経過 52m · 残り約 58m (完了見込み 15:40)`.
+
+Percent weighs the phases RECON 20, CHECKLIST 10, REVIEW 40, VERIFY 20, REPORT
+10, with the current phase prorated by its units. The remaining time uses the
+run's own pace: time per weight point over completed phases, or, before any
+phase completes, over the current phase's finished units. The current phase is
+projected from its units when reported, otherwise from that pace. With neither,
+`eta` is `null` rather than a guess. The weights are assumptions, so the
+estimate is a planning aid, not a commitment, and it moves as work proceeds.
+
 ## Deadlines, failure and recovery
 
 Each child command has a 60-second default deadline; set `--timeout SECONDS`
