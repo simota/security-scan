@@ -100,7 +100,7 @@ def _hash(value):
 def _normalized_finding(finding):
     """Match report_schema.load's benign defaults without omitting substantive inputs."""
     result = copy.deepcopy({k: v for k, v in finding.items()
-                            if k not in _DERIVED and k != "verification_workflow"})
+                            if k not in _DERIVED and k not in ("verification_workflow", "triage")})
     result.setdefault("status", "Open")
     for key in ("actor", "request", "impact", "fix"):
         result.setdefault(key, "")

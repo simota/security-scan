@@ -65,6 +65,17 @@ After source review and capture, finish the report with one command:
 python3 scripts/scan_run.py finish <run>
 ```
 
+After the report, the requester's triage decisions (risk acceptance with a
+review date, owner, ticket, recorded fix) are applied from a decisions file
+written with the file-write tool, then the report is rendered and checked
+again (`skills/security-scan/reference/triage.md`):
+
+```sh
+python3 scripts/scan_run.py triage <run> <run>/scratch/decisions.json
+python3 scripts/scan_run.py render <run>
+python3 scripts/scan_run.py check <run>
+```
+
 `finish` performs an offline inventory only if no inventory has yet been
 attempted or recorded, then renders and checks the report. An incomplete or
 failed stage does not prevent independent stages from running. It preserves

@@ -44,7 +44,11 @@ the comparison is summarized.
 `--fail-on SEVERITY` exits 1 when an open new or reopened finding is at that
 severity or above, or an open persisting finding at that severity was raised
 into that range or was recorded `Fixed` in the baseline (a regressed fix);
-`Accepted` and `Fixed` findings never block. Exit 2 means unreadable or invalid
+`Accepted` and `Fixed` findings do not block, except an acceptance whose
+recorded review date (`reference/triage.md`) has passed by `--as-of` (default
+today, UTC): it counts as open, and so does a persisting finding whose baseline
+acceptance expired. To keep earlier decisions on a rescan, run
+`scripts/triage.py carry <baseline> <current>` before comparing. Exit 2 means unreadable or invalid
 input, or an unsafe output path (a symlink or non-regular file).
 
 ## Exports
@@ -64,19 +68,23 @@ python3 scripts/export.py issues <out>/findings.json --out <scratch>/issues --la
   a digest of part, file, weakness class and title that ignores IDs and line
   drift so an alert follows its finding across rescans. Ruled-out findings are
   emitted with an external, accepted suppression carrying the exclusion
-  evidence; `Accepted` ones with a risk-accepted suppression; `Fixed` ones are
+  evidence; `Accepted` ones with a risk-accepted suppression carrying the
+  triage reason, owner and review date (an acceptance past its review date by
+  `--as-of` is emitted unsuppressed with `acceptanceExpired: true`); `Fixed` ones are
   left out unless `--include-fixed`. Findings without a relative `path:line`
   (absolute or `..` paths, platform notes) are not emitted and are named on
   stderr and in `runs[0].properties.unlocatedFindings`
 - **CSV**: one row per finding with ID, part, severity, confidence, verdict,
   status, derived verification and retest codes, category, CWE, location, the
-  reproduction fields, reference URLs and the same fingerprint. Cells that
+  reproduction fields, reference URLs, the same fingerprint, and the triage
+  owner, review date, ticket, decision reason and decision date. Cells that
   start like a spreadsheet formula get a leading `'`. `--bom` helps Excel open
   UTF-8 Japanese text
 - **Issue drafts**: one Markdown file per open, included finding (`--all`: every
   included finding) following `templates/issue.<lang>.md`, plus `index.md`.
   An open High or Medium is labelled for a private tracker or security
-  advisory. Record text is escaped so a draft carries no markup, and no source
+  advisory. A recorded owner, ticket and decision appear in the summary
+  table. Record text is escaped so a draft carries no markup, and no source
   excerpts are included. The directory must be new or empty. Filing is the
   requester's step (`SKILL.md`, *Decide first*)
 

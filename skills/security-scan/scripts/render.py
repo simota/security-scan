@@ -829,9 +829,27 @@ def display_finding(finding, state):
             public[key] = {k: finding[key][k] for k in VALIDATION_FIELDS if k in finding[key]}
     if "references" in finding:
         public["references"] = [public_reference(r) for r in finding["references"]]
+    if isinstance(finding.get("triage"), dict):
+        public["triage"] = display_triage(finding["triage"])
     public["part"] = finding_part(finding)
     public["_verification"] = public_verification_state(state)
     return public
+
+
+TRIAGE_SHOWN = ("status", "owner", "reason", "decided", "review_by", "ticket")
+
+
+def display_triage(triage):
+    """The validated triage fields only; reference-style links lose token-like parameters."""
+    view = {k: triage[k] for k in TRIAGE_SHOWN if triage.get(k)}
+    if view.get("ticket"):
+        view["ticket"] = public_href(view["ticket"])
+    carried = triage.get("carried_from")
+    if isinstance(carried, dict):
+        view["carried_from"] = {k: carried[k] for k in ("baseline_id", "date") if carried.get(k)}
+    view["history"] = [{k: e[k] for k in ("status", "owner", "reason", "decided", "review_by") if e.get(k)}
+                       for e in triage.get("history", []) if isinstance(e, dict)]
+    return view
 
 
 def workflow_states(data, integrity=None):
@@ -923,6 +941,18 @@ def unverified_headline(model, L):
     n, m = model["unverified"], model["insufficient_high"]
     line = plural(L, "unverified_line", n, high=model["unverified_high"]) if n else L["none_unverified_line"]
     return line + (L["sentence_sep"] + plural(L, "insufficient_high_line", m, m=m) if m else "")
+
+
+LABELS["en"].update(
+    triage="Triage decision", owner="Owner", review_by="Review by", ticket="Ticket", decided="Decided",
+    decision_reason="Reason", carried_from="Carried from the assessment of {date} ({id})",
+    review_overdue="review date passed", triage_history="Earlier decisions",
+    triage_note="A recorded decision about remediation; it does not change the verdict or verification.")
+LABELS["ja"].update(
+    triage="トリアージの判断", owner="担当", review_by="見直し期限", ticket="チケット", decided="判断日",
+    decision_reason="理由", carried_from="{date} の診断（{id}）から引き継いだ判断",
+    review_overdue="見直し期限を過ぎています", triage_history="以前の判断",
+    triage_note="対応についての判断の記録です。検証判定や検証の根拠は変更しません。")
 
 
 ASSESSMENT_LABELS = {
@@ -1732,6 +1762,25 @@ def render_assessment_html(data, L, lang, integrity=None):
     def field(label, markup):
         return f"<div class='finding-field'><h4>{esc(L[label])}</h4>{markup}</div>"
 
+    def triage_html(view):
+        rows = [("status", esc(view["status"]) + (f" ({esc(view['decided'])})" if view.get("decided") else ""))]
+        for key in ("owner", "review_by"):
+            if view.get(key):
+                rows.append((key, esc(view[key])))
+        if view.get("ticket"):
+            rows.append(("ticket", f"<a href='{esc(view['ticket'])}'>{esc(view['ticket'])}</a>"))
+        if view.get("reason"):
+            rows.append(("decision_reason", esc(view["reason"])))
+        markup = "".join(f"<p class='finding-context prose'><strong>{esc(L[k])}:</strong> {v}</p>" for k, v in rows)
+        carried = view.get("carried_from")
+        if carried:
+            markup += (f"<p class='small'>{esc(L['carried_from'].format(date=carried.get('date') or '—', id=carried['baseline_id']))}</p>")
+        if view["history"]:
+            markup += f"<p class='small'><strong>{esc(L['triage_history'])}:</strong> " + "; ".join(
+                esc(" ".join(x for x in (e.get("decided", ""), e.get("status", ""), e.get("owner", ""), e.get("reason", "")) if x))
+                for e in view["history"]) + "</p>"
+        return markup + f"<p class='small'>{esc(L['triage_note'])}</p>"
+
     def badge(f):
         return f"<span class='badge {esc(f['severity'])}'>{esc(f['severity'])}</span>"
 
@@ -1849,6 +1898,8 @@ def render_assessment_html(data, L, lang, integrity=None):
         if validation.get("method"):
             evidence += f"<p class='small validation-method'><strong>{esc(L['a_method'])}:</strong> {esc(validation['method'])}</p>"
         content += field("evidence", evidence)
+        if isinstance(f.get("triage"), dict) and not is_excluded:
+            content += field("triage", triage_html(display_triage(f["triage"])))
         content += workflow_html(workflow_views.get(f["id"]), L)
         content += verification_html(verification_views[f["id"]], L)
         for key in ("actor", "request"):
@@ -2036,10 +2087,19 @@ if(f.status==='Open'&&!excluded(f)){var a=action(f),guidance=el('div',{'class':'
 function field(label,value){dl.appendChild(el('dt',null,label));var dd=el('dd');if(value instanceof Node)dd.appendChild(value);else dd.textContent=value;dl.appendChild(dd);}
 field(L.location,f.location);if(f.cwe)field(L.cwe,f.cwe);['actor','request','impact'].forEach(function(k){if(f[k])field(L[k],f[k]);});field(L.fix,f.fix||(f.status==='Open'&&!excluded(f)?L.missing_fix:L.not_recorded));field(L.evidence,f.validation.evidence||L.missing_evidence);if(f.validation.method)field(L.validation_method,f.validation.method);
 if(f.snippet){var pre=el('pre',{'class':'snippet'});f.snippet.lines.forEach(function(text,i){var n=f.snippet.start+i,ln=el('span',{'class':n>=f.snippet.hit[0]&&n<=f.snippet.hit[1]?'hit':''});ln.appendChild(el('b',null,String(n).padStart(5,' ')+' '));ln.appendChild(document.createTextNode(text));pre.appendChild(ln);});field(L.snippet,pre);if(f.snippet.truncated)field(L.note,L.snippet_truncated);}
-var refs=(f.source_link?[{type:'source',url:f.source_link,title:L.source_link}]:[]).concat(f.references||[]);if(refs.length){var ul=el('ul',{'class':'refs'});refs.forEach(function(r){var li=el('li');li.appendChild(el('span',{'class':'rt'},r.type));li.appendChild(el('a',{href:r.url,target:'_blank',rel:'noopener noreferrer'},r.title||r.url));ul.appendChild(li);});field(L.references,ul);}td.appendChild(dl);var workflow=workflowNode(f);if(workflow)td.appendChild(workflow);td.appendChild(verificationNode(f));
+var refs=(f.source_link?[{type:'source',url:f.source_link,title:L.source_link}]:[]).concat(f.references||[]);if(refs.length){var ul=el('ul',{'class':'refs'});refs.forEach(function(r){var li=el('li');li.appendChild(el('span',{'class':'rt'},r.type));li.appendChild(el('a',{href:r.url,target:'_blank',rel:'noopener noreferrer'},r.title||r.url));ul.appendChild(li);});field(L.references,ul);}td.appendChild(dl);if(f.triage&&!excluded(f))td.appendChild(triageNode(f.triage));var workflow=workflowNode(f);if(workflow)td.appendChild(workflow);td.appendChild(verificationNode(f));
 if(f.previous_validation&&typeof f.previous_validation==='object'){var history=el('aside',{'class':'history'});history.appendChild(el('strong',null,L.previous_validation));history.appendChild(el('p',null,L.history_note));['verdict','evidence','method'].forEach(function(k){if(typeof f.previous_validation[k]==='string')history.appendChild(el('p',null,f.previous_validation[k]));});td.appendChild(history);}dt.appendChild(td);}
+var TODAY=new Date().toISOString().slice(0,10);
+function triageNode(t){var box=el('aside',{'class':'triage'}),dl=el('dl');box.appendChild(el('strong',null,L.triage));
+function row(label,value){dl.appendChild(el('dt',null,label));var dd=el('dd');if(value instanceof Node)dd.appendChild(value);else dd.textContent=value;dl.appendChild(dd);}
+row(L.status,t.status+(t.decided?' ('+t.decided+')':''));if(t.owner)row(L.owner,t.owner);
+if(t.review_by){var rb=el('span',null,t.review_by);if(t.status==='Accepted'&&t.review_by<TODAY){rb.appendChild(document.createTextNode(' '));rb.appendChild(el('span',{'class':'overdue'},L.review_overdue));}row(L.review_by,rb);}
+if(t.ticket)row(L.ticket,el('a',{href:t.ticket,target:'_blank',rel:'noopener noreferrer'},t.ticket));if(t.reason)row(L.decision_reason,t.reason);box.appendChild(dl);
+if(t.carried_from)box.appendChild(el('p',{'class':'muted'},L.carried_from.replace('{date}',t.carried_from.date||'—').replace('{id}',t.carried_from.baseline_id)));
+if(t.history&&t.history.length){var ul=el('ul');t.history.forEach(function(e){ul.appendChild(el('li',null,[e.decided,e.status,e.owner,e.reason].filter(Boolean).join(' · ')));});box.appendChild(el('p',{'class':'muted'},L.triage_history));box.appendChild(ul);}
+box.appendChild(el('p',{'class':'muted'},L.triage_note));return box;}
 var searchCache=new Map();
-function searchText(f){if(searchCache.has(f))return searchCache.get(f);var val=f.validation||{},text=[f.id,f.title,f.location,f.category,f.actor,f.request,f.impact,f.fix,f.cwe,f.status,f.severity,f.confidence,f.verdict,val.evidence,val.method].filter(Boolean).join('\n').toLowerCase();searchCache.set(f,text);return text;}
+function searchText(f){if(searchCache.has(f))return searchCache.get(f);var val=f.validation||{},tr=f.triage||{},text=[f.id,f.title,f.location,f.category,f.actor,f.request,f.impact,f.fix,f.cwe,f.status,f.severity,f.confidence,f.verdict,val.evidence,val.method,tr.owner,tr.ticket,tr.reason].filter(Boolean).join('\n').toLowerCase();searchCache.set(f,text);return text;}
 function draw(){clearTimeout(searchTimer);var tb=byId('rows');tb.textContent='';var term=q.value.trim().toLowerCase(),scope=v('f-scope');var pool=scope==='all'?ALL:ALL.filter(function(f){return scope==='excluded'?excluded(f):!excluded(f);});var shown=pool.filter(function(f){return (!v('f-part')||f.part===v('f-part'))&&(!v('f-sev')||f.severity===v('f-sev'))&&(!v('f-conf')||f.confidence===v('f-conf'))&&(!v('f-cat')||f.category===v('f-cat'))&&(!v('f-status')||f.status===v('f-status'))&&(!v('f-verdict')||f.verdict===v('f-verdict'))&&(!term||searchText(f).indexOf(term)>=0);});
 shown.sort(function(a,b){var status=v('f-sort')==='priority'?Number(a.status!=='Open')-Number(b.status!=='Open'):0;return status||SEV.indexOf(a.severity)-SEV.indexOf(b.severity)||(v('f-sort')==='priority'?Number(action(a)!=='fix_now')-Number(action(b)!=='fix_now'):0)||Number(a.part==='deps')-Number(b.part==='deps')||(String(a.id)<String(b.id)?-1:String(a.id)>String(b.id)?1:0);});
 byId('result-count').textContent=fmt(L.showing,{shown:shown.length,total:pool.length});
@@ -2080,6 +2140,7 @@ DASHBOARD_CSS = """
 .verification-record .prose,.workflow-record .prose{white-space:pre-wrap;overflow-wrap:anywhere}
 .verification-level,.workflow-status,.workflow-next{display:block;font-size:12px;font-weight:600;margin-top:7px}
 .history{border:1px dashed var(--line);padding:12px;margin-top:16px}
+.triage{border:1px solid var(--line);padding:12px;margin-top:16px}.triage .overdue{font-weight:700;text-decoration:underline}
 .history p{margin:5px 0;white-space:pre-wrap}
 .verification-record,.workflow-record{border:0;border-left:1px solid var(--line);border-radius:0;padding:4px 0 4px 16px}
 .expert-summary h3,.three-pass-summary h3{margin-top:0}

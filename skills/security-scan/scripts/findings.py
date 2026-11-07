@@ -34,6 +34,9 @@ A fragment, and so one merge of several fragments, adds at most five new
 findings (updates to recorded ones are not counted), so a refused write loses
 at most that batch.
 
+Triage decisions (`status` with a `triage` record: owner, reason, review
+date) are recorded with triage.py, never in a fragment.
+
 `D-*` findings belong to deps_scan.py: a fragment may only add `validation` or
 `verification` to an existing `D-*` ID, never create one or change its other fields.
 
@@ -153,6 +156,8 @@ def fragment_problems(fragment, name, base=None):
             seen.add(identifier)
             if key == "findings" and RESERVED_FINDING.intersection(record):
                 problems.append(f"{name}: {identifier}: workflow journals and derived fields cannot be merged")
+            if key == "findings" and "triage" in record:
+                problems.append(f"{name}: {identifier}: triage decisions are recorded with triage.py set/apply")
             if key == "findings" and not FINDING_ID.fullmatch(identifier):
                 problems.append(f"{name}: finding id {identifier!r} must be F-NNN (code) or D-NNN (deps_scan.py)")
                 continue
@@ -306,7 +311,8 @@ def renumber_map(findings):
 
 
 # Values that name a file or a URL, not a finding: src/F-002/view.py and .../browse/F-001 keep their text.
-NOT_REFERENCES = {"location", "url", "source_url"}
+# A carried triage decision's baseline_id names a finding of another run.
+NOT_REFERENCES = {"location", "url", "source_url", "baseline_id"}
 
 
 def renumber(data, mapping):
